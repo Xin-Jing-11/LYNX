@@ -4,19 +4,62 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Options
-option(USE_MKL "Use Intel MKL" ON)
+option(USE_MKL "Use Intel MKL for BLAS/LAPACK/ScaLAPACK" OFF)
 option(USE_CUDA "Enable CUDA" OFF)
 option(BUILD_TESTS "Build tests" ON)
 
 # MPI
 find_package(MPI REQUIRED)
 
-# MKL
+# --- Math libraries (BLAS, LAPACK, ScaLAPACK) ---
 if(USE_MKL)
     set(MKL_THREADING sequential)
     find_package(MKL CONFIG QUIET)
     if(NOT MKL_FOUND)
         include(cmake/FindMKL.cmake)
+    endif()
+    if(MKL_FOUND)
+        set(MATH_LIBRARIES ${MKL_LIBRARIES})
+        set(MATH_INCLUDE_DIRS ${MKL_INCLUDE_DIRS})
+        set(MATH_DEFINES USE_MKL)
+        message(STATUS "Using Intel MKL")
+    else()
+        message(WARNING "MKL requested but not found, falling back to OpenBLAS")
+        set(USE_MKL OFF)
+    endif()
+endif()
+
+if(NOT USE_MKL)
+    # Find OpenBLAS
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+
+    # Find ScaLAPACK
+    find_library(SCALAPACK_LIB scalapack-openmpi
+        HINTS /usr/lib/x86_64-linux-gnu /usr/lib
+    )
+    if(NOT SCALAPACK_LIB)
+        find_library(SCALAPACK_LIB scalapack
+            HINTS /usr/lib/x86_64-linux-gnu /usr/lib
+        )
+    endif()
+
+    if(SCALAPACK_LIB)
+        message(STATUS "Found ScaLAPACK: ${SCALAPACK_LIB}")
+    else()
+        message(WARNING "ScaLAPACK not found — distributed eigensolvers will be unavailable")
+    endif()
+
+    set(MATH_LIBRARIES ${LAPACK_LIBRARIES} ${BLAS_LIBRARIES})
+    if(SCALAPACK_LIB)
+        list(APPEND MATH_LIBRARIES ${SCALAPACK_LIB})
+    endif()
+    set(MATH_INCLUDE_DIRS "")
+    set(MATH_DEFINES "")
+    if(SCALAPACK_LIB)
+        message(STATUS "Using OpenBLAS + LAPACK + ScaLAPACK")
+    else()
+        message(STATUS "Using OpenBLAS + LAPACK")
     endif()
 endif()
 

@@ -1,0 +1,5 @@
+build/
+.git/
+.claude/
+*.o
+*.a
