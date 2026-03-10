@@ -8,6 +8,12 @@ add_executable(sparc_tests
     test_Laplacian.cpp
     test_HaloExchange.cpp
     test_Hamiltonian.cpp
+    test_Wavefunction.cpp
+    test_Occupation.cpp
+    test_XCFunctional.cpp
+    test_LinearSolver.cpp
+    test_ElectronDensity.cpp
+    test_Energy.cpp
 )
 target_link_libraries(sparc_tests PRIVATE sparc_core GTest::gtest_main)
 include(GoogleTest)

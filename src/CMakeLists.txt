@@ -18,6 +18,16 @@ add_library(sparc_core
     operators/NonlocalProjector.cpp
     io/InputParser.cpp
     io/OutputWriter.cpp
+    electronic/Wavefunction.cpp
+    electronic/ElectronDensity.cpp
+    electronic/Occupation.cpp
+    xc/XCFunctional.cpp
+    solvers/LinearSolver.cpp
+    solvers/PoissonSolver.cpp
+    solvers/Mixer.cpp
+    solvers/EigenSolver.cpp
+    physics/Energy.cpp
+    physics/SCF.cpp
 )
 
 target_include_directories(sparc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
