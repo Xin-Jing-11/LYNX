@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <cstdio>
 
 namespace sparc {
 
@@ -24,178 +25,257 @@ void Mixer::setup(int Nd_d,
     halo_ = halo;
     grid_ = grid;
     dmcomm_ = dmcomm;
+    if (grid) Nd_ = grid->Nd();
 
     reset();
 }
 
 void Mixer::reset() {
     iter_ = 0;
-    dF_.clear();
-    dX_.clear();
-    dF_.reserve(m_);
-    dX_.reserve(m_);
-    f_prev_ = NDArray<double>();
-    x_prev_ = NDArray<double>();
+    x_km1_.clear();
+    f_k_.clear();
+    f_km1_.clear();
+    R_.clear();
+    F_.clear();
 }
 
-void Mixer::apply_kerker(const double* r, double* Pr) const {
+void Mixer::apply_kerker(const double* f, double amix, double* Pf) const {
     if (!laplacian_ || !halo_ || !dmcomm_) {
-        // No preconditioner available, just copy
-        std::memcpy(Pr, r, Nd_d_ * sizeof(double));
+        // No preconditioner available, just scale
+        for (int i = 0; i < Nd_d_; ++i)
+            Pf[i] = amix * f[i];
         return;
     }
-
-    // Kerker: P = -Lap / (-Lap + k_TF^2)
-    // Approximate: just apply a damping factor
-    // k_TF^2 ≈ some constant (Thomas-Fermi screening length)
-    // For simplicity, use the reference code's approach:
-    // Solve (-Lap + kTF^2)*Pr = -Lap*r via a few Richardson iterations
-
-    // Simple approximation: Pr = r (identity preconditioner for now)
-    // The full Kerker requires solving a modified Poisson equation.
-    // A practical approach: apply in Fourier-like manner using the Laplacian
 
     int Nd_d = Nd_d_;
     int nd_ex = halo_->nd_ex();
 
-    // Compute -Lap*r
-    std::vector<double> r_ex(nd_ex, 0.0);
-    halo_->execute(r, r_ex.data(), 1);
+    // Reference: Kerker_precond
+    // Step 1: Compute Lf = (Lap - idiemac*kTF²) * f
+    // where Lap_vec_mult with c = -idiemac*kTF² does: Lap*f + c*f
+    constexpr double kTF = 1.0;        // PRECOND_KERKER_KTF
+    constexpr double idiemac = 0.1;    // PRECOND_KERKER_THRESH
 
-    std::vector<double> Lapr(Nd_d);
-    laplacian_->apply(r_ex.data(), Lapr.data(), -1.0, 0.0, 1);
+    std::vector<double> f_ex(nd_ex, 0.0);
+    halo_->execute(f, f_ex.data(), 1);
 
-    // Solve (-Lap + kTF^2) * Pr = -Lap * r using AAR
-    constexpr double kTF2 = 1.0;  // Thomas-Fermi screening constant
+    std::vector<double> Lf(Nd_d);
+    // Lf = Lap*f + (-idiemac*kTF²)*f = (Lap - idiemac*kTF²)*f
+    laplacian_->apply(f_ex.data(), Lf.data(), 1.0, -idiemac * kTF * kTF, 1);
 
-    auto op = [this, Nd_d, kTF2](const double* x, double* Ax) {
+    // Step 2: Solve -(Lap - kTF²) * Pf = Lf
+    // i.e., (-Lap + kTF²) * Pf = -Lf  ... wait, reference uses:
+    //   AAR(pSPARC, res_fun, precond_fun, -lambda_TF^2, DMnd, Pf, Lf, ...)
+    // where res_fun computes: b + (Lap + c)*x = Lf + (Lap - kTF²)*x
+    // So residual = Lf - (-Lap + kTF²)*Pf, and we solve (-Lap + kTF²)*Pf = Lf
+    // Actually: res_fun = b + (Lap + c)*x where c = -kTF², so operator is (Lap - kTF²)
+    // We solve (Lap - kTF²)*Pf = -Lf  ... no.
+    // Let me re-check: AAR solves A*x = b where A*x = -(Lap + c)*x = -Lap*x - c*x
+    // with c = -kTF², A*x = -Lap*x + kTF²*x, and b = Lf
+    // Actually reference AAR: res = b - A*x, and the operator does b + (Lap+c)*x
+    // So it's solving: -(Lap + c)*x = b, i.e., (-Lap + kTF²)*x = Lf
+    // That means: (-Lap + kTF²)*Pf = Lf
+
+    auto op = [this, Nd_d](const double* x, double* Ax) {
         int nd_ex = halo_->nd_ex();
         std::vector<double> x_ex(nd_ex, 0.0);
         halo_->execute(x, x_ex.data(), 1);
-        laplacian_->apply(x_ex.data(), Ax, -1.0, 0.0, 1);
-        for (int i = 0; i < Nd_d; ++i) {
-            Ax[i] += kTF2 * x[i];
-        }
+        // (-Lap + kTF²)*x = -Lap*x + kTF²*x
+        laplacian_->apply(x_ex.data(), Ax, -1.0, kTF * kTF, 1);
     };
 
-    // Initial guess: Pr = r
-    std::memcpy(Pr, r, Nd_d * sizeof(double));
+    // Jacobi preconditioner for the operator -(Lap + c) where c = -kTF²
+    // Reference: m_inv = (D2_coeff_x[0] + D2_coeff_y[0] + D2_coeff_z[0] + c)
+    //            m_inv = -1.0 / m_inv
+    //            f[i] = m_inv * r[i]
+    const auto& stencil = laplacian_->stencil();
+    double m_diag = stencil.D2_coeff_x()[0] + stencil.D2_coeff_y()[0]
+                  + stencil.D2_coeff_z()[0] + (-kTF * kTF);
+    double m_inv = (std::abs(m_diag) < 1e-14) ? 1.0 : (-1.0 / m_diag);
 
+    auto jacobi_precond = [m_inv, Nd_d](const double* r, double* z) {
+        for (int i = 0; i < Nd_d; ++i)
+            z[i] = m_inv * r[i];
+    };
+
+    // Initial guess: Pf = 0
+    std::memset(Pf, 0, Nd_d * sizeof(double));
+
+    // Reference uses omega=0.6, beta=0.6, m=7, p=6
     AARParams params;
     params.omega = 0.6;
     params.beta = 0.6;
-    params.m = 4;
-    params.p = 4;
-    params.tol = 1e-4;  // Don't need high accuracy for preconditioner
-    params.max_iter = 50;
+    params.m = 7;
+    params.p = 6;
+    params.tol = 1e-4;  // precond_tol from reference: TOL_PRECOND = 2.59E-04
+    params.max_iter = 1000;
 
-    LinearSolver::aar(op, Lapr.data(), Pr, Nd_d, params, *dmcomm_);
+    LinearSolver::PrecondFunc precond_fn = jacobi_precond;
+    LinearSolver::aar(op, Lf.data(), Pf, Nd_d, params, *dmcomm_, &precond_fn);
+
+    // Step 3: Scale by -amix (reference: Pf[i] *= -a)
+    for (int i = 0; i < Nd_d; ++i) {
+        Pf[i] *= -amix;
+    }
 }
 
-void Mixer::mix(double* x_in, const double* x_out, int Nd_d) {
-    // Compute residual: f = x_out - x_in
-    std::vector<double> f(Nd_d);
-    for (int i = 0; i < Nd_d; ++i) {
-        f[i] = x_out[i] - x_in[i];
+void Mixer::mix(double* x_k, const double* g_k, int Nd_d) {
+    // Reference: Mixing_periodic_pulay
+    // x_k = current input density (x^{in}_k)
+    // g_k = output density from SCF (g(x_k) = x^{out}_k)
+    // After this call, x_k is updated to x_{k+1}
+
+    int N = Nd_d;  // for non-spin, N = Nd_d
+
+    // Allocate state on first call
+    if (f_k_.empty()) {
+        f_k_.resize(N, 0.0);
+        f_km1_.resize(N, 0.0);
+        x_km1_.resize(N, 0.0);
+        R_.resize(N * m_, 0.0);
+        F_.resize(N * m_, 0.0);
     }
 
-    // Apply preconditioner to residual
-    std::vector<double> Pf(Nd_d);
-    if (precond_type_ == MixingPrecond::Kerker) {
-        apply_kerker(f.data(), Pf.data());
-    } else {
-        std::memcpy(Pf.data(), f.data(), Nd_d * sizeof(double));
+    // Save old residual: f_{k-1} = f_k
+    if (iter_ > 0) {
+        std::memcpy(f_km1_.data(), f_k_.data(), N * sizeof(double));
     }
 
-    if (iter_ == 0) {
-        // First iteration: simple mixing
-        for (int i = 0; i < Nd_d; ++i) {
-            x_in[i] = x_in[i] + beta_ * Pf[i];
-        }
-    } else {
-        // Store history differences
-        int idx = (iter_ - 1) % m_;
-        if (static_cast<int>(dF_.size()) <= idx) {
-            dF_.emplace_back(Nd_d);
-            dX_.emplace_back(Nd_d);
-        }
+    // Compute current residual: f_k = g_k - x_k
+    for (int i = 0; i < N; ++i) {
+        f_k_[i] = g_k[i] - x_k[i];
+    }
 
-        for (int i = 0; i < Nd_d; ++i) {
-            dF_[idx](i) = f[i] - f_prev_(i);
-            dX_[idx](i) = x_in[i] - x_prev_(i);
+    // Store history: R(:,i_hist) = x_k - x_{k-1}, F(:,i_hist) = f_k - f_{k-1}
+    if (iter_ > 0) {
+        int i_hist = (iter_ - 1) % m_;
+        for (int i = 0; i < N; ++i) {
+            R_[i_hist * N + i] = x_k[i] - x_km1_[i];
+            F_[i_hist * N + i] = f_k_[i] - f_km1_[i];
         }
+    }
 
+    // Pulay mixing flag: reference uses PulayFrequency=1
+    // Pulay_mixing_flag = ((iter_count+1) % p == 0 && iter_count > 0)
+    // With p=1: true for all iter > 0
+    bool pulay_flag = (iter_ > 0);
+
+    // amix = beta for Pulay, omega for simple
+    // Reference: omega defaults to same as beta
+    double amix = beta_;
+
+    std::vector<double> x_wavg(N);
+    std::vector<double> f_wavg(N);
+
+    if (pulay_flag) {
+        // Anderson extrapolation: find Gamma = inv(F^T * F) * F^T * f_k
         int cols = std::min(iter_, m_);
 
-        // Build and solve normal equations: (dF^T * dF) * gamma = dF^T * f
-        std::vector<double> FTF(cols * cols, 0.0);
-        std::vector<double> FTf(cols, 0.0);
-
-        // Use a null comm wrapper for serial case
-        MPIComm null_comm;
-        const MPIComm& comm_ref = dmcomm_ ? *dmcomm_ : null_comm;
+        // Build F^T * F and F^T * f_k
+        std::vector<double> FtF(cols * cols, 0.0);
+        std::vector<double> Ftf(cols, 0.0);
 
         for (int i = 0; i < cols; ++i) {
-            FTf[i] = LinearSolver::dot(dF_[i].data(), f.data(), Nd_d, comm_ref);
-            for (int j = 0; j <= i; ++j) {
-                FTF[i * cols + j] = LinearSolver::dot(dF_[i].data(), dF_[j].data(), Nd_d, comm_ref);
-                FTF[j * cols + i] = FTF[i * cols + j];
+            double* Fi = F_.data() + i * N;
+            // F^T * f_k
+            double dot_ff = 0.0;
+            for (int j = 0; j < N; ++j)
+                dot_ff += Fi[j] * f_k_[j];
+            Ftf[i] = dot_ff;
+
+            // F^T * F (lower triangle, then symmetrize)
+            for (int k = 0; k <= i; ++k) {
+                double* Fk = F_.data() + k * N;
+                double dot_FiFk = 0.0;
+                for (int j = 0; j < N; ++j)
+                    dot_FiFk += Fi[j] * Fk[j];
+                FtF[i * cols + k] = dot_FiFk;
+                FtF[k * cols + i] = dot_FiFk;
             }
         }
 
-        // Solve small system via Gaussian elimination
-        std::vector<double> gamma(cols, 0.0);
-        std::vector<double> A_sys(FTF);
-        std::vector<double> b_sys(FTf);
+        // MPI allreduce (for parallel)
+        if (dmcomm_ && !dmcomm_->is_null() && dmcomm_->size() > 1) {
+            dmcomm_->allreduce_sum(FtF.data(), cols * cols);
+            dmcomm_->allreduce_sum(Ftf.data(), cols);
+        }
 
-        for (int k = 0; k < cols; ++k) {
-            int pivot = k;
-            for (int i = k + 1; i < cols; ++i) {
-                if (std::abs(A_sys[i * cols + k]) > std::abs(A_sys[pivot * cols + k]))
-                    pivot = i;
+        // Solve FtF * Gamma = Ftf via least squares (Gaussian elimination)
+        std::vector<double> Gamma(cols, 0.0);
+        {
+            std::vector<double> A(FtF);
+            std::vector<double> b(Ftf);
+            for (int k = 0; k < cols; ++k) {
+                int pivot = k;
+                for (int i = k + 1; i < cols; ++i) {
+                    if (std::abs(A[i * cols + k]) > std::abs(A[pivot * cols + k]))
+                        pivot = i;
+                }
+                if (pivot != k) {
+                    for (int j = 0; j < cols; ++j)
+                        std::swap(A[k * cols + j], A[pivot * cols + j]);
+                    std::swap(b[k], b[pivot]);
+                }
+                double diag = A[k * cols + k];
+                if (std::abs(diag) < 1e-14) continue;
+                for (int i = k + 1; i < cols; ++i) {
+                    double factor = A[i * cols + k] / diag;
+                    for (int j = k + 1; j < cols; ++j)
+                        A[i * cols + j] -= factor * A[k * cols + j];
+                    b[i] -= factor * b[k];
+                }
             }
-            if (pivot != k) {
-                for (int j = 0; j < cols; ++j)
-                    std::swap(A_sys[k * cols + j], A_sys[pivot * cols + j]);
-                std::swap(b_sys[k], b_sys[pivot]);
-            }
-            double diag = A_sys[k * cols + k];
-            if (std::abs(diag) < 1e-14) continue;
-            for (int i = k + 1; i < cols; ++i) {
-                double factor = A_sys[i * cols + k] / diag;
+            for (int k = cols - 1; k >= 0; --k) {
+                if (std::abs(A[k * cols + k]) < 1e-14) continue;
+                Gamma[k] = b[k];
                 for (int j = k + 1; j < cols; ++j)
-                    A_sys[i * cols + j] -= factor * A_sys[k * cols + j];
-                b_sys[i] -= factor * b_sys[k];
+                    Gamma[k] -= A[k * cols + j] * Gamma[j];
+                Gamma[k] /= A[k * cols + k];
             }
         }
-        for (int k = cols - 1; k >= 0; --k) {
-            if (std::abs(A_sys[k * cols + k]) < 1e-14) continue;
-            gamma[k] = b_sys[k];
-            for (int j = k + 1; j < cols; ++j)
-                gamma[k] -= A_sys[k * cols + j] * gamma[j];
-            gamma[k] /= A_sys[k * cols + k];
-        }
 
-        // Anderson mixing:
-        // x_new = (x_in + beta*Pf) - sum_j gamma_j * (dX_j + beta*PdF_j)
-        // Simplified: use dF directly instead of PdF
-        for (int i = 0; i < Nd_d; ++i) {
-            x_in[i] = x_in[i] + beta_ * Pf[i];
-        }
+        // x_wavg = x_k - R * Gamma
+        std::memcpy(x_wavg.data(), x_k, N * sizeof(double));
         for (int j = 0; j < cols; ++j) {
-            for (int i = 0; i < Nd_d; ++i) {
-                x_in[i] -= gamma[j] * (dX_[j](i) + beta_ * dF_[j](i));
+            double* Rj = R_.data() + j * N;
+            double gj = Gamma[j];
+            for (int i = 0; i < N; ++i) {
+                x_wavg[i] -= gj * Rj[i];
             }
         }
+
+        // f_wavg = f_k - F * Gamma
+        std::memcpy(f_wavg.data(), f_k_.data(), N * sizeof(double));
+        for (int j = 0; j < cols; ++j) {
+            double* Fj = F_.data() + j * N;
+            double gj = Gamma[j];
+            for (int i = 0; i < N; ++i) {
+                f_wavg[i] -= gj * Fj[i];
+            }
+        }
+    } else {
+        // Simple mixing: x_wavg = x_k, f_wavg = f_k
+        std::memcpy(x_wavg.data(), x_k, N * sizeof(double));
+        std::memcpy(f_wavg.data(), f_k_.data(), N * sizeof(double));
     }
 
-    // Save current state for next iteration
-    if (f_prev_.empty()) {
-        f_prev_ = NDArray<double>(Nd_d);
-        x_prev_ = NDArray<double>(Nd_d);
+    // Apply preconditioner to f_wavg -> Pf
+    std::vector<double> Pf(N);
+    if (precond_type_ == MixingPrecond::Kerker && laplacian_ && halo_ && dmcomm_) {
+        apply_kerker(f_wavg.data(), amix, Pf.data());
+    } else {
+        // No preconditioner: Pf = amix * f_wavg
+        for (int i = 0; i < N; ++i)
+            Pf[i] = amix * f_wavg[i];
     }
-    std::memcpy(f_prev_.data(), f.data(), Nd_d * sizeof(double));
-    std::memcpy(x_prev_.data(), x_in, Nd_d * sizeof(double));
+
+    // x_{k+1} = x_wavg + Pf (amix is already in Pf)
+    // Save x_km1 = x_k before overwriting
+    std::memcpy(x_km1_.data(), x_k, N * sizeof(double));
+
+    for (int i = 0; i < N; ++i) {
+        x_k[i] = x_wavg[i] + Pf[i];
+    }
 
     iter_++;
 }

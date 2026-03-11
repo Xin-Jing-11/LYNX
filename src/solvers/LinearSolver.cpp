@@ -22,127 +22,155 @@ int LinearSolver::aar(const OpFunc& op,
                        double* x,
                        int N,
                        const AARParams& params,
-                       const MPIComm& comm) {
-    std::vector<double> Ax(N), r(N), x_new(N);
+                       const MPIComm& comm,
+                       const PrecondFunc* precond) {
+    // Reference: linearSolver.c AAR()
+    // Uses Jacobi preconditioner inside AAR loop.
+    // f = M^{-1} * r (preconditioned residual)
+    // History stores differences of preconditioned residuals (F) and iterates (X)
+    // Richardson step: x = x_old + omega * f
+    // Anderson step: uses x_old, f, X, F
 
-    // Anderson history storage
     int m = params.m;
     int p = params.p;
-    std::vector<std::vector<double>> DX(m, std::vector<double>(N, 0.0));
-    std::vector<std::vector<double>> DF(m, std::vector<double>(N, 0.0));
+
+    std::vector<double> r(N);           // residual r = b - A*x
+    std::vector<double> f(N, 0.0);      // preconditioned residual f = M^{-1} * r
     std::vector<double> f_old(N, 0.0);
     std::vector<double> x_old(N, 0.0);
 
-    // Compute initial residual
-    op(x, Ax.data());
-    for (int i = 0; i < N; ++i) {
-        r[i] = b[i] - Ax[i];
-    }
+    // History matrices (column-major N x m)
+    std::vector<double> X(N * m, 0.0);  // X(:,j) = x_k - x_{k-1}
+    std::vector<double> F(N * m, 0.0);  // F(:,j) = f_k - f_{k-1}
 
-    double b_norm = std::sqrt(dot(b, b, N, comm));
-    if (b_norm < 1e-30) b_norm = 1.0;
+    // Initialize x_old
+    std::memcpy(x_old.data(), x, N * sizeof(double));
 
-    int anderson_count = 0;
+    double b_2norm = std::sqrt(dot(b, b, N, comm));
 
-    for (int iter = 0; iter < params.max_iter; ++iter) {
-        double r_norm = std::sqrt(dot(r.data(), r.data(), N, comm));
-        if (r_norm / b_norm < params.tol) {
-            return iter;
-        }
-
-        if ((iter + 1) % p == 0 && anderson_count > 0) {
-            // Anderson update step
-            int cols = std::min(anderson_count, m);
-
-            // Solve least-squares: DF^T * DF * gamma = DF^T * r
-            // Small system: cols x cols
-            std::vector<double> FTF(cols * cols, 0.0);
-            std::vector<double> FTr(cols, 0.0);
-
-            for (int i = 0; i < cols; ++i) {
-                FTr[i] = dot(DF[i].data(), r.data(), N, comm);
-                for (int j = 0; j <= i; ++j) {
-                    FTF[i * cols + j] = dot(DF[i].data(), DF[j].data(), N, comm);
-                    FTF[j * cols + i] = FTF[i * cols + j];
-                }
-            }
-
-            // Solve small system via Cholesky or direct for small cols
-            std::vector<double> gamma(cols, 0.0);
-            // Simple Gaussian elimination for the small system
-            std::vector<double> A_sys(FTF);
-            std::vector<double> b_sys(FTr);
-            for (int k = 0; k < cols; ++k) {
-                // Partial pivoting
-                int pivot = k;
-                for (int i = k + 1; i < cols; ++i) {
-                    if (std::abs(A_sys[i * cols + k]) > std::abs(A_sys[pivot * cols + k]))
-                        pivot = i;
-                }
-                if (pivot != k) {
-                    for (int j = 0; j < cols; ++j)
-                        std::swap(A_sys[k * cols + j], A_sys[pivot * cols + j]);
-                    std::swap(b_sys[k], b_sys[pivot]);
-                }
-                double diag = A_sys[k * cols + k];
-                if (std::abs(diag) < 1e-14) continue;
-                for (int i = k + 1; i < cols; ++i) {
-                    double factor = A_sys[i * cols + k] / diag;
-                    for (int j = k + 1; j < cols; ++j)
-                        A_sys[i * cols + j] -= factor * A_sys[k * cols + j];
-                    b_sys[i] -= factor * b_sys[k];
-                }
-            }
-            for (int k = cols - 1; k >= 0; --k) {
-                if (std::abs(A_sys[k * cols + k]) < 1e-14) continue;
-                gamma[k] = b_sys[k];
-                for (int j = k + 1; j < cols; ++j)
-                    gamma[k] -= A_sys[k * cols + j] * gamma[j];
-                gamma[k] /= A_sys[k * cols + k];
-            }
-
-            // Anderson update: x_new = x + beta*r - sum gamma_i * (DX_i + beta*DF_i)
-            for (int i = 0; i < N; ++i) {
-                x_new[i] = x[i] + params.beta * r[i];
-            }
-            for (int j = 0; j < cols; ++j) {
-                for (int i = 0; i < N; ++i) {
-                    x_new[i] -= gamma[j] * (DX[j][i] + params.beta * DF[j][i]);
-                }
-            }
-            std::memcpy(x, x_new.data(), N * sizeof(double));
-        } else {
-            // Richardson relaxation: x = x + omega * r
-            for (int i = 0; i < N; ++i) {
-                x[i] += params.omega * r[i];
-            }
-        }
-
-        // Store history for Anderson
-        std::memcpy(x_old.data(), x, N * sizeof(double));
-
-        // Recompute residual
+    // Compute initial residual using the res_fun convention:
+    // Reference: res_fun computes r = b + (Lap+c)*x, but our op computes A*x = -(Lap+c)*x
+    // So r = b - op(x)
+    {
+        std::vector<double> Ax(N);
         op(x, Ax.data());
-        for (int i = 0; i < N; ++i) {
+        for (int i = 0; i < N; ++i)
             r[i] = b[i] - Ax[i];
-        }
-
-        // Update DX and DF history (ring buffer)
-        if (anderson_count > 0 || iter > 0) {
-            int idx = (anderson_count < m) ? anderson_count : (anderson_count % m);
-            if (anderson_count >= m) idx = anderson_count % m;
-            for (int i = 0; i < N; ++i) {
-                DX[idx][i] = x[i] - x_old[i];  // This is approximate; proper storage below
-                DF[idx][i] = r[i] - f_old[i];
-            }
-            if (anderson_count < m) anderson_count++;
-        }
-
-        std::memcpy(f_old.data(), r.data(), N * sizeof(double));
-        std::memcpy(x_old.data(), x, N * sizeof(double));
     }
 
-    return -params.max_iter;  // not converged
+    // Replace absolute tol: tol * ||b|| (matching reference)
+    double abs_tol = params.tol * b_2norm;
+    double r_2norm = abs_tol + 1.0; // skip initial norm check (reference does this)
+
+    int iter_count = 0;
+    while (r_2norm > abs_tol && iter_count < params.max_iter) {
+        // Apply preconditioner: f = M^{-1} * r
+        if (precond) {
+            (*precond)(r.data(), f.data());
+        } else {
+            std::memcpy(f.data(), r.data(), N * sizeof(double));
+        }
+
+        // Store history: X(:,i_hist) = x - x_old, F(:,i_hist) = f - f_old
+        if (iter_count > 0) {
+            int i_hist = (iter_count - 1) % m;
+            for (int i = 0; i < N; ++i) {
+                X[i_hist * N + i] = x[i] - x_old[i];
+                F[i_hist * N + i] = f[i] - f_old[i];
+            }
+        }
+
+        // Save current state
+        std::memcpy(x_old.data(), x, N * sizeof(double));
+        std::memcpy(f_old.data(), f.data(), N * sizeof(double));
+
+        if ((iter_count + 1) % p == 0 && iter_count > 0) {
+            // Anderson extrapolation: x = x_old + beta*f - sum gamma_j*(DX_j + beta*DF_j)
+            int cols = std::min(iter_count, m);
+
+            // Solve: (F^T F) gamma = F^T f
+            std::vector<double> FTF(cols * cols, 0.0);
+            std::vector<double> gamma(cols, 0.0);
+
+            for (int ii = 0; ii < cols; ++ii) {
+                double* Fi = F.data() + ii * N;
+                gamma[ii] = dot(Fi, f.data(), N, comm); // F^T * f
+                for (int jj = 0; jj <= ii; ++jj) {
+                    double* Fj = F.data() + jj * N;
+                    FTF[ii * cols + jj] = dot(Fi, Fj, N, comm);
+                    FTF[jj * cols + ii] = FTF[ii * cols + jj];
+                }
+            }
+
+            // Solve via Gaussian elimination
+            {
+                std::vector<double> A(FTF);
+                for (int k = 0; k < cols; ++k) {
+                    int pivot = k;
+                    for (int ii = k + 1; ii < cols; ++ii)
+                        if (std::abs(A[ii * cols + k]) > std::abs(A[pivot * cols + k]))
+                            pivot = ii;
+                    if (pivot != k) {
+                        for (int j = 0; j < cols; ++j)
+                            std::swap(A[k * cols + j], A[pivot * cols + j]);
+                        std::swap(gamma[k], gamma[pivot]);
+                    }
+                    double d = A[k * cols + k];
+                    if (std::abs(d) < 1e-14) continue;
+                    for (int ii = k + 1; ii < cols; ++ii) {
+                        double factor = A[ii * cols + k] / d;
+                        for (int j = k + 1; j < cols; ++j)
+                            A[ii * cols + j] -= factor * A[k * cols + j];
+                        gamma[ii] -= factor * gamma[k];
+                    }
+                }
+                for (int k = cols - 1; k >= 0; --k) {
+                    if (std::abs(A[k * cols + k]) < 1e-14) continue;
+                    for (int j = k + 1; j < cols; ++j)
+                        gamma[k] -= A[k * cols + j] * gamma[j];
+                    gamma[k] /= A[k * cols + k];
+                }
+            }
+
+            // Reference: AndersonExtrapolation(N, m, x, x_old, f, X, F, beta, comm)
+            // x = x_old + beta*f - sum gamma_j*(X_j + beta*F_j)
+            // (Using x_old, not current x)
+            for (int i = 0; i < N; ++i)
+                x[i] = x_old[i] + params.beta * f[i];
+            for (int j = 0; j < cols; ++j) {
+                double* Xj = X.data() + j * N;
+                double* Fj = F.data() + j * N;
+                double gj = gamma[j];
+                for (int i = 0; i < N; ++i)
+                    x[i] -= gj * (Xj[i] + params.beta * Fj[i]);
+            }
+
+            // Recompute residual
+            {
+                std::vector<double> Ax(N);
+                op(x, Ax.data());
+                for (int i = 0; i < N; ++i)
+                    r[i] = b[i] - Ax[i];
+            }
+            r_2norm = std::sqrt(dot(r.data(), r.data(), N, comm));
+        } else {
+            // Richardson update: x = x_old + omega * f
+            for (int i = 0; i < N; ++i)
+                x[i] = x_old[i] + params.omega * f[i];
+
+            // Recompute residual
+            {
+                std::vector<double> Ax(N);
+                op(x, Ax.data());
+                for (int i = 0; i < N; ++i)
+                    r[i] = b[i] - Ax[i];
+            }
+        }
+
+        iter_count++;
+    }
+
+    return iter_count;
 }
 
 int LinearSolver::cg(const OpFunc& op,

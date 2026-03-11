@@ -28,6 +28,9 @@ add_library(sparc_core
     solvers/EigenSolver.cpp
     physics/Energy.cpp
     physics/SCF.cpp
+    physics/Forces.cpp
+    physics/Stress.cpp
+    physics/Electrostatics.cpp
 )
 
 target_include_directories(sparc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -46,3 +49,6 @@ endif()
 
 add_executable(sparc main.cpp)
 target_link_libraries(sparc PRIVATE sparc_core)
+
+add_executable(sparc_hpsi_compare ../tests/test_HamiltonianCompare.cpp)
+target_link_libraries(sparc_hpsi_compare PRIVATE sparc_core)

@@ -1,6 +1,7 @@
 #include "solvers/PoissonSolver.hpp"
 #include <vector>
 #include <cmath>
+#include <cstdio>
 
 namespace sparc {
 
@@ -19,15 +20,18 @@ void PoissonSolver::setup(const Laplacian& laplacian,
 
     // Jacobi preconditioner weight: 1 / diagonal of -Laplacian
     // For orthogonal cells: diag = -2*(D2x[0] + D2y[0] + D2z[0])
-    double diag = -2.0 * (stencil.D2_coeff_x()[0] + stencil.D2_coeff_y()[0] + stencil.D2_coeff_z()[0]);
+    // Note: D2_coeff already includes 1/h^2 scaling, and the Laplacian has coefficient -1
+    // So the diagonal of -Lap is -(D2x[0] + D2y[0] + D2z[0])
+    double diag = -(stencil.D2_coeff_x()[0] + stencil.D2_coeff_y()[0] + stencil.D2_coeff_z()[0]);
     jacobi_weight_ = 1.0 / diag;
 
     // Set default AAR params tuned for Poisson
-    aar_params_.omega = 0.6;
-    aar_params_.beta = 0.6;
+    // omega is the Jacobi relaxation parameter, scaled by jacobi_weight
+    aar_params_.omega = 0.6 * jacobi_weight_;
+    aar_params_.beta = 0.6 * jacobi_weight_;
     aar_params_.m = 7;
     aar_params_.p = 6;
-    aar_params_.max_iter = 1000;
+    aar_params_.max_iter = 3000;
 }
 
 int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
@@ -37,14 +41,14 @@ int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
 
     // Operator: applies -Laplacian
     auto op = [this, Nd_d](const double* x, double* Ax) {
-        // We need to fill halos, then apply -Lap
         int nd_ex = halo_->nd_ex();
         std::vector<double> x_ex(nd_ex, 0.0);
         halo_->execute(x, x_ex.data(), 1);
         laplacian_->apply(x_ex.data(), Ax, -1.0, 0.0, 1);
     };
 
-    return LinearSolver::aar(op, rhs, phi, Nd_d, params, *dmcomm_);
+    int iters = LinearSolver::aar(op, rhs, phi, Nd_d, params, *dmcomm_);
+    return iters;
 }
 
 } // namespace sparc

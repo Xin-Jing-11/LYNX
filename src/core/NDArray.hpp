@@ -127,8 +127,9 @@ private:
 
     // Pad leading dimension to multiple of 8 doubles (64 bytes)
     static int pad_ld(int rows) {
-        constexpr int align_elems = static_cast<int>(MEMORY_ALIGNMENT / sizeof(T));
-        return ((rows + align_elems - 1) / align_elems) * align_elems;
+        // Disable padding for now to avoid stride mismatches in EigenSolver, etc.
+        // TODO: Re-enable when all code properly handles leading dimensions
+        return rows;
     }
 
     void init(int d0, int d1, int d2, int ndim) {

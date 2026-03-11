@@ -7,43 +7,44 @@
 namespace sparc {
 
 // Real spherical harmonics Y_lm(x, y, z, r)
-// Unnormalized (matching SPARC convention where normalization is in UdV)
+// Fully normalized: matching reference SPARC convention (tools.c RealSphericalHarmonic)
 double NonlocalProjector::spherical_harmonic(int l, int m, double x, double y, double z, double r) {
     if (r < 1e-14) return 0.0;
 
     double invr = 1.0 / r;
     double xn = x * invr, yn = y * invr, zn = z * invr;
 
-    // l = 0
-    if (l == 0) return 1.0;
+    // l = 0: Y00 = 0.5*sqrt(1/pi)
+    if (l == 0) return 0.282094791773878;
 
-    // l = 1: m = -1, 0, 1 → y, z, x
+    // l = 1: coefficients = sqrt(3/(4*pi))
     if (l == 1) {
-        if (m == -1) return yn;
-        if (m ==  0) return zn;
-        if (m ==  1) return xn;
+        constexpr double C1 = 0.488602511902920;
+        if (m == -1) return C1 * yn;
+        if (m ==  0) return C1 * zn;
+        if (m ==  1) return C1 * xn;
     }
 
     // l = 2
     if (l == 2) {
         double x2 = xn * xn, y2 = yn * yn, z2 = zn * zn;
-        if (m == -2) return xn * yn * std::sqrt(3.0);
-        if (m == -1) return yn * zn * std::sqrt(3.0);
-        if (m ==  0) return 0.5 * (3.0 * z2 - 1.0);
-        if (m ==  1) return xn * zn * std::sqrt(3.0);
-        if (m ==  2) return 0.5 * std::sqrt(3.0) * (x2 - y2);
+        if (m == -2) return 1.092548430592079 * xn * yn;           // 0.5*sqrt(15/pi)
+        if (m == -1) return 1.092548430592079 * yn * zn;           // 0.5*sqrt(15/pi)
+        if (m ==  0) return 0.315391565252520 * (3.0 * z2 - 1.0); // 0.25*sqrt(5/pi)
+        if (m ==  1) return 1.092548430592079 * xn * zn;           // 0.5*sqrt(15/pi)
+        if (m ==  2) return 0.546274215296040 * (x2 - y2);         // 0.25*sqrt(15/pi)
     }
 
     // l = 3
     if (l == 3) {
         double x2 = xn * xn, y2 = yn * yn, z2 = zn * zn;
-        if (m == -3) return 0.5 * std::sqrt(2.5) * yn * (3.0 * x2 - y2);
-        if (m == -2) return xn * yn * zn * std::sqrt(15.0);
-        if (m == -1) return 0.25 * std::sqrt(1.5) * yn * (5.0 * z2 - 1.0);
-        if (m ==  0) return 0.5 * zn * (5.0 * z2 - 3.0);
-        if (m ==  1) return 0.25 * std::sqrt(1.5) * xn * (5.0 * z2 - 1.0);
-        if (m ==  2) return 0.5 * std::sqrt(15.0) * zn * (x2 - y2);
-        if (m ==  3) return 0.5 * std::sqrt(2.5) * xn * (x2 - 3.0 * y2);
+        if (m == -3) return 0.590043589926644 * yn * (3.0 * x2 - y2);  // 0.25*sqrt(35/(2*pi))
+        if (m == -2) return 2.890611442640554 * xn * yn * zn;          // 0.5*sqrt(105/pi)
+        if (m == -1) return 0.457045799464466 * yn * (5.0 * z2 - 1.0); // 0.25*sqrt(21/(2*pi))
+        if (m ==  0) return 0.373176332590115 * zn * (5.0 * z2 - 3.0); // 0.25*sqrt(7/pi)
+        if (m ==  1) return 0.457045799464466 * xn * (5.0 * z2 - 1.0); // 0.25*sqrt(21/(2*pi))
+        if (m ==  2) return 1.445305721320277 * zn * (x2 - y2);        // 0.25*sqrt(105/pi)
+        if (m ==  3) return 0.590043589926644 * xn * (x2 - 3.0 * y2);  // 0.25*sqrt(35/(2*pi))
     }
 
     return 0.0;  // Higher l not implemented yet
@@ -55,6 +56,7 @@ void NonlocalProjector::setup(const Crystal& crystal,
                                const FDGrid& grid) {
     crystal_ = &crystal;
     nloc_influence_ = &nloc_influence;
+    domain_ = &domain;
 
     int ntypes = crystal.n_types();
     Chi_.resize(ntypes);
@@ -144,11 +146,31 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
                                const MPIComm& comm) const {
     if (!is_setup_ || total_nproj_ == 0) return;
 
-    // Step 1: Compute alpha = Chi^T * psi * dV (inner products)
+    int Nd_d = domain_->Nd_d();
     int ntypes = static_cast<int>(Chi_.size());
-    std::vector<double> alpha(total_nproj_ * ncol, 0.0);
+    int n_atom = crystal_->n_atom_total();
 
-    int proj_offset = 0;
+    // Global IP_displ: projector offset per physical atom
+    // IP_displ_global[iat+1] = IP_displ_global[iat] + nproj_for_that_atom_type
+    std::vector<int> IP_displ_global(n_atom + 1, 0);
+    {
+        int atom_idx = 0;
+        for (int it = 0; it < crystal_->n_types(); ++it) {
+            const auto& psd = crystal_->types()[it].psd();
+            int nproj = psd.nproj_per_atom();
+            int nat = crystal_->types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ++ia) {
+                IP_displ_global[atom_idx + 1] = IP_displ_global[atom_idx] + nproj;
+                atom_idx++;
+            }
+        }
+    }
+    int total_global_nproj = IP_displ_global[n_atom];
+
+    // Step 1: Compute alpha = Chi^T * psi * dV (inner products)
+    // Global alpha array: indexed by actual atom index (accumulates across periodic images)
+    std::vector<double> alpha(total_global_nproj * ncol, 0.0);
+
     for (int it = 0; it < ntypes; ++it) {
         const auto& inf = (*nloc_influence_)[it];
         const auto& psd = crystal_->types()[it].psd();
@@ -159,38 +181,21 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
             int ndc = inf.ndc[iat];
             if (ndc == 0) continue;
 
+            int global_atom = inf.atom_index[iat];
             const auto& gpos = inf.grid_pos[iat];
-            int alpha_offset = (proj_offset + IP_displ_[it][iat]) * ncol;
+            int a_off = IP_displ_global[global_atom] * ncol;
 
-            // Extract psi values at grid positions and compute alpha = Chi^T * x_rc
             for (int n = 0; n < ncol; ++n) {
-                for (int jp = 0; jp < nproj; ++jp) {
-                    double dot = 0.0;
-                    for (int ig = 0; ig < ndc; ++ig) {
-                        dot += Chi_[it][iat](ig, jp) * psi[gpos[ig] + n * (int)(inf.ndc[0] > 0 ? gpos.back() + 1 : 0)];
-                    }
-                    // Correction: psi is Nd_d per column
-                    alpha[alpha_offset + n * nproj + jp] = 0.0;
-                }
-            }
-
-            // Actually need to use the correct psi stride
-            // psi layout: psi[i + n * Nd_d]
-            // For simplicity, use direct loop
-            for (int n = 0; n < ncol; ++n) {
-                const double* psi_n = psi; // caller must pass with correct stride
+                const double* psi_n = psi + n * Nd_d;
                 for (int jp = 0; jp < nproj; ++jp) {
                     double dot = 0.0;
                     for (int ig = 0; ig < ndc; ++ig) {
                         dot += Chi_[it][iat](ig, jp) * psi_n[gpos[ig]];
                     }
-                    alpha[alpha_offset + n * nproj + jp] = dot * dV;
+                    alpha[a_off + n * nproj + jp] += dot * dV;  // += to accumulate across images
                 }
-                psi += 0; // will be adjusted by caller stride
             }
         }
-
-        proj_offset += IP_displ_[it].back();
     }
 
     // Step 2: Allreduce alpha across domain communicator
@@ -199,9 +204,29 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
                       static_cast<int>(alpha.size()), MPI_DOUBLE, MPI_SUM, comm.comm());
     }
 
-    // Step 3: Apply Gamma and accumulate: Hpsi += Chi * (Gamma * alpha)
-    int gamma_idx = 0;
-    proj_offset = 0;
+    // Step 2b: Apply Gamma to alpha (matching reference: iterate over ALL atoms sequentially)
+    {
+        int count = 0;
+        for (int it = 0; it < crystal_->n_types(); ++it) {
+            const auto& psd = crystal_->types()[it].psd();
+            int nat = crystal_->types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ++ia) {
+                for (int n = 0; n < ncol; ++n) {
+                    for (int l = 0; l <= psd.lmax(); ++l) {
+                        if (l == psd.lloc()) continue;
+                        for (int p = 0; p < psd.ppl()[l]; ++p) {
+                            double gamma = psd.Gamma()[l][p];
+                            for (int m = -l; m <= l; ++m) {
+                                alpha[count++] *= gamma;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: Accumulate: Hpsi += Chi * alpha (scatter back to all images)
     for (int it = 0; it < ntypes; ++it) {
         const auto& inf = (*nloc_influence_)[it];
         const auto& psd = crystal_->types()[it].psd();
@@ -212,31 +237,21 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
             int ndc = inf.ndc[iat];
             if (ndc == 0) continue;
 
+            int global_atom = inf.atom_index[iat];
             const auto& gpos = inf.grid_pos[iat];
-            int alpha_offset = (proj_offset + IP_displ_[it][iat]) * ncol;
+            int a_off = IP_displ_global[global_atom] * ncol;
 
-            // Apply Gamma to alpha
             for (int n = 0; n < ncol; ++n) {
-                for (int jp = 0; jp < nproj; ++jp) {
-                    alpha[alpha_offset + n * nproj + jp] *= Gamma_all_[gamma_idx + jp];
-                }
-            }
-
-            // Accumulate: Hpsi[gpos[ig]] += sum_j Chi(ig,j) * alpha(j)
-            for (int n = 0; n < ncol; ++n) {
+                double* Hpsi_n = Hpsi + n * Nd_d;
                 for (int ig = 0; ig < ndc; ++ig) {
                     double val = 0.0;
                     for (int jp = 0; jp < nproj; ++jp) {
-                        val += Chi_[it][iat](ig, jp) * alpha[alpha_offset + n * nproj + jp];
+                        val += Chi_[it][iat](ig, jp) * alpha[a_off + n * nproj + jp];
                     }
-                    Hpsi[gpos[ig]] += val;
+                    Hpsi_n[gpos[ig]] += val;
                 }
-                Hpsi += 0; // stride adjusted by caller
             }
-
-            gamma_idx += nproj;
         }
-        proj_offset += IP_displ_[it].back();
     }
 }
 

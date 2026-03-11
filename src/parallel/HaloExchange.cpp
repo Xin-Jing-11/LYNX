@@ -12,8 +12,6 @@ HaloExchange::HaloExchange(const Domain& domain, int FDn, MPI_Comm cart_comm)
     nz_ex_ = nz_ + 2 * FDn;
 
     if (cart_comm_ != MPI_COMM_NULL) {
-        MPI_Cart_get(cart_comm_, 3, dims_, reinterpret_cast<int*>(periods_), nullptr);
-        // Fix: MPI_Cart_get uses int for periods
         int int_periods[3];
         int coords[3];
         MPI_Cart_get(cart_comm_, 3, dims_, int_periods, coords);

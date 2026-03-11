@@ -39,6 +39,9 @@ public:
     // Total number of projectors across all atoms
     int total_nproj() const { return total_nproj_; }
 
+    // Access Chi for diagnostics
+    const std::vector<std::vector<NDArray<double>>>& Chi() const { return Chi_; }
+
 private:
     bool is_setup_ = false;
     int total_nproj_ = 0;
@@ -55,6 +58,7 @@ private:
     // Back-references
     const Crystal* crystal_ = nullptr;
     const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;
+    const Domain* domain_ = nullptr;
 
     // Spherical harmonics
     static double spherical_harmonic(int l, int m, double x, double y, double z, double r);

@@ -14,10 +14,10 @@ double Occupation::fermi_dirac(double x, double beta) {
 }
 
 double Occupation::gaussian_smearing(double x, double beta) {
-    // f(x) = 0.5 * erfc(x * beta / sqrt(2))
+    // f(x) = 0.5 * erfc(beta * x)
     // where x = (epsilon - Ef)
-    double arg = x * beta * 0.7071067811865476; // 1/sqrt(2)
-    return 0.5 * std::erfc(arg);
+    // Matches reference SPARC: 0.5 * (1 - erf(beta * (lambda - lambda_f)))
+    return 0.5 * std::erfc(beta * x);
 }
 
 double Occupation::smearing_function(double x, double beta, SmearingType type) {
@@ -183,7 +183,8 @@ double Occupation::compute(Wavefunction& wfn,
 double Occupation::entropy(const Wavefunction& wfn,
                             double beta,
                             SmearingType smearing,
-                            const std::vector<double>& kpt_weights) {
+                            const std::vector<double>& kpt_weights,
+                            double Ef) {
     double S = 0.0;
     int Nspin = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
@@ -198,32 +199,26 @@ double Occupation::entropy(const Wavefunction& wfn,
             for (int n = 0; n < Nband; ++n) {
                 double f = occ(n);
                 if (smearing == SmearingType::FermiDirac) {
-                    // S = -kBT * sum [f*ln(f) + (1-f)*ln(1-f)]
+                    // S_n = -[f*ln(f) + (1-f)*ln(1-f)]
                     if (f > 1e-14 && f < 1.0 - 1e-14) {
-                        S += wk * (f * std::log(f) + (1.0 - f) * std::log(1.0 - f));
+                        S += wk * (-(f * std::log(f) + (1.0 - f) * std::log(1.0 - f)));
                     }
                 } else {
-                    // Gaussian: S = -1/(2*sqrt(pi)*beta) * sum exp(-(beta*(e-Ef))^2)
+                    // Gaussian: S_n = (0.5/sqrt(pi)) * exp(-(beta*(eig_n - Ef))^2)
+                    // Reference: Calculate_entropy_term, case 1
                     const auto& eig = wfn.eigenvalues(s, k);
-                    double x = eig(n);
-                    // We use the relation: entropy = -1/beta * sum_n g(x_n) where
-                    // g(x) = -0.5 * sqrt(pi) * x * erfc(x) - 0.5 * exp(-x^2)
-                    // with x = beta*(epsilon - Ef) / sqrt(2)
-                    // Simplified: direct computation from occupation
-                    if (f > 1e-14 && f < 1.0 - 1e-14) {
-                        S += wk * (f * std::log(f) + (1.0 - f) * std::log(1.0 - f));
-                    }
+                    double x = beta * (eig(n) - Ef);
+                    S += wk * (0.5 / std::sqrt(M_PI)) * std::exp(-x * x);
                 }
             }
         }
     }
 
-    // S has units of kBT; multiply by 1/beta to get energy
-    if (smearing == SmearingType::FermiDirac) {
-        return S / beta;  // -kBT * sum [f*ln(f) + (1-f)*ln(1-f)] (S already negative)
-    } else {
-        return S / beta;
-    }
+    // Reference: Entropy *= -occfac / (Nkpts * Beta)
+    // occfac = 2 for non-spin, kpt_weights already include 1/Nkpts factor,
+    // spin_fac and wk already folded into S above.
+    // So: Entropy = -S / beta
+    return -S / beta;
 }
 
 } // namespace sparc

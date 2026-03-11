@@ -37,6 +37,8 @@ struct SCFParams {
     SmearingType smearing = SmearingType::GaussianSmearing;
     double elec_temp = 300.0;    // K
     int cheb_degree = 20;
+    int rho_trigger = 4;         // CheFSI passes before first density (from random guess)
+    int nchefsi = 1;             // CheFSI passes per subsequent SCF iteration
     double poisson_tol = 1e-8;
     bool print_eigen = false;
 };
@@ -63,15 +65,25 @@ public:
     // Returns total energy
     double run(Wavefunction& wfn,
                int Nelectron,
+               int Natom,
                const double* rho_b,       // pseudocharge density (may be null)
+               const double* Vloc,         // local pseudopotential correction (may be null)
                double Eself,              // self energy
-               double Ec);                // correction energy
+               double Ec,                 // correction energy
+               XCType xc_type = XCType::GGA_PBE,
+               const double* rho_core = nullptr);  // NLCC core density (may be null)
 
     // Access results
     const EnergyComponents& energy() const { return energy_; }
     const ElectronDensity& density() const { return density_; }
     double fermi_energy() const { return Ef_; }
     bool converged() const { return converged_; }
+
+    // Access internal potentials (needed for Forces/Stress post-SCF)
+    const double* phi() const { return phi_.data(); }
+    const double* Vxc() const { return Vxc_.data(); }
+    const double* exc() const { return exc_.data(); }
+    const double* Veff() const { return Veff_.data(); }
 
 private:
     const FDGrid* grid_ = nullptr;
@@ -99,11 +111,19 @@ private:
     NDArray<double> exc_;       // XC energy density
     NDArray<double> phi_;       // electrostatic potential
 
-    // Compute effective potential: Veff = Vxc + phi + ...
-    void compute_Veff(const double* rho, const double* rho_b);
+    XCType xc_type_ = XCType::GGA_PBE;
+    const double* Vloc_ = nullptr;
+    const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
+
+    // Compute effective potential: Veff = Vxc + phi + Vloc
+    void compute_Veff(const double* rho, const double* rho_b, const double* Vloc);
 
     // Initialize density from superposition of atomic densities (simplified)
     void init_density(int Nd_d, int Nelectron);
+
+public:
+    // Set initial density from external source (e.g., atomic superposition)
+    void set_initial_density(const double* rho_init, int Nd_d);
 };
 
 } // namespace sparc

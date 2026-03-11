@@ -50,6 +50,8 @@ struct SystemConfig {
     MixingPrecond mixing_precond = MixingPrecond::Kerker;
     int mixing_history = 7;
     double mixing_param = 0.3;
+    int cheb_degree = 20;
+    int rho_trigger = 4;
 
     // Parallelization
     ParallelParams parallel;

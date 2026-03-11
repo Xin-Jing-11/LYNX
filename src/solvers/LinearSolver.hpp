@@ -32,12 +32,14 @@ public:
 
     // AAR solver: solves A*x = b
     // Returns number of iterations (negative if not converged)
+    // Optional preconditioner: precond(r, z) applies z = M^{-1} * r
     static int aar(const OpFunc& op,
                    const double* b,
                    double* x,
                    int N,
                    const AARParams& params,
-                   const MPIComm& comm);
+                   const MPIComm& comm,
+                   const PrecondFunc* precond = nullptr);
 
     // CG solver: solves A*x = b with optional preconditioner
     static int cg(const OpFunc& op,

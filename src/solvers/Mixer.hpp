@@ -14,7 +14,7 @@
 namespace sparc {
 
 // Anderson/Pulay mixing with optional Kerker preconditioner.
-// For SCF convergence: mixes density or potential between iterations.
+// Matches reference SPARC Mixing_periodic_pulay exactly.
 class Mixer {
 public:
     Mixer() = default;
@@ -29,29 +29,31 @@ public:
                const FDGrid* grid = nullptr,
                const MPIComm* dmcomm = nullptr);
 
-    // Mix: given input x_in (new) and x_out (old output / current guess),
-    // produce the next input.
-    // f = x_out - x_in is the residual
-    // x_in is updated in-place with the mixed result.
-    void mix(double* x_in, const double* x_out, int Nd_d);
+    // Mix density: x_k is the current input, g_k is the output from SCF.
+    // After mixing, x_k is updated in-place with the new mixed density.
+    // Reference: Mixing_periodic_pulay
+    void mix(double* x_k_inout, const double* g_k, int Nd_d);
 
     // Reset history (e.g., at start of new SCF)
     void reset();
 
 private:
     int Nd_d_ = 0;
+    int Nd_ = 0;           // global grid size (for renormalization)
     MixingVariable var_ = MixingVariable::Density;
     MixingPrecond precond_type_ = MixingPrecond::None;
     int m_ = 7;            // history depth
-    double beta_ = 0.3;    // mixing parameter
+    double beta_ = 0.3;    // mixing parameter (Pulay)
     int iter_ = 0;
 
-    // History: ring buffer of residuals and input differences
-    std::vector<NDArray<double>> dF_;   // residual differences: f_k - f_{k-1}
-    std::vector<NDArray<double>> dX_;   // input differences: x_k - x_{k-1}
+    // State from previous iteration
+    std::vector<double> x_km1_;    // x_{k-1}
+    std::vector<double> f_k_;      // current residual f_k = g_k - x_k
+    std::vector<double> f_km1_;    // previous residual f_{k-1}
 
-    NDArray<double> f_prev_;      // previous residual
-    NDArray<double> x_prev_;      // previous input
+    // History matrices (column-major, Nd_d x m)
+    std::vector<double> R_;    // [x_k - x_{k-1}] differences
+    std::vector<double> F_;    // [f_k - f_{k-1}] differences
 
     // Kerker preconditioner components
     const Laplacian* laplacian_ = nullptr;
@@ -59,9 +61,9 @@ private:
     const FDGrid* grid_ = nullptr;
     const MPIComm* dmcomm_ = nullptr;
 
-    // Apply Kerker preconditioner: P*r where P ≈ |k|^2 / (|k|^2 + k_TF^2)
-    // In real space: solve (-Lap + k_TF^2)*z = -Lap*r
-    void apply_kerker(const double* r, double* Pr) const;
+    // Apply Kerker preconditioner: solve -(Lap - kTF²)*Pf = (Lap - idiemac*kTF²)*f
+    // Then Pf *= -amix
+    void apply_kerker(const double* f, double amix, double* Pf) const;
 };
 
 } // namespace sparc

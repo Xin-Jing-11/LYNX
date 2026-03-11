@@ -73,7 +73,9 @@ EnergyComponents Energy::compute_all(
     SmearingType smearing,
     const std::vector<double>& kpt_weights,
     int Nd_d, double dV,
-    const MPIComm& dmcomm) {
+    const MPIComm& dmcomm,
+    const double* rho_core,
+    double Ef) {
 
     EnergyComponents E;
     E.Eself = Eself;
@@ -84,9 +86,23 @@ EnergyComponents Energy::compute_all(
     // Band energy
     E.Eband = band_energy(wfn, kpt_weights, Nspin);
 
-    // XC energy
+    // XC energy: Exc = ∫ (rho + rho_core) * exc dV (matching reference SPARC)
     const double* rho = density.rho_total().data();
-    E.Exc = xc_energy(rho, exc, Nd_d, dV, dmcomm);
+    if (rho_core) {
+        // With NLCC, integrate (rho_valence + rho_core) * exc
+        double local_sum = 0.0;
+        for (int i = 0; i < Nd_d; ++i) {
+            local_sum += (rho[i] + rho_core[i]) * exc[i];
+        }
+        local_sum *= dV;
+        if (!dmcomm.is_null() && dmcomm.size() > 1) {
+            E.Exc = dmcomm.allreduce_sum(local_sum);
+        } else {
+            E.Exc = local_sum;
+        }
+    } else {
+        E.Exc = xc_energy(rho, exc, Nd_d, dV, dmcomm);
+    }
 
     // Double counting: E2 = integral rho * Vxc dV
     double E2 = 0.0;
@@ -121,7 +137,7 @@ EnergyComponents Energy::compute_all(
     }
 
     // Entropy
-    E.Entropy = Occupation::entropy(wfn, beta, smearing, kpt_weights);
+    E.Entropy = Occupation::entropy(wfn, beta, smearing, kpt_weights, Ef);
 
     // Total free energy:
     // Etot = Eband + E1 - E2 - E3 + Exc + Eself + Ec + Entropy
@@ -129,6 +145,14 @@ EnergyComponents Energy::compute_all(
     // Eband already contains kinetic + Veff contribution
     // Veff = Vxc + phi + ... so we need to subtract double counting
     E.Etotal = E.Eband - E2 + E.Exc - E3 + E.Ehart + E.Eself + E.Ec + E.Entropy;
+
+    // Debug: print energy components
+    if (dmcomm.rank() == 0) {
+        std::printf("  Energy: Eband=%.6f Exc=%.6f Ehart=%.6f Eself=%.6f Ec=%.6f\n",
+                    E.Eband, E.Exc, E.Ehart, E.Eself, E.Ec);
+        std::printf("  Energy: E2(rho*Vxc)=%.6f E3(rho*phi)=%.6f Entropy=%.6f\n",
+                    E2, E3, E.Entropy);
+    }
 
     return E;
 }

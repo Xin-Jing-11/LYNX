@@ -40,7 +40,8 @@ public:
     static double entropy(const Wavefunction& wfn,
                           double beta,
                           SmearingType smearing,
-                          const std::vector<double>& kpt_weights);
+                          const std::vector<double>& kpt_weights,
+                          double Ef = 0.0);
 
 private:
     // Find Fermi energy via Brent's method

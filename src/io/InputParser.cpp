@@ -169,6 +169,10 @@ SystemConfig InputParser::parse(const std::string& json_file) {
             config.mixing_history = scf["mixing_history"].get<int>();
         if (scf.contains("mixing_parameter"))
             config.mixing_param = scf["mixing_parameter"].get<double>();
+        if (scf.contains("cheb_degree"))
+            config.cheb_degree = scf["cheb_degree"].get<int>();
+        if (scf.contains("rho_trigger"))
+            config.rho_trigger = scf["rho_trigger"].get<int>();
     }
 
     // Parallelization

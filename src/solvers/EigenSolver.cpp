@@ -4,7 +4,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
-#include <random>
+#include <cstdlib>
 #include <stdexcept>
 
 // LAPACK declarations
@@ -48,7 +48,8 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
                                     int degree) {
     double e = (eigval_max - lambda_cutoff) / 2.0;
     double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma = e / (lambda_cutoff - eigval_min);
+    double sigma_1 = e / (eigval_min - c);  // reference: sigma1 = e / (a0 - c)
+    double sigma = sigma_1;
     double sigma_new;
 
     int nd_ex = halo_->nd_ex();
@@ -75,8 +76,7 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
     std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(double));
 
     for (int k = 2; k <= degree; ++k) {
-        sigma_new = 1.0 / (2.0 / sigma - 1.0 + 1e-30);  // avoid div by zero for sigma=1
-        // Actually: sigma_new = 1/(2/sigma - 1) but with proper Chebyshev recurrence
+        sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
         double gamma = 2.0 * sigma_new / e;
 
         // Xnew = gamma * (H*Y - c*Y) - sigma*sigma_new * Xold
@@ -171,6 +171,8 @@ void EigenSolver::diag_subspace(double* Hs, double* eigvals, int N) {
     dsyev_(&jobz, &uplo, &N, Hs, &N, eigvals, work.data(), &lwork, &info);
 
     if (info != 0) {
+        // Diagnostic: check for NaN/Inf in input
+        std::fprintf(stderr, "dsyev failed with info=%d, N=%d\n", info, N);
         throw std::runtime_error("dsyev failed in diag_subspace");
     }
 }
@@ -193,10 +195,12 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
     std::vector<double> v(Nd_d), w(Nd_d), v_old(Nd_d, 0.0);
     std::vector<double> alpha_l(lanczos_iter), beta_l(lanczos_iter, 0.0);
 
-    // Random initial vector
-    std::mt19937 rng(12345);
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    for (int i = 0; i < Nd_d; ++i) v[i] = dist(rng);
+    // Random initial vector — match reference: srand(rank*100+1), range [0,1]
+    // Reference uses SetRandMat(x0, DMnd, 1, 0.0, 1.0, kptcomm_topo)
+    int rank = dmcomm_->rank();
+    std::srand(rank * 100 + 1);
+    for (int i = 0; i < Nd_d; ++i)
+        v[i] = (double)std::rand() / RAND_MAX;
 
     // Normalize
     double norm = std::sqrt(LinearSolver::dot(v.data(), v.data(), Nd_d, *dmcomm_));
@@ -255,8 +259,8 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
     dsyev_(&jobz, &uplo, &n, T.data(), &n, eigs.data(), work.data(), &lwork, &info);
 
     if (info == 0 && n > 0) {
-        eigval_min = eigs[0];
-        eigval_max = eigs[n - 1] * 1.05;  // small safety margin
+        eigval_min = eigs[0] - 0.1;       // safety margin (reference: eigmin -= 0.1)
+        eigval_max = eigs[n - 1] * 1.01;  // 1% buffer (reference: eigmax *= 1.01)
     } else {
         // Fallback: use stencil-based estimate
         eigval_min = 0.0;
@@ -265,9 +269,9 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
 }
 
 void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
-                         int Nd_d, int Nband,
-                         double lambda_cutoff, double eigval_min, double eigval_max,
-                         int cheb_degree) {
+                        int Nd_d, int Nband,
+                        double lambda_cutoff, double eigval_min, double eigval_max,
+                        int cheb_degree) {
     double dV = domain_->global_grid().dV();
 
     // Step 1: Chebyshev filter

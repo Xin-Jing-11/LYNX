@@ -60,7 +60,9 @@ public:
         SmearingType smearing,
         const std::vector<double>& kpt_weights,
         int Nd_d, double dV,
-        const MPIComm& dmcomm);
+        const MPIComm& dmcomm,
+        const double* rho_core = nullptr,  // NLCC core density
+        double Ef = 0.0);  // Fermi level (needed for Gaussian entropy)
 };
 
 } // namespace sparc
