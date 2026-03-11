@@ -26,6 +26,7 @@ extern "C" {
                 const double* alpha, const double* a, const int* lda,
                 const double* b, const int* ldb,
                 const double* beta, double* c, const int* ldc);
+    void dsterf_(const int* n, double* d, double* e, int* info);
 }
 
 namespace sparc {
@@ -190,82 +191,106 @@ void EigenSolver::rotate_orbitals(double* X, const double* Q, int Nd_d, int Nban
 
 void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
                                   double& eigval_min, double& eigval_max,
-                                  int lanczos_iter) {
-    // Lanczos algorithm to estimate spectral bounds of H
-    std::vector<double> v(Nd_d), w(Nd_d), v_old(Nd_d, 0.0);
-    std::vector<double> alpha_l(lanczos_iter), beta_l(lanczos_iter, 0.0);
+                                  double tol_lanczos, int max_iter) {
+    // Reference: Lanczos() in eigenSolver.c
+    // Tolerance-based stopping: converges when both eigmin and eigmax errors < tol
+    int nd_ex = halo_->nd_ex();
 
-    // Random initial vector — match reference: srand(rank*100+1), range [0,1]
-    // Reference uses SetRandMat(x0, DMnd, 1, 0.0, 1.0, kptcomm_topo)
+    std::vector<double> V_j(Nd_d), V_jm1(Nd_d), V_jp1(Nd_d);
+    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
+
+    // Initial vector: match reference srand(rank*100+1), range [0,1]
     int rank = dmcomm_->rank();
     std::srand(rank * 100 + 1);
     for (int i = 0; i < Nd_d; ++i)
-        v[i] = (double)std::rand() / RAND_MAX;
+        V_jm1[i] = (double)std::rand() / RAND_MAX;
 
     // Normalize
-    double norm = std::sqrt(LinearSolver::dot(v.data(), v.data(), Nd_d, *dmcomm_));
-    for (int i = 0; i < Nd_d; ++i) v[i] /= norm;
+    double vscal = std::sqrt(LinearSolver::dot(V_jm1.data(), V_jm1.data(), Nd_d, *dmcomm_));
+    vscal = 1.0 / vscal;
+    for (int i = 0; i < Nd_d; ++i) V_jm1[i] *= vscal;
 
-    int nd_ex = halo_->nd_ex();
+    // First H*v
     std::vector<double> v_ex(nd_ex);
-    std::vector<double> Hv(Nd_d);
+    halo_->execute(V_jm1.data(), v_ex.data(), 1);
+    H_->apply(V_jm1.data(), Veff, V_j.data(), 1);
 
-    for (int j = 0; j < lanczos_iter; ++j) {
-        // w = H*v
-        halo_->execute(v.data(), v_ex.data(), 1);
-        H_->apply(v.data(), Veff, Hv.data(), 1);
+    // a[0] = <V_jm1, V_j>
+    a[0] = LinearSolver::dot(V_jm1.data(), V_j.data(), Nd_d, *dmcomm_);
 
-        // alpha = v^T * w
-        alpha_l[j] = LinearSolver::dot(v.data(), Hv.data(), Nd_d, *dmcomm_);
+    // Orthogonalize: V_j = V_j - a[0]*V_jm1
+    for (int i = 0; i < Nd_d; ++i)
+        V_j[i] -= a[0] * V_jm1[i];
 
-        // w = w - alpha*v - beta*v_old
+    // b[0] = ||V_j||
+    b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, *dmcomm_));
+
+    if (b[0] == 0.0) {
+        // Invariant subspace; pick random vector orthogonal to V_jm1
+        for (int i = 0; i < Nd_d; ++i)
+            V_j[i] = -1.0 + 2.0 * ((double)std::rand() / RAND_MAX);
+        double dot_val = LinearSolver::dot(V_j.data(), V_jm1.data(), Nd_d, *dmcomm_);
+        for (int i = 0; i < Nd_d; ++i) V_j[i] -= dot_val * V_jm1[i];
+        b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, *dmcomm_));
+    }
+
+    // Scale V_j
+    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
+    for (int i = 0; i < Nd_d; ++i) V_j[i] *= vscal;
+
+    eigval_min = 0.0;
+    eigval_max = 0.0;
+    double eigmin_pre = 0.0, eigmax_pre = 0.0;
+    double err_eigmin = tol_lanczos + 1.0;
+    double err_eigmax = tol_lanczos + 1.0;
+
+    int j = 0;
+    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
+        // V_{j+1} = H * V_j
+        halo_->execute(V_j.data(), v_ex.data(), 1);
+        H_->apply(V_j.data(), Veff, V_jp1.data(), 1);
+
+        // a[j+1] = <V_j, V_{j+1}>
+        a[j + 1] = LinearSolver::dot(V_j.data(), V_jp1.data(), Nd_d, *dmcomm_);
+
+        // V_{j+1} = V_{j+1} - a[j+1]*V_j - b[j]*V_{j-1}
         for (int i = 0; i < Nd_d; ++i) {
-            w[i] = Hv[i] - alpha_l[j] * v[i];
-            if (j > 0) w[i] -= beta_l[j] * v_old[i];
+            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
+            V_jm1[i] = V_j[i];
         }
 
-        // beta = ||w||
-        double wnorm = std::sqrt(LinearSolver::dot(w.data(), w.data(), Nd_d, *dmcomm_));
-        if (j < lanczos_iter - 1) {
-            beta_l[j + 1] = wnorm;
+        b[j + 1] = std::sqrt(LinearSolver::dot(V_jp1.data(), V_jp1.data(), Nd_d, *dmcomm_));
+        if (b[j + 1] == 0.0) break;
+
+        vscal = 1.0 / b[j + 1];
+        for (int i = 0; i < Nd_d; ++i) V_j[i] = V_jp1[i] * vscal;
+
+        // Solve tridiagonal eigenvalue problem using dsterf_
+        // Copy a[0..j+1] into d, b[0..j+1] into e
+        int n = j + 2;
+        std::vector<double> d(n), e(n);
+        for (int k = 0; k < n; ++k) { d[k] = a[k]; e[k] = b[k]; }
+
+        int info;
+        dsterf_(&n, d.data(), e.data(), &info);
+        if (info == 0) {
+            eigval_min = d[0];
+            eigval_max = d[n - 1];
+        } else {
+            break;
         }
 
-        if (wnorm < 1e-14) break;
+        err_eigmin = std::abs(eigval_min - eigmin_pre);
+        err_eigmax = std::abs(eigval_max - eigmax_pre);
+        eigmin_pre = eigval_min;
+        eigmax_pre = eigval_max;
 
-        // v_old = v; v = w/beta
-        std::memcpy(v_old.data(), v.data(), Nd_d * sizeof(double));
-        for (int i = 0; i < Nd_d; ++i) v[i] = w[i] / wnorm;
+        j++;
     }
 
-    // Diagonalize the tridiagonal matrix T
-    // T has alpha on diagonal, beta on off-diagonal
-    int n = lanczos_iter;
-    std::vector<double> T(n * n, 0.0);
-    for (int i = 0; i < n; ++i) {
-        T[i + i * n] = alpha_l[i];
-        if (i < n - 1) {
-            T[i + (i + 1) * n] = beta_l[i + 1];
-            T[(i + 1) + i * n] = beta_l[i + 1];
-        }
-    }
-
-    std::vector<double> eigs(n);
-    char jobz = 'N', uplo = 'U';
-    int lwork = -1, info;
-    double work_query;
-    dsyev_(&jobz, &uplo, &n, T.data(), &n, eigs.data(), &work_query, &lwork, &info);
-    lwork = static_cast<int>(work_query);
-    std::vector<double> work(lwork);
-    dsyev_(&jobz, &uplo, &n, T.data(), &n, eigs.data(), work.data(), &lwork, &info);
-
-    if (info == 0 && n > 0) {
-        eigval_min = eigs[0] - 0.1;       // safety margin (reference: eigmin -= 0.1)
-        eigval_max = eigs[n - 1] * 1.01;  // 1% buffer (reference: eigmax *= 1.01)
-    } else {
-        // Fallback: use stencil-based estimate
-        eigval_min = 0.0;
-        eigval_max = H_->stencil().max_eigval_half_lap() + 1.0;
-    }
+    // Apply safety margins (reference: eigmax *= 1.01, eigmin -= 0.1)
+    eigval_max *= 1.01;
+    eigval_min -= 0.1;
 }
 
 void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,

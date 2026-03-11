@@ -28,18 +28,18 @@ namespace sparc {
 
 struct SCFParams {
     int max_iter = 100;
-    int min_iter = 3;
-    double tol = 1e-6;           // SCF energy tolerance (Ha/atom)
+    int min_iter = 2;
+    double tol = 1e-6;           // SCF convergence tolerance (||rho_out-rho_in||/||rho_out||)
     MixingVariable mixing_var = MixingVariable::Density;
     MixingPrecond mixing_precond = MixingPrecond::Kerker;
     int mixing_history = 7;
     double mixing_param = 0.3;
     SmearingType smearing = SmearingType::GaussianSmearing;
-    double elec_temp = 300.0;    // K
-    int cheb_degree = 20;
+    double elec_temp = -1.0;    // K (auto: 0.2eV for Gaussian, 0.1eV for FD)
+    int cheb_degree = -1;       // auto: Mesh2ChebDegree(h_eff)
     int rho_trigger = 4;         // CheFSI passes before first density (from random guess)
     int nchefsi = 1;             // CheFSI passes per subsequent SCF iteration
-    double poisson_tol = 1e-8;
+    double poisson_tol = -1.0;   // Default: computed as tol * 0.01
     bool print_eigen = false;
 };
 

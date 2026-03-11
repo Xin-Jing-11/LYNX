@@ -18,17 +18,16 @@ void PoissonSolver::setup(const Laplacian& laplacian,
     halo_ = &halo;
     dmcomm_ = &dmcomm;
 
-    // Jacobi preconditioner weight: 1 / diagonal of -Laplacian
-    // For orthogonal cells: diag = -2*(D2x[0] + D2y[0] + D2z[0])
-    // Note: D2_coeff already includes 1/h^2 scaling, and the Laplacian has coefficient -1
-    // So the diagonal of -Lap is -(D2x[0] + D2y[0] + D2z[0])
-    double diag = -(stencil.D2_coeff_x()[0] + stencil.D2_coeff_y()[0] + stencil.D2_coeff_z()[0]);
-    jacobi_weight_ = 1.0 / diag;
+    // Jacobi preconditioner weight: m_inv = -1 / (D2x[0] + D2y[0] + D2z[0] + c)
+    // For Poisson (c=0): m_inv = -1 / (D2x[0] + D2y[0] + D2z[0])
+    // Reference: Jacobi_preconditioner in electrostatics.c
+    double diag = stencil.D2_coeff_x()[0] + stencil.D2_coeff_y()[0] + stencil.D2_coeff_z()[0];
+    jacobi_weight_ = (std::abs(diag) < 1e-14) ? 1.0 : (-1.0 / diag);
 
-    // Set default AAR params tuned for Poisson
-    // omega is the Jacobi relaxation parameter, scaled by jacobi_weight
-    aar_params_.omega = 0.6 * jacobi_weight_;
-    aar_params_.beta = 0.6 * jacobi_weight_;
+    // AAR params: reference uses omega=0.6, beta=0.6 (NOT scaled by jacobi_weight)
+    // Jacobi preconditioning is applied inside AAR to the residual
+    aar_params_.omega = 0.6;
+    aar_params_.beta = 0.6;
     aar_params_.m = 7;
     aar_params_.p = 6;
     aar_params_.max_iter = 3000;
@@ -39,7 +38,8 @@ int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
     AARParams params = aar_params_;
     params.tol = tol;
 
-    // Operator: applies -Laplacian
+    // Operator: applies -Laplacian (i.e., the operator A in A*x = b)
+    // Reference: poisson_residual computes r = b + Lap*x, so A = -Lap
     auto op = [this, Nd_d](const double* x, double* Ax) {
         int nd_ex = halo_->nd_ex();
         std::vector<double> x_ex(nd_ex, 0.0);
@@ -47,7 +47,15 @@ int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
         laplacian_->apply(x_ex.data(), Ax, -1.0, 0.0, 1);
     };
 
-    int iters = LinearSolver::aar(op, rhs, phi, Nd_d, params, *dmcomm_);
+    // Jacobi preconditioner: f[i] = m_inv * r[i]
+    // Reference: Jacobi_preconditioner with c=0
+    double m_inv = jacobi_weight_;
+    LinearSolver::PrecondFunc jacobi = [m_inv, Nd_d](const double* r, double* f) {
+        for (int i = 0; i < Nd_d; ++i)
+            f[i] = m_inv * r[i];
+    };
+
+    int iters = LinearSolver::aar(op, rhs, phi, Nd_d, params, *dmcomm_, &jacobi);
     return iters;
 }
 

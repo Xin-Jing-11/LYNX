@@ -146,14 +146,6 @@ EnergyComponents Energy::compute_all(
     // Veff = Vxc + phi + ... so we need to subtract double counting
     E.Etotal = E.Eband - E2 + E.Exc - E3 + E.Ehart + E.Eself + E.Ec + E.Entropy;
 
-    // Debug: print energy components
-    if (dmcomm.rank() == 0) {
-        std::printf("  Energy: Eband=%.6f Exc=%.6f Ehart=%.6f Eself=%.6f Ec=%.6f\n",
-                    E.Eband, E.Exc, E.Ehart, E.Eself, E.Ec);
-        std::printf("  Energy: E2(rho*Vxc)=%.6f E3(rho*phi)=%.6f Entropy=%.6f\n",
-                    E2, E3, E.Entropy);
-    }
-
     return E;
 }
 

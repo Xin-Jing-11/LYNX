@@ -22,7 +22,7 @@ struct AARParams {
     int m = 7;              // Anderson history depth
     int p = 6;              // Anderson update frequency (every p iterations)
     double tol = 1e-8;      // Convergence tolerance (relative residual)
-    int max_iter = 1000;
+    int max_iter = 3000;
 };
 
 class LinearSolver {

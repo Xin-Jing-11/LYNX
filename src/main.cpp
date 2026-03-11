@@ -116,6 +116,9 @@ int main(int argc, char** argv) {
         }
 
         // ===== Compute atom influence =====
+        // Reference SPARC uses Calculate_PseudochargeCutoff to find per-type cutoffs
+        // based on TOL_PSEUDOCHARGE. We add a margin to rc_max to ensure the
+        // pseudocharge influence region is large enough.
         double rc_max = 0.0;
         for (int it = 0; it < crystal.n_types(); ++it) {
             const auto& psd = crystal.types()[it].psd();
@@ -123,6 +126,10 @@ int main(int argc, char** argv) {
             if (!psd.radial_grid().empty())
                 rc_max = std::max(rc_max, psd.radial_grid().back());
         }
+        // Add margin for FD stencil and pseudocharge tail (matches reference behavior)
+        // Reference uses Calculate_PseudochargeCutoff to find per-type cutoffs.
+        // Adding ~2*h margin covers the FD stencil tail sufficiently.
+        rc_max += 2.0 * std::max({grid.dx(), grid.dy(), grid.dz()});
 
         std::vector<sparc::AtomInfluence> influence;
         crystal.compute_atom_influence(domain, rc_max, influence);

@@ -60,6 +60,7 @@ private:
     const HaloExchange* halo_ = nullptr;
     const FDGrid* grid_ = nullptr;
     const MPIComm* dmcomm_ = nullptr;
+    double precond_tol_ = 1e-4;  // TOL_PRECOND: default h_eff^2 * 1e-3
 
     // Apply Kerker preconditioner: solve -(Lap - kTF²)*Pf = (Lap - idiemac*kTF²)*f
     // Then Pf *= -amix

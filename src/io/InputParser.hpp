@@ -33,7 +33,7 @@ struct SystemConfig {
     // Electronic
     int Nstates = 0;
     SpinType spin_type = SpinType::None;
-    double elec_temp = 300.0;
+    double elec_temp = -1.0;         // Default: auto (0.2 eV for Gaussian, 0.1 eV for FD)
     SmearingType smearing = SmearingType::GaussianSmearing;
     XCType xc = XCType::GGA_PBE;
     int Nelectron = 0;
@@ -44,13 +44,13 @@ struct SystemConfig {
 
     // SCF
     int max_scf_iter = 100;
-    int min_scf_iter = 3;
+    int min_scf_iter = 2;
     double scf_tol = 1e-6;
     MixingVariable mixing_var = MixingVariable::Density;
     MixingPrecond mixing_precond = MixingPrecond::Kerker;
     int mixing_history = 7;
     double mixing_param = 0.3;
-    int cheb_degree = 20;
+    int cheb_degree = -1;            // Default: auto from Mesh2ChebDegree(h_eff)
     int rho_trigger = 4;
 
     // Parallelization
