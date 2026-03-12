@@ -4,6 +4,7 @@
 #include "core/NDArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/KPoints.hpp"
 #include "atoms/Crystal.hpp"
 #include "operators/FDStencil.hpp"
 #include "operators/Gradient.hpp"
@@ -47,7 +48,8 @@ public:
         const std::vector<double>& kpt_weights,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
-        const MPIComm& spincomm);
+        const MPIComm& spincomm,
+        const KPoints* kpoints = nullptr);
 
     const std::vector<double>& local_forces() const { return f_local_; }
     const std::vector<double>& nonlocal_forces() const { return f_nloc_; }
@@ -87,7 +89,8 @@ private:
         const std::vector<double>& kpt_weights,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
-        const MPIComm& spincomm);
+        const MPIComm& spincomm,
+        const KPoints* kpoints = nullptr);
 
     // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
     void compute_xc_nlcc(

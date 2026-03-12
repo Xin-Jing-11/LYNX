@@ -20,7 +20,8 @@ void SCF::setup(const FDGrid& grid,
                  const MPIComm& kptcomm,
                  const MPIComm& spincomm,
                  const SCFParams& params,
-                 int Nspin) {
+                 int Nspin,
+                 const KPoints* kpoints) {
     grid_ = &grid;
     domain_ = &domain;
     stencil_ = &stencil;
@@ -34,6 +35,8 @@ void SCF::setup(const FDGrid& grid,
     spincomm_ = &spincomm;
     params_ = params;
     Nspin_ = Nspin;
+    kpoints_ = kpoints;
+    is_kpt_ = kpoints && !kpoints->is_gamma_only();
 }
 
 void SCF::init_density(int Nd_d, int Nelectron) {
@@ -258,8 +261,14 @@ double SCF::run(Wavefunction& wfn,
             std::printf("Auto Chebyshev degree: %d (h_eff=%.6f)\n", params_.cheb_degree, h_eff);
     }
 
-    // kpoint weights (uniform grid)
-    std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
+    // K-point weights: from KPoints object if available, else uniform
+    std::vector<double> kpt_weights;
+    Vec3 cell_lengths = grid_->lattice().lengths();
+    if (kpoints_) {
+        kpt_weights = kpoints_->normalized_weights();
+    } else {
+        kpt_weights.assign(Nkpts, 1.0 / Nkpts);
+    }
 
     // Allocate work arrays (spin-resolved for Veff and Vxc)
     Veff_ = NDArray<double>(Nd_d * Nspin);
@@ -325,7 +334,14 @@ double SCF::run(Wavefunction& wfn,
 
     // Lanczos to estimate spectrum per spin
     for (int s = 0; s < Nspin; ++s) {
-        eigsolver.lanczos_bounds(Veff_.data() + s * Nd_d, Nd_d, eigval_min[s], eigval_max[s]);
+        if (is_kpt_) {
+            Vec3 kpt0 = kpoints_->kpts_cart()[0];
+            eigsolver.lanczos_bounds_kpt(Veff_.data() + s * Nd_d, Nd_d,
+                                          kpt0, cell_lengths,
+                                          eigval_min[s], eigval_max[s]);
+        } else {
+            eigsolver.lanczos_bounds(Veff_.data() + s * Nd_d, Nd_d, eigval_min[s], eigval_max[s]);
+        }
     }
     double lambda_cutoff = 0.5 * (eigval_min[0] + eigval_max[0]);  // initial guess
     if (true /* rank 0 */) {
@@ -345,7 +361,11 @@ double SCF::run(Wavefunction& wfn,
     unsigned rand_seed = spincomm_rank * 100 + 1;
     for (int s = 0; s < Nspin; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
-            wfn.randomize(s, k, rand_seed);
+            if (is_kpt_) {
+                wfn.randomize_kpt(s, k, rand_seed);
+            } else {
+                wfn.randomize(s, k, rand_seed);
+            }
         }
     }
 
@@ -372,12 +392,30 @@ double SCF::run(Wavefunction& wfn,
                 // Pass spin-specific Veff and spectral bounds to eigensolver
                 double* Veff_s = Veff_.data() + s * Nd_d;
                 for (int k = 0; k < Nkpts; ++k) {
-                    double* psi = wfn.psi(s, k).data();
                     double* eig = wfn.eigenvalues(s, k).data();
 
-                    eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband,
-                                    lambda_cutoff, eigval_min[s], eigval_max[s],
-                                    params_.cheb_degree);
+                    if (is_kpt_) {
+                        Complex* psi_c = wfn.psi_kpt(s, k).data();
+                        Vec3 kpt = kpoints_->kpts_cart()[k];
+
+                        // Set k-point on nonlocal projector for Bloch phase
+                        if (vnl_ && vnl_->is_setup()) {
+                            const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
+                            const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
+                        }
+
+                        eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband,
+                                            lambda_cutoff, eigval_min[s], eigval_max[s],
+                                            kpt, cell_lengths,
+                                            params_.cheb_degree,
+                                            wfn.psi_kpt(s, k).ld());
+                    } else {
+                        double* psi = wfn.psi(s, k).data();
+                        eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband,
+                                        lambda_cutoff, eigval_min[s], eigval_max[s],
+                                        params_.cheb_degree,
+                                        wfn.psi(s, k).ld());
+                    }
                 }
             }
 

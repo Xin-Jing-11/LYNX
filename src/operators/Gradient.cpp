@@ -6,6 +6,15 @@ Gradient::Gradient(const FDStencil& stencil, const Domain& domain)
     : stencil_(&stencil), domain_(&domain) {}
 
 void Gradient::apply(const double* x, double* y, int direction, int ncol) const {
+    apply_impl(x, y, direction, ncol);
+}
+
+void Gradient::apply(const Complex* x, Complex* y, int direction, int ncol) const {
+    apply_impl(x, y, direction, ncol);
+}
+
+template<typename T>
+void Gradient::apply_impl(const T* x, T* y, int direction, int ncol) const {
     int nx = domain_->Nx_d();
     int ny = domain_->Ny_d();
     int nz = domain_->Nz_d();
@@ -24,14 +33,14 @@ void Gradient::apply(const double* x, double* y, int direction, int ncol) const 
 
     for (int col = 0; col < ncol; ++col) {
         int nd = nx * ny * nz;
-        const double* xc = x + col * nx_ex * ny_ex * (nz + 2 * FDn);
-        double* yc = y + col * nd;
+        const T* xc = x + col * nx_ex * ny_ex * (nz + 2 * FDn);
+        T* yc = y + col * nd;
 
         for (int k = 0; k < nz; ++k) {
             for (int j = 0; j < ny; ++j) {
                 for (int i = 0; i < nx; ++i) {
                     int idx = (i + FDn) + (j + FDn) * nx_ex + (k + FDn) * nx_ex * ny_ex;
-                    double val = 0.0;
+                    T val = T(0);
                     for (int p = 1; p <= FDn; ++p) {
                         val += coeff[p] * (xc[idx + p * stride] - xc[idx - p * stride]);
                     }
@@ -41,5 +50,9 @@ void Gradient::apply(const double* x, double* y, int direction, int ncol) const 
         }
     }
 }
+
+// Explicit instantiations
+template void Gradient::apply_impl<double>(const double*, double*, int, int) const;
+template void Gradient::apply_impl<Complex>(const Complex*, Complex*, int, int) const;
 
 } // namespace sparc

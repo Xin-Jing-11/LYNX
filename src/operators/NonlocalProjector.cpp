@@ -221,4 +221,122 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
     }
 }
 
+void NonlocalProjector::apply_kpt(const Complex* psi, Complex* Hpsi, int ncol, double dV) const {
+    if (!is_setup_ || total_nproj_ == 0) return;
+
+    int Nd_d = domain_->Nd_d();
+    int ntypes = static_cast<int>(Chi_.size());
+    int n_atom = crystal_->n_atom_total();
+
+    // Global IP_displ: projector offset per physical atom
+    std::vector<int> IP_displ_global(n_atom + 1, 0);
+    {
+        int atom_idx = 0;
+        for (int it = 0; it < crystal_->n_types(); ++it) {
+            const auto& psd = crystal_->types()[it].psd();
+            int nproj = psd.nproj_per_atom();
+            int nat = crystal_->types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ++ia) {
+                IP_displ_global[atom_idx + 1] = IP_displ_global[atom_idx] + nproj;
+                atom_idx++;
+            }
+        }
+    }
+    int total_global_nproj = IP_displ_global[n_atom];
+
+    // Step 1: Compute alpha = bloch_fac * dV * Chi^T * psi (complex inner products)
+    std::vector<Complex> alpha(total_global_nproj * ncol, Complex(0.0, 0.0));
+
+    for (int it = 0; it < ntypes; ++it) {
+        const auto& inf = (*nloc_influence_)[it];
+        const auto& psd = crystal_->types()[it].psd();
+        int nproj = psd.nproj_per_atom();
+        if (nproj == 0) continue;
+
+        for (int iat = 0; iat < inf.n_atom; ++iat) {
+            int ndc = inf.ndc[iat];
+            if (ndc == 0) continue;
+
+            int global_atom = inf.atom_index[iat];
+            const auto& gpos = inf.grid_pos[iat];
+
+            // Bloch phase factor: e^{-i * k · R_image}
+            const Vec3& shift = inf.image_shift[iat];
+            double theta = -(kpt_cart_.x * shift.x + kpt_cart_.y * shift.y + kpt_cart_.z * shift.z);
+            Complex bloch_fac(std::cos(theta), std::sin(theta));
+            Complex alpha_scale = bloch_fac * dV;
+
+            int a_off = IP_displ_global[global_atom] * ncol;
+
+            for (int n = 0; n < ncol; ++n) {
+                const Complex* psi_n = psi + n * Nd_d;
+                for (int jp = 0; jp < nproj; ++jp) {
+                    Complex dot(0.0, 0.0);
+                    for (int ig = 0; ig < ndc; ++ig) {
+                        // Chi is real, psi is complex
+                        dot += Chi_[it][iat](ig, jp) * psi_n[gpos[ig]];
+                    }
+                    alpha[a_off + n * nproj + jp] += alpha_scale * dot;
+                }
+            }
+        }
+    }
+
+    // Step 2: Apply Gamma to alpha
+    {
+        int count = 0;
+        for (int it = 0; it < crystal_->n_types(); ++it) {
+            const auto& psd = crystal_->types()[it].psd();
+            int nat = crystal_->types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ++ia) {
+                for (int n = 0; n < ncol; ++n) {
+                    for (int l = 0; l <= psd.lmax(); ++l) {
+                        if (l == psd.lloc()) continue;
+                        for (int p = 0; p < psd.ppl()[l]; ++p) {
+                            double gamma = psd.Gamma()[l][p];
+                            for (int m = -l; m <= l; ++m) {
+                                alpha[count++] *= gamma;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 3: Accumulate: Hpsi += conj(bloch_fac) * Chi * alpha
+    for (int it = 0; it < ntypes; ++it) {
+        const auto& inf = (*nloc_influence_)[it];
+        const auto& psd = crystal_->types()[it].psd();
+        int nproj = psd.nproj_per_atom();
+        if (nproj == 0) continue;
+
+        for (int iat = 0; iat < inf.n_atom; ++iat) {
+            int ndc = inf.ndc[iat];
+            if (ndc == 0) continue;
+
+            int global_atom = inf.atom_index[iat];
+            const auto& gpos = inf.grid_pos[iat];
+
+            // Conjugate Bloch phase: e^{+i * k · R_image}
+            const Vec3& shift = inf.image_shift[iat];
+            double theta = -(kpt_cart_.x * shift.x + kpt_cart_.y * shift.y + kpt_cart_.z * shift.z);
+            Complex bloch_fac_conj(std::cos(theta), -std::sin(theta));
+
+            int a_off = IP_displ_global[global_atom] * ncol;
+
+            for (int n = 0; n < ncol; ++n) {
+                Complex* Hpsi_n = Hpsi + n * Nd_d;
+                for (int ig = 0; ig < ndc; ++ig) {
+                    Complex val(0.0, 0.0);
+                    for (int jp = 0; jp < nproj; ++jp) {
+                        val += Chi_[it][iat](ig, jp) * alpha[a_off + n * nproj + jp];
+                    }
+                    Hpsi_n[gpos[ig]] += bloch_fac_conj * val;
+                }
+            }
+        }
+    }
+}
+
 } // namespace sparc

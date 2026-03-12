@@ -25,6 +25,7 @@
 #include "physics/Electrostatics.hpp"
 #include "parallel/Parallelization.hpp"
 #include "parallel/HaloExchange.hpp"
+#include "core/KPoints.hpp"
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
@@ -77,9 +78,27 @@ int main(int argc, char** argv) {
             std::printf("\n");
         }
 
-        // ===== Setup parallelization =====
-        int Nkpts = config.Kx * config.Ky * config.Kz;
+        // ===== Generate k-point grid =====
+        sparc::KPoints kpoints;
+        kpoints.generate(config.Kx, config.Ky, config.Kz, config.kpt_shift, lattice);
+        int Nkpts = kpoints.Nkpts();  // symmetry-reduced count
+        bool is_kpt = !kpoints.is_gamma_only();
         int Nspin = (config.spin_type == sparc::SpinType::None) ? 1 : 2;
+
+        if (rank == 0) {
+            std::printf("K-points: %dx%dx%d grid, %d full -> %d symmetry-reduced%s\n",
+                        config.Kx, config.Ky, config.Kz,
+                        kpoints.Nkpts_full(), Nkpts,
+                        is_kpt ? " (complex)" : " (gamma-only)");
+            for (int i = 0; i < Nkpts && i < 10; ++i) {
+                auto& kr = kpoints.kpts_red()[i];
+                std::printf("  k[%2d]: %8.4f %8.4f %8.4f  wt=%.3f\n",
+                            i, kr.x, kr.y, kr.z, kpoints.weights()[i]);
+            }
+            if (Nkpts > 10)
+                std::printf("  ... (%d more)\n", Nkpts - 10);
+        }
+
         sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
 
@@ -243,11 +262,11 @@ int main(int argc, char** argv) {
 
         sparc::SCF scf;
         scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-                  halo, &vnl, bandcomm, kptcomm, spincomm, scf_params, Nspin);
+                  halo, &vnl, bandcomm, kptcomm, spincomm, scf_params, Nspin, &kpoints);
 
         // ===== Allocate wavefunctions =====
         sparc::Wavefunction wfn;
-        wfn.allocate(Nd_d, Nstates, Nspin, Nkpts);
+        wfn.allocate(Nd_d, Nstates, Nspin, Nkpts, is_kpt);
 
         // ===== Initialize density =====
         // Use atomic superposition if available
@@ -367,7 +386,7 @@ int main(int argc, char** argv) {
 
         // ===== Forces =====
         if (config.print_forces) {
-            std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
+            std::vector<double> kpt_weights = kpoints.normalized_weights();
             sparc::Forces forces;
             auto f = forces.compute(wfn, crystal, influence, nloc_influence, vnl,
                                     stencil, gradient, halo, domain, grid,
@@ -377,7 +396,7 @@ int main(int argc, char** argv) {
                                     elec.pseudocharge_ref().data(),
                                     scf.Vxc(),
                                     has_nlcc ? rho_core.data() : nullptr,
-                                    kpt_weights, bandcomm, kptcomm, spincomm);
+                                    kpt_weights, bandcomm, kptcomm, spincomm, &kpoints);
 
             if (rank == 0) {
                 std::printf("\nLocal forces (Ha/Bohr):\n");
@@ -410,7 +429,7 @@ int main(int argc, char** argv) {
 
         // ===== Stress =====
         if (config.calc_stress || config.calc_pressure) {
-            std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
+            std::vector<double> kpt_weights = kpoints.normalized_weights();
             sparc::Stress stress;
             int Nspin_calc = (config.spin_type == sparc::SpinType::Collinear) ? 2 : 1;
             const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
@@ -429,7 +448,7 @@ int main(int argc, char** argv) {
                                         config.xc,
                                         Nspin_calc,
                                         has_nlcc ? rho_core.data() : nullptr,
-                                        kpt_weights, bandcomm, kptcomm, spincomm);
+                                        kpt_weights, bandcomm, kptcomm, spincomm, &kpoints);
 
             if (rank == 0) {
                 std::printf("\nStress tensor (GPa):\n");

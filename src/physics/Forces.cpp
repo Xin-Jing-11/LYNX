@@ -5,6 +5,7 @@
 #include "atoms/Pseudopotential.hpp"
 #include <cmath>
 #include <cstring>
+#include <complex>
 #include <vector>
 #include <algorithm>
 #include <mpi.h>
@@ -33,7 +34,8 @@ std::vector<double> Forces::compute(
     const std::vector<double>& kpt_weights,
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
-    const MPIComm& spincomm) {
+    const MPIComm& spincomm,
+    const KPoints* kpoints) {
 
     int n_atom = crystal.n_atom_total();
     f_local_.assign(3 * n_atom, 0.0);
@@ -47,7 +49,7 @@ std::vector<double> Forces::compute(
 
     // Nonlocal force from KB projectors
     compute_nonlocal(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm);
+                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints);
 
     // Sum local + nonlocal
     for (int i = 0; i < 3 * n_atom; ++i) {
@@ -363,7 +365,8 @@ void Forces::compute_nonlocal(
     const std::vector<double>& kpt_weights,
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
-    const MPIComm& spincomm) {
+    const MPIComm& spincomm,
+    const KPoints* kpoints) {
 
     int n_atom = crystal.n_atom_total();
     int Nspin = wfn.Nspin();
@@ -373,6 +376,7 @@ void Forces::compute_nonlocal(
     double dV = grid.dV();
     int ntypes = crystal.n_types();
     int FDn = gradient.stencil().FDn();
+    bool is_kpt = wfn.is_complex();
 
     double occfac = (Nspin == 1) ? 2.0 : 1.0;
     double spn_fac = occfac * 2.0;
@@ -385,8 +389,10 @@ void Forces::compute_nonlocal(
     int nz_ex = nz + 2 * FDn;
     int Nd_ex = nx_ex * ny_ex * nz_ex;
 
+    // Cell lengths for complex halo exchange
+    Vec3 cell_lengths = grid.lattice().lengths();
+
     // Build per-unique-atom projector info and Gamma list
-    // IP_displ[ia+1] = cumulative projector count for atoms 0..ia
     std::vector<int> IP_displ(n_atom + 1, 0);
     for (int ia = 0; ia < n_atom; ++ia) {
         int it = crystal.type_indices()[ia];
@@ -418,48 +424,112 @@ void Forces::compute_nonlocal(
 
     for (int s = 0; s < Nspin; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
-            const NDArray<double>& psi_sk = wfn.psi(s, k);
+            double wk = kpt_weights[k];
             const NDArray<double>& occ_sk = wfn.occupations(s, k);
 
-            for (int n = 0; n < Nband; ++n) {
-                double g_n = occ_sk(n);
-                if (std::abs(g_n) < 1e-15) continue;
+            if (is_kpt) {
+                // ===== Complex k-point path =====
+                const NDArray<Complex>& psi_sk = wfn.psi_kpt(s, k);
+                Vec3 kpt_cart = kpoints->kpts_cart()[k];
 
-                const double* psi_n = psi_sk.data() + n * Nd_d;
+                for (int n = 0; n < Nband; ++n) {
+                    double g_n = occ_sk(n);
+                    if (std::abs(g_n) < 1e-15) continue;
 
-                // Compute alpha = <χ|ψ>*dV, accumulated per unique atom
-                std::vector<double> alpha(total_nproj, 0.0);
-                for (int it = 0; it < ntypes; ++it) {
-                    const auto& inf = nloc_influence[it];
-                    int nproj = crystal.types()[it].psd().nproj_per_atom();
-                    if (nproj == 0) continue;
+                    const Complex* psi_n = psi_sk.col(n);
 
-                    for (int iat = 0; iat < inf.n_atom; ++iat) {
-                        int ndc = inf.ndc[iat];
-                        if (ndc == 0) continue;
-                        int orig_atom = inf.atom_index[iat];
-                        int offset = IP_displ[orig_atom];
-                        const auto& gpos = inf.grid_pos[iat];
-                        const auto& chi_iat = Chi[it][iat];
+                    // Compute complex alpha = e^{-ik·R_img} * dV * Chi^T * psi
+                    std::vector<Complex> alpha(total_nproj, Complex(0.0, 0.0));
+                    for (int it = 0; it < ntypes; ++it) {
+                        const auto& inf = nloc_influence[it];
+                        int nproj = crystal.types()[it].psd().nproj_per_atom();
+                        if (nproj == 0) continue;
 
-                        for (int jp = 0; jp < nproj; ++jp) {
-                            double dot = 0.0;
-                            for (int ig = 0; ig < ndc; ++ig) {
-                                dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
+                        for (int iat = 0; iat < inf.n_atom; ++iat) {
+                            int ndc = inf.ndc[iat];
+                            if (ndc == 0) continue;
+                            int orig_atom = inf.atom_index[iat];
+                            int offset = IP_displ[orig_atom];
+                            const auto& gpos = inf.grid_pos[iat];
+                            const auto& chi_iat = Chi[it][iat];
+
+                            // Bloch phase: e^{-ik·R_image}
+                            const Vec3& shift = inf.image_shift[iat];
+                            double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                            Complex bloch_fac(std::cos(theta), std::sin(theta));
+                            Complex alpha_scale = bloch_fac * dV;
+
+                            for (int jp = 0; jp < nproj; ++jp) {
+                                Complex dot(0.0, 0.0);
+                                for (int ig = 0; ig < ndc; ++ig) {
+                                    dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
+                                }
+                                alpha[offset + jp] += alpha_scale * dot;
                             }
-                            alpha[offset + jp] += dot * dV;  // accumulate across images
+                        }
+                    }
+
+                    // For each direction, compute complex beta and accumulate force
+                    for (int dim = 0; dim < 3; ++dim) {
+                        std::vector<Complex> psi_ex(Nd_ex, Complex(0.0, 0.0));
+                        halo.execute_kpt(psi_n, psi_ex.data(), 1, kpt_cart, cell_lengths);
+                        std::vector<Complex> Dpsi(Nd_d, Complex(0.0, 0.0));
+                        gradient.apply(psi_ex.data(), Dpsi.data(), dim);
+
+                        std::vector<Complex> beta(total_nproj, Complex(0.0, 0.0));
+                        for (int it = 0; it < ntypes; ++it) {
+                            const auto& inf = nloc_influence[it];
+                            int nproj = crystal.types()[it].psd().nproj_per_atom();
+                            if (nproj == 0) continue;
+
+                            for (int iat = 0; iat < inf.n_atom; ++iat) {
+                                int ndc = inf.ndc[iat];
+                                if (ndc == 0) continue;
+                                int orig_atom = inf.atom_index[iat];
+                                int offset = IP_displ[orig_atom];
+                                const auto& gpos = inf.grid_pos[iat];
+                                const auto& chi_iat = Chi[it][iat];
+
+                                const Vec3& shift = inf.image_shift[iat];
+                                double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                                Complex bloch_fac(std::cos(theta), std::sin(theta));
+                                Complex beta_scale = bloch_fac * dV;
+
+                                for (int jp = 0; jp < nproj; ++jp) {
+                                    Complex dot(0.0, 0.0);
+                                    for (int ig = 0; ig < ndc; ++ig) {
+                                        dot += chi_iat(ig, jp) * Dpsi[gpos[ig]];
+                                    }
+                                    beta[offset + jp] += beta_scale * dot;
+                                }
+                            }
+                        }
+
+                        // Force: -spn_fac * wk * g_n * Re(Σ Gamma * conj(alpha) * beta)
+                        for (int ia = 0; ia < n_atom; ++ia) {
+                            int offset = IP_displ[ia];
+                            int nproj = IP_displ[ia + 1] - offset;
+                            double fJ = 0.0;
+                            for (int jp = 0; jp < nproj; ++jp) {
+                                fJ += Gamma_flat[offset + jp] *
+                                      std::real(std::conj(alpha[offset + jp]) * beta[offset + jp]);
+                            }
+                            f_nloc_[ia * 3 + dim] -= spn_fac * wk * g_n * fJ;
                         }
                     }
                 }
+            } else {
+                // ===== Real gamma-point path =====
+                const NDArray<double>& psi_sk = wfn.psi(s, k);
 
-                // For each direction, compute beta = <χ|∇ψ> accumulated per unique atom
-                for (int dim = 0; dim < 3; ++dim) {
-                    std::vector<double> psi_ex(Nd_ex, 0.0);
-                    halo.execute(psi_n, psi_ex.data(), 1);
-                    std::vector<double> Dpsi(Nd_d, 0.0);
-                    gradient.apply(psi_ex.data(), Dpsi.data(), dim);
+                for (int n = 0; n < Nband; ++n) {
+                    double g_n = occ_sk(n);
+                    if (std::abs(g_n) < 1e-15) continue;
 
-                    std::vector<double> beta(total_nproj, 0.0);
+                    const double* psi_n = psi_sk.col(n);
+
+                    // Compute alpha = <χ|ψ>*dV, accumulated per unique atom
+                    std::vector<double> alpha(total_nproj, 0.0);
                     for (int it = 0; it < ntypes; ++it) {
                         const auto& inf = nloc_influence[it];
                         int nproj = crystal.types()[it].psd().nproj_per_atom();
@@ -476,22 +546,54 @@ void Forces::compute_nonlocal(
                             for (int jp = 0; jp < nproj; ++jp) {
                                 double dot = 0.0;
                                 for (int ig = 0; ig < ndc; ++ig) {
-                                    dot += chi_iat(ig, jp) * Dpsi[gpos[ig]];
+                                    dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
                                 }
-                                beta[offset + jp] += dot * dV;
+                                alpha[offset + jp] += dot * dV;
                             }
                         }
                     }
 
-                    // Accumulate force per unique atom
-                    for (int ia = 0; ia < n_atom; ++ia) {
-                        int offset = IP_displ[ia];
-                        int nproj = IP_displ[ia + 1] - offset;
-                        double fJ = 0.0;
-                        for (int jp = 0; jp < nproj; ++jp) {
-                            fJ += Gamma_flat[offset + jp] * alpha[offset + jp] * beta[offset + jp];
+                    // For each direction, compute beta = <χ|∇ψ> accumulated per unique atom
+                    for (int dim = 0; dim < 3; ++dim) {
+                        std::vector<double> psi_ex(Nd_ex, 0.0);
+                        halo.execute(psi_n, psi_ex.data(), 1);
+                        std::vector<double> Dpsi(Nd_d, 0.0);
+                        gradient.apply(psi_ex.data(), Dpsi.data(), dim);
+
+                        std::vector<double> beta(total_nproj, 0.0);
+                        for (int it = 0; it < ntypes; ++it) {
+                            const auto& inf = nloc_influence[it];
+                            int nproj = crystal.types()[it].psd().nproj_per_atom();
+                            if (nproj == 0) continue;
+
+                            for (int iat = 0; iat < inf.n_atom; ++iat) {
+                                int ndc = inf.ndc[iat];
+                                if (ndc == 0) continue;
+                                int orig_atom = inf.atom_index[iat];
+                                int offset = IP_displ[orig_atom];
+                                const auto& gpos = inf.grid_pos[iat];
+                                const auto& chi_iat = Chi[it][iat];
+
+                                for (int jp = 0; jp < nproj; ++jp) {
+                                    double dot = 0.0;
+                                    for (int ig = 0; ig < ndc; ++ig) {
+                                        dot += chi_iat(ig, jp) * Dpsi[gpos[ig]];
+                                    }
+                                    beta[offset + jp] += dot * dV;
+                                }
+                            }
                         }
-                        f_nloc_[ia * 3 + dim] -= spn_fac * g_n * fJ;
+
+                        // Accumulate force per unique atom
+                        for (int ia = 0; ia < n_atom; ++ia) {
+                            int offset = IP_displ[ia];
+                            int nproj = IP_displ[ia + 1] - offset;
+                            double fJ = 0.0;
+                            for (int jp = 0; jp < nproj; ++jp) {
+                                fJ += Gamma_flat[offset + jp] * alpha[offset + jp] * beta[offset + jp];
+                            }
+                            f_nloc_[ia * 3 + dim] -= spn_fac * wk * g_n * fJ;
+                        }
                     }
                 }
             }

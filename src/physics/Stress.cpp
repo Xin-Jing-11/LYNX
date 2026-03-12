@@ -5,6 +5,7 @@
 #include "atoms/Pseudopotential.hpp"
 #include <cmath>
 #include <cstring>
+#include <complex>
 #include <vector>
 #include <algorithm>
 #include <mpi.h>
@@ -67,7 +68,8 @@ std::array<double, 6> Stress::compute(
     const std::vector<double>& kpt_weights,
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
-    const MPIComm& spincomm) {
+    const MPIComm& spincomm,
+    const KPoints* kpoints) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -98,7 +100,7 @@ std::array<double, 6> Stress::compute(
 
     // 3. Nonlocal + kinetic stress
     compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm);
+                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints);
 
     // Assemble total
     for (int i = 0; i < 6; ++i) {
@@ -691,7 +693,10 @@ void Stress::compute_nonlocal_kinetic(
     const std::vector<double>& kpt_weights,
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
-    const MPIComm& spincomm) {
+    const MPIComm& spincomm,
+    const KPoints* kpoints) {
+
+    using Complex = std::complex<double>;
 
     int Nspin = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
@@ -703,6 +708,7 @@ void Stress::compute_nonlocal_kinetic(
     int FDn = gradient.stencil().FDn();
     double occfac = (Nspin == 1) ? 2.0 : 1.0;
     double spn_fac = occfac * 2.0;
+    bool is_kpt = wfn.is_complex();
 
     bool is_orth = grid.lattice().is_orthogonal();
     Mat3 uvec_inv, uvec;
@@ -710,6 +716,8 @@ void Stress::compute_nonlocal_kinetic(
         uvec_inv = grid.lattice().lat_uvec_inv();
         uvec = grid.lattice().lat_uvec();
     }
+
+    Vec3 cell_lengths = grid.lattice().lengths();
 
     int nx_d = domain.Nx_d(), ny_d = domain.Ny_d(), nz_d = domain.Nz_d();
     int Nd_ex = (nx_d+2*FDn) * (ny_d+2*FDn) * (nz_d+2*FDn);
@@ -751,137 +759,272 @@ void Stress::compute_nonlocal_kinetic(
 
     for (int s = 0; s < Nspin; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
-            const auto& psi_sk = wfn.psi(s, k);
+            double wk = kpt_weights[k];
             const auto& occ_sk = wfn.occupations(s, k);
 
-            for (int n = 0; n < Nband; ++n) {
-                double g_n = occ_sk(n);
-                const double* psi_n = psi_sk.data() + n * Nd_d;
+            if (is_kpt) {
+                // ===== Complex k-point path =====
+                const auto& psi_sk = wfn.psi_kpt(s, k);
+                Vec3 kpt_cart = kpoints->kpts_cart()[k];
 
-                // Compute ∇ψ in all 3 non-Cart directions, then transform to Cartesian
-                // dpsi_cart[dim] = Cartesian gradient in direction dim
-                std::vector<double> dpsi_cart[3];
-                if (is_orth) {
-                    for (int dim = 0; dim < 3; ++dim) {
-                        dpsi_cart[dim].resize(Nd_d);
-                        std::vector<double> psi_ex(Nd_ex);
-                        halo.execute(psi_n, psi_ex.data(), 1);
-                        gradient.apply(psi_ex.data(), dpsi_cart[dim].data(), dim);
-                    }
-                } else {
-                    // Compute non-Cart gradients first
-                    std::vector<double> dpsi_nc[3];
-                    for (int dim = 0; dim < 3; ++dim) {
-                        dpsi_nc[dim].resize(Nd_d);
-                        std::vector<double> psi_ex(Nd_ex);
-                        halo.execute(psi_n, psi_ex.data(), 1);
-                        gradient.apply(psi_ex.data(), dpsi_nc[dim].data(), dim);
-                    }
-                    // Transform to Cartesian: dpsi_cart[α] = Σ_μ uvec_inv(α,μ) * dpsi_nc[μ]
-                    // (matching reference lines 1148-1158)
-                    for (int dim = 0; dim < 3; ++dim) {
-                        dpsi_cart[dim].resize(Nd_d);
-                    }
-                    for (int i = 0; i < Nd_d; ++i) {
-                        double d0 = dpsi_nc[0][i], d1 = dpsi_nc[1][i], d2 = dpsi_nc[2][i];
-                        dpsi_cart[0][i] = uvec_inv(0,0)*d0 + uvec_inv(0,1)*d1 + uvec_inv(0,2)*d2;
-                        dpsi_cart[1][i] = uvec_inv(1,0)*d0 + uvec_inv(1,1)*d1 + uvec_inv(1,2)*d2;
-                        dpsi_cart[2][i] = uvec_inv(2,0)*d0 + uvec_inv(2,1)*d1 + uvec_inv(2,2)*d2;
-                    }
-                }
+                for (int n = 0; n < Nband; ++n) {
+                    double g_n = occ_sk(n);
+                    const Complex* psi_n = psi_sk.col(n);
 
-                // Kinetic stress: σ_αβ = -occfac * g_n * <∂ψ/∂x_Cart_α | ∂ψ/∂x_Cart_β>
-                int cnt = 0;
-                for (int dim = 0; dim < 3; ++dim) {
-                    for (int dim2 = dim; dim2 < 3; ++dim2) {
-                        double dot = 0.0;
-                        for (int i = 0; i < Nd_d; ++i) dot += dpsi_cart[dim][i] * dpsi_cart[dim2][i];
-                        sk[cnt] -= occfac * g_n * dot * dV;
-                        cnt++;
-                    }
-                }
-
-                if (total_nproj == 0) continue;
-
-                // Compute alpha = <χ|ψ>*dV, accumulated per unique atom
-                std::vector<double> alpha(total_nproj, 0.0);
-                for (int it = 0; it < ntypes; ++it) {
-                    const auto& inf = nloc_influence[it];
-                    int nproj = crystal.types()[it].psd().nproj_per_atom();
-                    if (nproj == 0) continue;
-                    for (int iat = 0; iat < inf.n_atom; ++iat) {
-                        int ndc = inf.ndc[iat];
-                        if (ndc == 0) continue;
-                        int orig_atom = inf.atom_index[iat];
-                        int offset = IP_displ[orig_atom];
-                        const auto& gpos = inf.grid_pos[iat];
-                        const auto& chi_iat = Chi[it][iat];
-                        for (int jp = 0; jp < nproj; ++jp) {
-                            double dot = 0.0;
-                            for (int ig = 0; ig < ndc; ++ig)
-                                dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
-                            alpha[offset + jp] += dot * dV;
+                    // Compute complex ∇ψ in all 3 directions, transform to Cartesian
+                    std::vector<Complex> dpsi_cart[3];
+                    if (is_orth) {
+                        for (int dim = 0; dim < 3; ++dim) {
+                            dpsi_cart[dim].resize(Nd_d);
+                            std::vector<Complex> psi_ex(Nd_ex);
+                            halo.execute_kpt(psi_n, psi_ex.data(), 1, kpt_cart, cell_lengths);
+                            gradient.apply(psi_ex.data(), dpsi_cart[dim].data(), dim);
+                        }
+                    } else {
+                        std::vector<Complex> dpsi_nc[3];
+                        for (int dim = 0; dim < 3; ++dim) {
+                            dpsi_nc[dim].resize(Nd_d);
+                            std::vector<Complex> psi_ex(Nd_ex);
+                            halo.execute_kpt(psi_n, psi_ex.data(), 1, kpt_cart, cell_lengths);
+                            gradient.apply(psi_ex.data(), dpsi_nc[dim].data(), dim);
+                        }
+                        for (int dim = 0; dim < 3; ++dim) dpsi_cart[dim].resize(Nd_d);
+                        for (int i = 0; i < Nd_d; ++i) {
+                            Complex d0 = dpsi_nc[0][i], d1 = dpsi_nc[1][i], d2 = dpsi_nc[2][i];
+                            dpsi_cart[0][i] = uvec_inv(0,0)*d0 + uvec_inv(0,1)*d1 + uvec_inv(0,2)*d2;
+                            dpsi_cart[1][i] = uvec_inv(1,0)*d0 + uvec_inv(1,1)*d1 + uvec_inv(1,2)*d2;
+                            dpsi_cart[2][i] = uvec_inv(2,0)*d0 + uvec_inv(2,1)*d1 + uvec_inv(2,2)*d2;
                         }
                     }
-                }
-                // Nonlocal energy
-                for (int ia = 0; ia < n_atom; ++ia) {
-                    int off = IP_displ[ia];
-                    int np = IP_displ[ia + 1] - off;
-                    for (int jp = 0; jp < np; ++jp)
-                        energy_nl += g_n * Gamma_flat[off + jp] * alpha[off + jp] * alpha[off + jp];
-                }
 
-                // Nonlocal stress: beta = <χ|(x-R)_Cart_dim2 · ∂ψ/∂x_Cart_dim>
-                cnt = 0;
-                for (int dim = 0; dim < 3; ++dim) {
-                    for (int dim2 = dim; dim2 < 3; ++dim2) {
-                        std::vector<double> beta(total_nproj, 0.0);
-                        for (int it = 0; it < ntypes; ++it) {
-                            const auto& inf = nloc_influence[it];
-                            int nproj = crystal.types()[it].psd().nproj_per_atom();
-                            if (nproj == 0) continue;
-                            for (int iat = 0; iat < inf.n_atom; ++iat) {
-                                int ndc = inf.ndc[iat];
-                                if (ndc == 0) continue;
-                                int orig_atom = inf.atom_index[iat];
-                                int offset = IP_displ[orig_atom];
-                                const auto& gpos = inf.grid_pos[iat];
-                                const auto& chi_iat = Chi[it][iat];
-                                Vec3 ap = inf.coords[iat];
+                    // Kinetic stress: σ_αβ = -occfac * wk * g_n * Re(<∂ψ/∂x_α | ∂ψ/∂x_β>)
+                    int cnt = 0;
+                    for (int dim = 0; dim < 3; ++dim) {
+                        for (int dim2 = dim; dim2 < 3; ++dim2) {
+                            double dot = 0.0;
+                            for (int i = 0; i < Nd_d; ++i)
+                                dot += std::real(std::conj(dpsi_cart[dim][i]) * dpsi_cart[dim2][i]);
+                            sk[cnt] -= occfac * wk * g_n * dot * dV;
+                            cnt++;
+                        }
+                    }
 
-                                for (int jp = 0; jp < nproj; ++jp) {
-                                    double dot = 0.0;
-                                    for (int ig = 0; ig < ndc; ++ig) {
-                                        int flat = gpos[ig];
-                                        int li = flat % nx_d;
-                                        int lj = (flat / nx_d) % ny_d;
-                                        int lk = flat / (nx_d * ny_d);
+                    if (total_nproj == 0) continue;
 
-                                        // Position in non-Cart
-                                        double r1 = (li + domain.vertices().xs) * grid.dx() - ap.x;
-                                        double r2 = (lj + domain.vertices().ys) * grid.dy() - ap.y;
-                                        double r3 = (lk + domain.vertices().zs) * grid.dz() - ap.z;
+                    // Complex alpha = e^{-ik·R_img} * dV * Chi^T * psi
+                    std::vector<Complex> alpha(total_nproj, Complex(0.0, 0.0));
+                    for (int it = 0; it < ntypes; ++it) {
+                        const auto& inf = nloc_influence[it];
+                        int nproj = crystal.types()[it].psd().nproj_per_atom();
+                        if (nproj == 0) continue;
+                        for (int iat = 0; iat < inf.n_atom; ++iat) {
+                            int ndc = inf.ndc[iat];
+                            if (ndc == 0) continue;
+                            int orig_atom = inf.atom_index[iat];
+                            int offset = IP_displ[orig_atom];
+                            const auto& gpos = inf.grid_pos[iat];
+                            const auto& chi_iat = Chi[it][iat];
 
-                                        // Transform to Cartesian
-                                        if (!is_orth) nonCart2Cart_coord(uvec, r1, r2, r3);
+                            const Vec3& shift = inf.image_shift[iat];
+                            double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                            Complex bloch_fac(std::cos(theta), std::sin(theta));
+                            Complex alpha_scale = bloch_fac * dV;
 
-                                        double xR = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
-                                        // dpsi_cart is already in Cartesian
-                                        dot += chi_iat(ig, jp) * xR * dpsi_cart[dim][gpos[ig]];
-                                    }
-                                    beta[offset + jp] += dot * dV;
-                                }
+                            for (int jp = 0; jp < nproj; ++jp) {
+                                Complex dot(0.0, 0.0);
+                                for (int ig = 0; ig < ndc; ++ig)
+                                    dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
+                                alpha[offset + jp] += alpha_scale * dot;
                             }
                         }
-                        // Accumulate nonlocal stress per unique atom
-                        for (int ia = 0; ia < n_atom; ++ia) {
-                            int off = IP_displ[ia];
-                            int np = IP_displ[ia + 1] - off;
-                            for (int jp = 0; jp < np; ++jp)
-                                snl[cnt] -= Gamma_flat[off + jp] * alpha[off + jp] * beta[off + jp] * g_n;
+                    }
+
+                    // Nonlocal energy: wk * g_n * Σ Gamma * |alpha|^2
+                    for (int ia = 0; ia < n_atom; ++ia) {
+                        int off = IP_displ[ia];
+                        int np = IP_displ[ia + 1] - off;
+                        for (int jp = 0; jp < np; ++jp)
+                            energy_nl += wk * g_n * Gamma_flat[off + jp] * std::norm(alpha[off + jp]);
+                    }
+
+                    // Nonlocal stress: beta = <χ|(x-R)_dim2 · ∂ψ/∂x_dim> with Bloch phase
+                    cnt = 0;
+                    for (int dim = 0; dim < 3; ++dim) {
+                        for (int dim2 = dim; dim2 < 3; ++dim2) {
+                            std::vector<Complex> beta(total_nproj, Complex(0.0, 0.0));
+                            for (int it = 0; it < ntypes; ++it) {
+                                const auto& inf = nloc_influence[it];
+                                int nproj = crystal.types()[it].psd().nproj_per_atom();
+                                if (nproj == 0) continue;
+                                for (int iat = 0; iat < inf.n_atom; ++iat) {
+                                    int ndc = inf.ndc[iat];
+                                    if (ndc == 0) continue;
+                                    int orig_atom = inf.atom_index[iat];
+                                    int offset = IP_displ[orig_atom];
+                                    const auto& gpos = inf.grid_pos[iat];
+                                    const auto& chi_iat = Chi[it][iat];
+                                    Vec3 ap = inf.coords[iat];
+
+                                    const Vec3& shift = inf.image_shift[iat];
+                                    double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                                    Complex bloch_fac(std::cos(theta), std::sin(theta));
+                                    Complex beta_scale = bloch_fac * dV;
+
+                                    for (int jp = 0; jp < nproj; ++jp) {
+                                        Complex dot(0.0, 0.0);
+                                        for (int ig = 0; ig < ndc; ++ig) {
+                                            int flat = gpos[ig];
+                                            int li = flat % nx_d;
+                                            int lj = (flat / nx_d) % ny_d;
+                                            int lk = flat / (nx_d * ny_d);
+
+                                            double r1 = (li + domain.vertices().xs) * grid.dx() - ap.x;
+                                            double r2 = (lj + domain.vertices().ys) * grid.dy() - ap.y;
+                                            double r3 = (lk + domain.vertices().zs) * grid.dz() - ap.z;
+                                            if (!is_orth) nonCart2Cart_coord(uvec, r1, r2, r3);
+
+                                            double xR = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
+                                            dot += chi_iat(ig, jp) * xR * dpsi_cart[dim][gpos[ig]];
+                                        }
+                                        beta[offset + jp] += beta_scale * dot;
+                                    }
+                                }
+                            }
+                            // Re(conj(alpha) * beta)
+                            for (int ia = 0; ia < n_atom; ++ia) {
+                                int off = IP_displ[ia];
+                                int np = IP_displ[ia + 1] - off;
+                                for (int jp = 0; jp < np; ++jp)
+                                    snl[cnt] -= Gamma_flat[off + jp] *
+                                                std::real(std::conj(alpha[off + jp]) * beta[off + jp]) *
+                                                wk * g_n;
+                            }
+                            cnt++;
                         }
-                        cnt++;
+                    }
+                }
+            } else {
+                // ===== Real gamma-point path =====
+                const auto& psi_sk = wfn.psi(s, k);
+
+                for (int n = 0; n < Nband; ++n) {
+                    double g_n = occ_sk(n);
+                    const double* psi_n = psi_sk.col(n);
+
+                    std::vector<double> dpsi_cart[3];
+                    if (is_orth) {
+                        for (int dim = 0; dim < 3; ++dim) {
+                            dpsi_cart[dim].resize(Nd_d);
+                            std::vector<double> psi_ex(Nd_ex);
+                            halo.execute(psi_n, psi_ex.data(), 1);
+                            gradient.apply(psi_ex.data(), dpsi_cart[dim].data(), dim);
+                        }
+                    } else {
+                        std::vector<double> dpsi_nc[3];
+                        for (int dim = 0; dim < 3; ++dim) {
+                            dpsi_nc[dim].resize(Nd_d);
+                            std::vector<double> psi_ex(Nd_ex);
+                            halo.execute(psi_n, psi_ex.data(), 1);
+                            gradient.apply(psi_ex.data(), dpsi_nc[dim].data(), dim);
+                        }
+                        for (int dim = 0; dim < 3; ++dim) dpsi_cart[dim].resize(Nd_d);
+                        for (int i = 0; i < Nd_d; ++i) {
+                            double d0 = dpsi_nc[0][i], d1 = dpsi_nc[1][i], d2 = dpsi_nc[2][i];
+                            dpsi_cart[0][i] = uvec_inv(0,0)*d0 + uvec_inv(0,1)*d1 + uvec_inv(0,2)*d2;
+                            dpsi_cart[1][i] = uvec_inv(1,0)*d0 + uvec_inv(1,1)*d1 + uvec_inv(1,2)*d2;
+                            dpsi_cart[2][i] = uvec_inv(2,0)*d0 + uvec_inv(2,1)*d1 + uvec_inv(2,2)*d2;
+                        }
+                    }
+
+                    // Kinetic stress
+                    int cnt = 0;
+                    for (int dim = 0; dim < 3; ++dim) {
+                        for (int dim2 = dim; dim2 < 3; ++dim2) {
+                            double dot = 0.0;
+                            for (int i = 0; i < Nd_d; ++i) dot += dpsi_cart[dim][i] * dpsi_cart[dim2][i];
+                            sk[cnt] -= occfac * wk * g_n * dot * dV;
+                            cnt++;
+                        }
+                    }
+
+                    if (total_nproj == 0) continue;
+
+                    // Real alpha
+                    std::vector<double> alpha(total_nproj, 0.0);
+                    for (int it = 0; it < ntypes; ++it) {
+                        const auto& inf = nloc_influence[it];
+                        int nproj = crystal.types()[it].psd().nproj_per_atom();
+                        if (nproj == 0) continue;
+                        for (int iat = 0; iat < inf.n_atom; ++iat) {
+                            int ndc = inf.ndc[iat];
+                            if (ndc == 0) continue;
+                            int orig_atom = inf.atom_index[iat];
+                            int offset = IP_displ[orig_atom];
+                            const auto& gpos = inf.grid_pos[iat];
+                            const auto& chi_iat = Chi[it][iat];
+                            for (int jp = 0; jp < nproj; ++jp) {
+                                double dot = 0.0;
+                                for (int ig = 0; ig < ndc; ++ig)
+                                    dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
+                                alpha[offset + jp] += dot * dV;
+                            }
+                        }
+                    }
+
+                    // Nonlocal energy
+                    for (int ia = 0; ia < n_atom; ++ia) {
+                        int off = IP_displ[ia];
+                        int np = IP_displ[ia + 1] - off;
+                        for (int jp = 0; jp < np; ++jp)
+                            energy_nl += wk * g_n * Gamma_flat[off + jp] * alpha[off + jp] * alpha[off + jp];
+                    }
+
+                    // Nonlocal stress
+                    cnt = 0;
+                    for (int dim = 0; dim < 3; ++dim) {
+                        for (int dim2 = dim; dim2 < 3; ++dim2) {
+                            std::vector<double> beta(total_nproj, 0.0);
+                            for (int it = 0; it < ntypes; ++it) {
+                                const auto& inf = nloc_influence[it];
+                                int nproj = crystal.types()[it].psd().nproj_per_atom();
+                                if (nproj == 0) continue;
+                                for (int iat = 0; iat < inf.n_atom; ++iat) {
+                                    int ndc = inf.ndc[iat];
+                                    if (ndc == 0) continue;
+                                    int orig_atom = inf.atom_index[iat];
+                                    int offset = IP_displ[orig_atom];
+                                    const auto& gpos = inf.grid_pos[iat];
+                                    const auto& chi_iat = Chi[it][iat];
+                                    Vec3 ap = inf.coords[iat];
+
+                                    for (int jp = 0; jp < nproj; ++jp) {
+                                        double dot = 0.0;
+                                        for (int ig = 0; ig < ndc; ++ig) {
+                                            int flat = gpos[ig];
+                                            int li = flat % nx_d;
+                                            int lj = (flat / nx_d) % ny_d;
+                                            int lk = flat / (nx_d * ny_d);
+
+                                            double r1 = (li + domain.vertices().xs) * grid.dx() - ap.x;
+                                            double r2 = (lj + domain.vertices().ys) * grid.dy() - ap.y;
+                                            double r3 = (lk + domain.vertices().zs) * grid.dz() - ap.z;
+                                            if (!is_orth) nonCart2Cart_coord(uvec, r1, r2, r3);
+
+                                            double xR = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
+                                            dot += chi_iat(ig, jp) * xR * dpsi_cart[dim][gpos[ig]];
+                                        }
+                                        beta[offset + jp] += dot * dV;
+                                    }
+                                }
+                            }
+                            for (int ia = 0; ia < n_atom; ++ia) {
+                                int off = IP_displ[ia];
+                                int np = IP_displ[ia + 1] - off;
+                                for (int jp = 0; jp < np; ++jp)
+                                    snl[cnt] -= Gamma_flat[off + jp] * alpha[off + jp] * beta[off + jp] * wk * g_n;
+                            }
+                            cnt++;
+                        }
                     }
                 }
             }

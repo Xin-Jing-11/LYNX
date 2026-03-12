@@ -125,11 +125,10 @@ private:
     int ld_ = 0;
     int alloc_size_ = 0;
 
-    // Pad leading dimension to multiple of 8 doubles (64 bytes)
+    // Pad leading dimension to multiple of 8 elements (64 bytes for double, 128 for Complex)
     static int pad_ld(int rows) {
-        // Disable padding for now to avoid stride mismatches in EigenSolver, etc.
-        // TODO: Re-enable when all code properly handles leading dimensions
-        return rows;
+        constexpr int align_elems = 8;
+        return (rows + align_elems - 1) / align_elems * align_elems;
     }
 
     void init(int d0, int d1, int d2, int ndim) {

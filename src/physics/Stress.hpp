@@ -4,6 +4,7 @@
 #include "core/NDArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/KPoints.hpp"
 #include "atoms/Crystal.hpp"
 #include "operators/FDStencil.hpp"
 #include "operators/Gradient.hpp"
@@ -59,7 +60,8 @@ public:
         const std::vector<double>& kpt_weights,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
-        const MPIComm& spincomm);
+        const MPIComm& spincomm,
+        const KPoints* kpoints = nullptr);
 
     double pressure() const;
 
@@ -133,7 +135,8 @@ private:
         const std::vector<double>& kpt_weights,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
-        const MPIComm& spincomm);
+        const MPIComm& spincomm,
+        const KPoints* kpoints = nullptr);
 };
 
 } // namespace sparc

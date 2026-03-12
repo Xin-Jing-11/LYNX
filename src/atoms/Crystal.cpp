@@ -240,6 +240,7 @@ void Crystal::compute_nloc_influence(const Domain& domain,
                             inf.zs.push_back(zs_l); inf.ze.push_back(ze_l);
                             inf.ndc.push_back(static_cast<int>(gpos.size()));
                             inf.grid_pos.push_back(std::move(gpos));
+                            inf.image_shift.push_back({ix * L.x, iy * L.y, iz * L.z});
                         }
                     }
                 }

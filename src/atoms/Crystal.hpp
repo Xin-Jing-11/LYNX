@@ -26,6 +26,7 @@ struct AtomNlocInfluence {
     std::vector<int> xs, xe, ys, ye, zs, ze;
     std::vector<int> ndc;                    // grid points in rc-domain per atom
     std::vector<std::vector<int>> grid_pos;  // local grid positions in rc-sphere
+    std::vector<Vec3> image_shift;           // periodic image shift (ix*Lx, iy*Ly, iz*Lz) for Bloch phase
 };
 
 // Stores all atoms in the simulation: positions, types, and influence info

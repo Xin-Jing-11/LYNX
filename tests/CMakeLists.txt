@@ -16,6 +16,7 @@ add_executable(sparc_tests
     test_Energy.cpp
     test_Forces.cpp
     test_Stress.cpp
+    test_KPoints.cpp
     test_EndToEnd.cpp
 )
 target_link_libraries(sparc_tests PRIVATE sparc_core GTest::gtest_main)

@@ -3,6 +3,7 @@ add_library(sparc_core
     core/Lattice.cpp
     core/FDGrid.cpp
     core/Domain.cpp
+    core/KPoints.cpp
     parallel/MPIComm.cpp
     parallel/Parallelization.cpp
     parallel/HaloExchange.cpp

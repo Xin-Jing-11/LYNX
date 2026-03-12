@@ -4,6 +4,7 @@
 #include "core/NDArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/KPoints.hpp"
 #include "operators/Hamiltonian.hpp"
 #include "operators/FDStencil.hpp"
 #include "operators/Laplacian.hpp"
@@ -59,7 +60,8 @@ public:
                const MPIComm& kptcomm,
                const MPIComm& spincomm,
                const SCFParams& params,
-               int Nspin = 1);  // dmcomm removed (no domain decomposition)
+               int Nspin = 1,
+               const KPoints* kpoints = nullptr);  // k-point info (null = gamma-only)
 
     // Run self-consistent field loop
     // Returns total energy
@@ -117,6 +119,8 @@ private:
     const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
 
     int Nspin_ = 1;  // number of spin channels
+    const KPoints* kpoints_ = nullptr;  // k-point info (null = gamma-only)
+    bool is_kpt_ = false;               // true if using k-points (complex wavefunctions)
 
     // Compute effective potential: Veff = Vxc + phi + Vloc
     // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns
