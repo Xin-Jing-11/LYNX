@@ -1,353 +1,645 @@
 #include "physics/Stress.hpp"
+#include "physics/Electrostatics.hpp"
 #include "core/constants.hpp"
+#include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
 #include <cmath>
 #include <cstring>
 #include <vector>
 #include <algorithm>
 #include <mpi.h>
+#include <cassert>
 
 namespace sparc {
 
-// Index mapping for 6-component Voigt notation:
-// 0=xx, 1=xy, 2=xz, 3=yy, 4=yz, 5=zz
-// dim_pairs[i] = (dim1, dim2)
-static const int dim1[6] = {0, 0, 0, 1, 1, 2};
-static const int dim2[6] = {0, 1, 2, 1, 2, 2};
+// Transform gradient from non-Cartesian to Cartesian: ∇_cart = LatUVec^{-1} * ∇_nc
+// (matching reference SPARC nonCart2Cart_grad, which uses gradT^T)
+static inline void nonCart2Cart_grad(const Mat3& uvec_inv, double& x, double& y, double& z) {
+    double a = x, b = y, c = z;
+    x = uvec_inv(0,0)*a + uvec_inv(0,1)*b + uvec_inv(0,2)*c;
+    y = uvec_inv(1,0)*a + uvec_inv(1,1)*b + uvec_inv(1,2)*c;
+    z = uvec_inv(2,0)*a + uvec_inv(2,1)*b + uvec_inv(2,2)*c;
+}
+
+// Transform coordinates from non-Cartesian to Cartesian: cart = LatUVec^T * nc
+// (matching reference SPARC nonCart2Cart_coord, which uses LatUVec columns)
+static inline void nonCart2Cart_coord(const Mat3& uvec, double& x, double& y, double& z) {
+    double a = x, b = y, c = z;
+    // cart_j = Σ_i nc_i * LatUVec(i,j) = (LatUVec^T * nc)_j
+    x = uvec(0,0)*a + uvec(1,0)*b + uvec(2,0)*c;
+    y = uvec(0,1)*a + uvec(1,1)*b + uvec(2,1)*c;
+    z = uvec(0,2)*a + uvec(1,2)*b + uvec(2,2)*c;
+}
+
+// Transform arrays of non-Cart gradients to Cartesian
+static void nonCart2Cart_grad_arrays(const Mat3& uvec_inv, double* gx, double* gy, double* gz, int n) {
+    for (int i = 0; i < n; ++i) {
+        nonCart2Cart_grad(uvec_inv, gx[i], gy[i], gz[i]);
+    }
+}
 
 std::array<double, 6> Stress::compute(
     const Wavefunction& wfn,
     const Crystal& crystal,
+    const std::vector<AtomInfluence>& influence,
     const std::vector<AtomNlocInfluence>& nloc_influence,
     const NonlocalProjector& vnl,
+    const FDStencil& stencil,
     const Gradient& gradient,
     const HaloExchange& halo,
     const Domain& domain,
     const FDGrid& grid,
     const double* phi,
     const double* rho,
-    const double* rho_b,
+    const double* Vloc,
+    const double* b,
+    const double* b_ref,
     const double* exc,
     const double* Vxc,
+    const double* Dxcdgrho,
     double Exc,
+    double Esc,
     XCType xc_type,
+    const double* rho_core,
     const std::vector<double>& kpt_weights,
-    const MPIComm& dmcomm,
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
     const MPIComm& spincomm) {
 
-    // Cell measure = volume for fully periodic 3D
-    const Lattice& lat = grid.lattice();
-    cell_measure_ = std::abs(lat.latvec().determinant());
+    stress_k_.fill(0.0);
+    stress_xc_.fill(0.0);
+    stress_el_.fill(0.0);
+    stress_nl_.fill(0.0);
+    stress_total_.fill(0.0);
 
-    // Compute each component
-    compute_kinetic(wfn, gradient, halo, domain, grid, kpt_weights,
-                    dmcomm, bandcomm, kptcomm, spincomm);
+    // Cell measure: for 3D periodic, volume = Jacbdet * prod(L_periodic)
+    const auto& lat = grid.lattice();
+    Vec3 L = lat.lengths();
+    double Jacbdet = lat.jacobian() / (L.x * L.y * L.z);
+    cell_measure_ = Jacbdet;
+    if (grid.bcx() == BCType::Periodic) cell_measure_ *= L.x;
+    if (grid.bcy() == BCType::Periodic) cell_measure_ *= L.y;
+    if (grid.bcz() == BCType::Periodic) cell_measure_ *= L.z;
 
-    compute_xc(rho, exc, Vxc, Exc, xc_type, gradient, halo, domain, grid, dmcomm);
+    // 1. XC stress
+    compute_xc_stress(rho, exc, Vxc, Dxcdgrho, Exc, xc_type, rho_core, gradient, halo, domain, grid);
 
-    compute_electrostatic(phi, rho, rho_b, gradient, halo, domain, grid, dmcomm);
+    // 1b. NLCC XC stress correction
+    if (rho_core) {
+        compute_xc_nlcc_stress(crystal, influence, stencil, domain, grid, Vxc);
+    }
 
-    compute_nonlocal(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                     domain, grid, kpt_weights, dmcomm, bandcomm, kptcomm, spincomm);
+    // 2. Electrostatic (local) stress
+    compute_electrostatic(crystal, influence, stencil, gradient, halo,
+                          domain, grid, phi, rho, Vloc, b, b_ref, Esc);
+
+    // 3. Nonlocal + kinetic stress
+    compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, gradient, halo,
+                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm);
 
     // Assemble total
     for (int i = 0; i < 6; ++i) {
-        stress_total_[i] = stress_k_[i] + stress_xc_[i] + stress_el_[i] + stress_nl_[i];
+        stress_total_[i] = stress_k_[i] + stress_xc_[i] + stress_nl_[i] + stress_el_[i];
     }
 
     return stress_total_;
 }
 
 double Stress::pressure() const {
-    // P = -(1/3) * (σ_xx + σ_yy + σ_zz)
     return -(stress_total_[0] + stress_total_[3] + stress_total_[5]) / 3.0;
 }
 
 // ---------------------------------------------------------------------------
-// Kinetic stress: σ_k[α,β] = -occfac * Σ_n g_n * <∂ψ/∂x_α | ∂ψ/∂x_β>
-// Normalized by cell_measure.
+// XC stress (matching reference Calculate_XC_stress)
 // ---------------------------------------------------------------------------
-void Stress::compute_kinetic(
-    const Wavefunction& wfn,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
-    const std::vector<double>& kpt_weights,
-    const MPIComm& dmcomm,
-    const MPIComm& bandcomm,
-    const MPIComm& kptcomm,
-    const MPIComm& spincomm) {
-
-    stress_k_.fill(0.0);
-
-    int Nspin = wfn.Nspin();
-    int Nkpts = wfn.Nkpts();
-    int Nband = wfn.Nband();
-    int Nd_d = domain.Nd_d();
-    double dV = grid.dV();
-    double occfac = (Nspin == 1) ? 2.0 : 1.0;
-
-    int FDn = gradient.stencil().FDn();
-    int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
-    int Nd_ex = (nx + 2 * FDn) * (ny + 2 * FDn) * (nz + 2 * FDn);
-
-    // Storage for ∂ψ/∂x_α (3 directions)
-    std::vector<double> dpsi[3];
-    for (int d = 0; d < 3; ++d) dpsi[d].resize(Nd_d);
-
-    for (int s = 0; s < Nspin; ++s) {
-        for (int k = 0; k < Nkpts; ++k) {
-            const NDArray<double>& psi_sk = wfn.psi(s, k);
-            const NDArray<double>& occ_sk = wfn.occupations(s, k);
-            double wk = kpt_weights[k];
-
-            for (int n = 0; n < Nband; ++n) {
-                double g_n = occ_sk(n);
-                if (std::abs(g_n) < 1e-15) continue;
-
-                const double* psi_n = psi_sk.data() + n * Nd_d;
-
-                // Extend psi for gradient
-                std::vector<double> psi_ex(Nd_ex, 0.0);
-                halo.execute(psi_n, psi_ex.data(), 1);
-
-                // Compute gradient in each direction
-                for (int d = 0; d < 3; ++d) {
-                    gradient.apply(psi_ex.data(), dpsi[d].data(), d);
-                }
-
-                // Accumulate stress components
-                for (int c = 0; c < 6; ++c) {
-                    int d1 = dim1[c], d2 = dim2[c];
-                    double dot = 0.0;
-                    for (int i = 0; i < Nd_d; ++i) {
-                        dot += dpsi[d1][i] * dpsi[d2][i];
-                    }
-                    stress_k_[c] -= occfac * wk * g_n * dot * dV;
-                }
-            }
-        }
-    }
-
-    // MPI reductions
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_k_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, dmcomm.comm());
-    }
-    if (!bandcomm.is_null() && bandcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_k_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, bandcomm.comm());
-    }
-    if (!kptcomm.is_null() && kptcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_k_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, kptcomm.comm());
-    }
-    if (!spincomm.is_null() && spincomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_k_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, spincomm.comm());
-    }
-
-    // Normalize by cell volume
-    for (int i = 0; i < 6; ++i) {
-        stress_k_[i] /= cell_measure_;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// XC stress: diagonal = Exc, off-diagonal = 0 for LDA.
-// For GGA: σ_xc[α,β] = Exc·δ_αβ - ∫ (∂ρ/∂x_α)(∂ρ/∂x_β) · Dxcdgrho dV
-// where Dxcdgrho = d(ρ·ε_xc)/d(|∇ρ|²) = v2xc
-// Normalized by cell_measure.
-// ---------------------------------------------------------------------------
-void Stress::compute_xc(
+void Stress::compute_xc_stress(
     const double* rho,
     const double* exc,
     const double* Vxc,
+    const double* Dxcdgrho,
     double Exc,
     XCType xc_type,
+    const double* rho_core,
     const Gradient& gradient,
     const HaloExchange& halo,
     const Domain& domain,
-    const FDGrid& grid,
-    const MPIComm& dmcomm) {
+    const FDGrid& grid) {
 
-    stress_xc_.fill(0.0);
+    int Nd_d = domain.Nd_d();
+    double dV = grid.dV();
+    bool is_orth = grid.lattice().is_orthogonal();
 
-    // LDA diagonal: σ_xc = Exc * δ_αβ
-    stress_xc_[0] = Exc;  // xx
-    stress_xc_[3] = Exc;  // yy
-    stress_xc_[5] = Exc;  // zz
+    // Compute Exc_corr = ∫ ρ·Vxc dV
+    double Exc_corr = 0.0;
+    for (int i = 0; i < Nd_d; ++i) {
+        Exc_corr += rho[i] * Vxc[i];
+    }
+    Exc_corr *= dV;
+
+    // Diagonal: Exc - Exc_corr
+    double diag_val = Exc - Exc_corr;
+    stress_xc_[0] = stress_xc_[3] = stress_xc_[5] = diag_val;
+    stress_xc_[1] = stress_xc_[2] = stress_xc_[4] = 0.0;
 
     // GGA gradient correction
-    bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol ||
-                   xc_type == XCType::GGA_RPBE);
-
-    if (is_gga) {
-        int Nd_d = domain.Nd_d();
-        double dV = grid.dV();
-
+    bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol || xc_type == XCType::GGA_RPBE);
+    if (is_gga && Dxcdgrho) {
         int FDn = gradient.stencil().FDn();
         int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
-        int Nd_ex = (nx + 2 * FDn) * (ny + 2 * FDn) * (nz + 2 * FDn);
+        int Nd_ex = (nx+2*FDn) * (ny+2*FDn) * (nz+2*FDn);
 
-        // Compute ∇ρ
-        std::vector<double> rho_ex(Nd_ex, 0.0);
-        halo.execute(rho, rho_ex.data(), 1);
-
-        std::vector<double> Drho[3];
-        for (int d = 0; d < 3; ++d) {
-            Drho[d].resize(Nd_d);
-            gradient.apply(rho_ex.data(), Drho[d].data(), d);
-        }
-
-        // Compute sigma = |∇ρ|² and the XC kernel Dxcdgrho = v2xc
-        // We need to re-evaluate the XC functional to get v2xc
-        std::vector<double> sigma(Nd_d);
+        // Add core density if NLCC
+        std::vector<double> rho_xc(Nd_d);
+        constexpr double xc_rhotol = 1e-14;
         for (int i = 0; i < Nd_d; ++i) {
-            sigma[i] = Drho[0][i] * Drho[0][i] + Drho[1][i] * Drho[1][i] + Drho[2][i] * Drho[2][i];
+            rho_xc[i] = rho[i] + (rho_core ? rho_core[i] : 0.0);
+            if (rho_xc[i] < xc_rhotol) rho_xc[i] = xc_rhotol;
         }
 
-        // Evaluate GGA to get v2xc (the gradient potential kernel)
-        XCFunctional xc;
-        xc.setup(xc_type, domain, grid, &gradient, &halo);
+        // Compute ∇ρ in non-Cart coordinates
+        std::vector<double> rho_ex(Nd_ex);
+        halo.execute(rho_xc.data(), rho_ex.data(), 1);
+        std::vector<double> Drho_x(Nd_d), Drho_y(Nd_d), Drho_z(Nd_d);
+        gradient.apply(rho_ex.data(), Drho_x.data(), 0);
+        gradient.apply(rho_ex.data(), Drho_y.data(), 1);
+        gradient.apply(rho_ex.data(), Drho_z.data(), 2);
 
-        // For GGA, we need the v2xc term which is ∂(ρ·εxc)/∂(|∇ρ|²)
-        // The XCFunctional::evaluate computes exc and Vxc but not v2xc directly.
-        // We need to compute v2x + v2c from the PBE routines.
-        std::vector<double> ex(Nd_d), vx(Nd_d), v2x(Nd_d);
-        std::vector<double> ec(Nd_d), vc(Nd_d), v2c(Nd_d);
+        // Transform to Cartesian for non-orth cells (matching reference line 549)
+        if (!is_orth) {
+            nonCart2Cart_grad_arrays(grid.lattice().lat_uvec_inv(),
+                                    Drho_x.data(), Drho_y.data(), Drho_z.data(), Nd_d);
+        }
 
-        int iflag = 1; // PBE
-        if (xc_type == XCType::GGA_PBEsol) iflag = 2;
-        if (xc_type == XCType::GGA_RPBE) iflag = 3;
+        // GGA stress correction: -∫ Dxcdgrho · ∂ρ/∂x_α · ∂ρ/∂x_β dV
+        std::array<double, 6> stress_gga = {};
+        for (int i = 0; i < Nd_d; ++i) {
+            double v2 = Dxcdgrho[i];
+            stress_gga[0] += Drho_x[i] * Drho_x[i] * v2;
+            stress_gga[1] += Drho_x[i] * Drho_y[i] * v2;
+            stress_gga[2] += Drho_x[i] * Drho_z[i] * v2;
+            stress_gga[3] += Drho_y[i] * Drho_y[i] * v2;
+            stress_gga[4] += Drho_y[i] * Drho_z[i] * v2;
+            stress_gga[5] += Drho_z[i] * Drho_z[i] * v2;
+        }
+        for (int i = 0; i < 6; ++i) stress_gga[i] *= dV;
 
-        // We'll call the static PBE functions indirectly via evaluate
-        // But since v2xc is not exposed in the current interface, we compute it
-        // from the available data using a finite-difference approach.
-        // Alternatively, for the stress we use:
-        // Dxcdgrho = (Vxc - Vxc_LDA) contribution through the divergence.
-        // This is complex. For now, use numerical differentiation.
-
-        // Simpler approach: v2xc ≈ (exc_gga - exc_lda) / sigma for sigma > 0
-        // This is not correct. Let me use the proper approach.
-
-        // The GGA stress correction is:
-        // Δσ[α,β] = -∫ (∂ρ/∂x_α)(∂ρ/∂x_β) * Dxcdgrho * dV
-        // where Dxcdgrho = 2 * [v2x(σ) + v2c(σ)]
-        //
-        // v2x and v2c come from the PBE functional evaluation.
-        // Since our XCFunctional::evaluate doesn't expose these,
-        // we compute them by calling a helper that re-evaluates the functional.
-
-        // For now, compute v2xc via the XC functional's internal routines.
-        // We need access to pbex and pbec static methods.
-        // Since they're private in XCFunctional, we use a workaround:
-        // evaluate the full GGA and extract the v2 terms.
-
-        // Workaround: compute Vxc with and without gradient to extract the
-        // gradient-dependent part. This is approximate.
-        // TODO: Expose v2xc from XCFunctional for proper stress computation.
-
-        // For a proper implementation, let's use the fact that the GGA XC
-        // potential has the form:
-        // Vxc_GGA = Vxc_local - 2*div(v2xc * ∇ρ)
-        // So v2xc can be extracted, but it's complex.
-
-        // SIMPLE APPROACH: Skip GGA correction for now (LDA stress is still computed)
-        // This means GGA stress will be approximate (LDA-level for XC component).
-        // The kinetic, electrostatic, and nonlocal components are exact.
-
-        // TODO: Implement proper GGA stress correction with v2xc access
+        for (int i = 0; i < 6; ++i) {
+            stress_xc_[i] -= stress_gga[i];
+        }
     }
 
-    // Normalize by cell volume
+    // Normalize by cell measure
     for (int i = 0; i < 6; ++i) {
         stress_xc_[i] /= cell_measure_;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Electrostatic stress:
-//   σ_el[α,β] = (1/4π) ∫ ∇φ_α · ∇φ_β dV
-//             + 0.5 · (∫ (ρ_b - ρ) · φ dV) · δ_αβ   (diagonal correction)
-// Normalized by cell_measure.
+// NLCC XC stress correction (matching reference Calculate_XC_stress_nlcc)
 // ---------------------------------------------------------------------------
-void Stress::compute_electrostatic(
-    const double* phi,
-    const double* rho,
-    const double* rho_b,
-    const Gradient& gradient,
-    const HaloExchange& halo,
+void Stress::compute_xc_nlcc_stress(
+    const Crystal& crystal,
+    const std::vector<AtomInfluence>& influence,
+    const FDStencil& stencil,
     const Domain& domain,
     const FDGrid& grid,
-    const MPIComm& dmcomm) {
+    const double* Vxc) {
 
-    stress_el_.fill(0.0);
-
-    int Nd_d = domain.Nd_d();
+    int FDn = stencil.FDn();
+    int order = 2 * FDn;
+    double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
     double dV = grid.dV();
-    double inv_4PI = 0.25 / constants::PI;
+    int DMnx = domain.Nx_d(), DMny = domain.Ny_d();
+    int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
 
-    int FDn = gradient.stencil().FDn();
-    int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
-    int Nd_ex = (nx + 2 * FDn) * (ny + 2 * FDn) * (nz + 2 * FDn);
+    const double* D1_x = stencil.D1_coeff_x();
+    const double* D1_y = stencil.D1_coeff_y();
+    const double* D1_z = stencil.D1_coeff_z();
 
-    // Compute ∇φ
-    std::vector<double> phi_ex(Nd_ex, 0.0);
-    halo.execute(phi, phi_ex.data(), 1);
-
-    std::vector<double> Dphi[3];
-    for (int d = 0; d < 3; ++d) {
-        Dphi[d].resize(Nd_d);
-        gradient.apply(phi_ex.data(), Dphi[d].data(), d);
+    bool is_orth = grid.lattice().is_orthogonal();
+    const Lattice* lattice = &grid.lattice();
+    Mat3 uvec_inv, uvec;
+    if (!is_orth) {
+        uvec_inv = lattice->lat_uvec_inv();
+        uvec = lattice->lat_uvec();
     }
 
-    // Diagonal correction: 0.5 * ∫ (b - ρ) · φ dV
-    double diag_corr = 0.0;
-    if (rho_b) {
-        for (int i = 0; i < Nd_d; ++i) {
-            diag_corr += (rho_b[i] - rho[i]) * phi[i];
+    std::array<double, 6> stress_nlcc = {};
+
+    int ntypes = crystal.n_types();
+    for (int it = 0; it < ntypes; ++it) {
+        const auto& psd = crystal.types()[it].psd();
+        if (psd.fchrg() < 1e-10) continue;
+
+        const auto& inf = influence[it];
+        const auto& r_grid = psd.radial_grid();
+        const auto& rho_c = psd.rho_c();
+        const auto& rho_c_d = psd.rho_c_spline_d();
+        if (rho_c.empty()) continue;
+
+        double rchrg = r_grid.back();
+
+        for (int iat = 0; iat < inf.n_atom; ++iat) {
+            Vec3 pos = inf.coords[iat];
+
+            int i_s = inf.xs[iat], i_e = inf.xe[iat];
+            int j_s = inf.ys[iat], j_e = inf.ye[iat];
+            int k_s = inf.zs[iat], k_e = inf.ze[iat];
+            int lnx = i_e - i_s + 1;
+            int lny = j_e - j_s + 1;
+            int lnz = k_e - k_s + 1;
+
+            int nxp = lnx + order;
+            int nyp = lny + order;
+            int nzp = lnz + order;
+            int nx2p = nxp + order;
+            int ny2p = nyp + order;
+            int nz2p = nzp + order;
+            int nd_2ex = nx2p * ny2p * nz2p;
+
+            int icor = i_s - order;
+            int jcor = j_s - order;
+            int kcor = k_s - order;
+            double x0_shift = pos.x - dx * icor;
+            double y0_shift = pos.y - dy * jcor;
+            double z0_shift = pos.z - dz * kcor;
+
+            // Compute radii and interpolate core density on double-extended grid
+            std::vector<double> rhocJ(nd_2ex, 0.0);
+            std::vector<int> ind_interp;
+            std::vector<double> R_interp;
+
+            int count = 0;
+            for (int kk = 0; kk < nz2p; ++kk) {
+                double rz = kk * dz - z0_shift;
+                for (int jj = 0; jj < ny2p; ++jj) {
+                    double ry = jj * dy - y0_shift;
+                    for (int ii = 0; ii < nx2p; ++ii) {
+                        double rx = ii * dx - x0_shift;
+                        double r = is_orth ? std::sqrt(rx*rx + ry*ry + rz*rz)
+                                           : lattice->metric_distance(rx, ry, rz);
+                        if (r <= rchrg) {
+                            ind_interp.push_back(count);
+                            R_interp.push_back(r);
+                        }
+                        count++;
+                    }
+                }
+            }
+
+            // Spline interpolation
+            if (!R_interp.empty()) {
+                std::vector<double> vals;
+                Pseudopotential::spline_interp(r_grid, rho_c, rho_c_d, R_interp, vals);
+                for (size_t ii = 0; ii < ind_interp.size(); ++ii) {
+                    rhocJ[ind_interp[ii]] = vals[ii];
+                }
+            }
+
+            // Compute gradient of rhocJ on extended grid (rb + FDn)
+            int nd_ex = nxp * nyp * nzp;
+            std::vector<double> drhocJ_x(nd_ex, 0.0), drhocJ_y(nd_ex, 0.0), drhocJ_z(nd_ex, 0.0);
+
+            for (int kp = 0; kp < nzp; ++kp) {
+                int k2p = kp + FDn;
+                for (int jp = 0; jp < nyp; ++jp) {
+                    int j2p = jp + FDn;
+                    for (int ip = 0; ip < nxp; ++ip) {
+                        int i2p = ip + FDn;
+                        int idx_2ex = i2p + j2p * nx2p + k2p * nx2p * ny2p;
+                        int idx_ex = ip + jp * nxp + kp * nxp * nyp;
+
+                        double gx = 0.0, gy = 0.0, gz = 0.0;
+                        for (int p = 1; p <= FDn; ++p) {
+                            gx += (rhocJ[idx_2ex + p] - rhocJ[idx_2ex - p]) * D1_x[p];
+                            gy += (rhocJ[idx_2ex + p * nx2p] - rhocJ[idx_2ex - p * nx2p]) * D1_y[p];
+                            gz += (rhocJ[idx_2ex + p * nx2p * ny2p] - rhocJ[idx_2ex - p * nx2p * ny2p]) * D1_z[p];
+                        }
+                        drhocJ_x[idx_ex] = gx;
+                        drhocJ_y[idx_ex] = gy;
+                        drhocJ_z[idx_ex] = gz;
+                    }
+                }
+            }
+
+            // Accumulate stress: ∇(ρ_core_J) · (x - R_J) · Vxc
+            int di = i_s - xs;
+            int dj = j_s - ys;
+            int dk = k_s - zs;
+
+            for (int k = 0; k < lnz; ++k) {
+                int k_DM = k + dk;
+                if (k_DM < 0 || k_DM >= domain.Nz_d()) continue;
+                int kp = k + FDn;
+
+                for (int j = 0; j < lny; ++j) {
+                    int j_DM = j + dj;
+                    if (j_DM < 0 || j_DM >= domain.Ny_d()) continue;
+                    int jp = j + FDn;
+
+                    for (int i = 0; i < lnx; ++i) {
+                        int i_DM = i + di;
+                        if (i_DM < 0 || i_DM >= domain.Nx_d()) continue;
+                        int ip = i + FDn;
+
+                        int idx_DM = i_DM + j_DM * DMnx + k_DM * DMnx * DMny;
+                        int idx_ex = ip + jp * nxp + kp * nxp * nyp;
+
+                        // Position difference in non-Cart coords
+                        double x1 = (i_DM + xs) * dx - pos.x;
+                        double x2 = (j_DM + ys) * dy - pos.y;
+                        double x3 = (k_DM + zs) * dz - pos.z;
+
+                        double Vxc_val = Vxc[idx_DM];
+                        double gx = drhocJ_x[idx_ex];
+                        double gy = drhocJ_y[idx_ex];
+                        double gz = drhocJ_z[idx_ex];
+
+                        // Transform to Cartesian for non-orth (matching reference lines 432,437)
+                        if (!is_orth) {
+                            nonCart2Cart_coord(uvec, x1, x2, x3);
+                            nonCart2Cart_grad(uvec_inv, gx, gy, gz);
+                        }
+
+                        stress_nlcc[0] += gx * x1 * Vxc_val;
+                        stress_nlcc[1] += gx * x2 * Vxc_val;
+                        stress_nlcc[2] += gx * x3 * Vxc_val;
+                        stress_nlcc[3] += gy * x2 * Vxc_val;
+                        stress_nlcc[4] += gy * x3 * Vxc_val;
+                        stress_nlcc[5] += gz * x3 * Vxc_val;
+                    }
+                }
+            }
         }
-        diag_corr *= 0.5 * dV;
     }
 
-    // Accumulate stress components
-    for (int c = 0; c < 6; ++c) {
-        int d1 = dim1[c], d2 = dim2[c];
-        double sum = 0.0;
-        for (int i = 0; i < Nd_d; ++i) {
-            sum += Dphi[d1][i] * Dphi[d2][i];
-        }
-        stress_el_[c] = inv_4PI * sum * dV;
-    }
+    // Multiply by dV
+    for (int i = 0; i < 6; ++i) stress_nlcc[i] *= dV;
 
-    // Add diagonal correction
-    stress_el_[0] += diag_corr;
-    stress_el_[3] += diag_corr;
-    stress_el_[5] += diag_corr;
-
-    // MPI reduction
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_el_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, dmcomm.comm());
-    }
-
-    // Normalize by cell volume
+    // Normalize by cell_measure and add to XC stress
     for (int i = 0; i < 6; ++i) {
-        stress_el_[i] /= cell_measure_;
+        stress_nlcc[i] /= cell_measure_;
+        stress_xc_[i] += stress_nlcc[i];
     }
 }
 
 // ---------------------------------------------------------------------------
-// Nonlocal stress: matching reference SPARC
-//   σ_nl[α,β] = -occfac * Σ_n g_n * Γ * <χ|ψ> * <χ|(x-R_J)_β · ∂ψ/∂x_α>
-// Then subtract nonlocal energy from diagonal.
-// Normalized by cell_measure.
+// Electrostatic stress (matching reference Calculate_local_stress)
 // ---------------------------------------------------------------------------
-void Stress::compute_nonlocal(
+void Stress::compute_electrostatic(
+    const Crystal& crystal,
+    const std::vector<AtomInfluence>& influence,
+    const FDStencil& stencil,
+    const Gradient& gradient,
+    const HaloExchange& halo,
+    const Domain& domain,
+    const FDGrid& grid,
+    const double* phi,
+    const double* rho,
+    const double* Vloc,
+    const double* b_total,
+    const double* b_ref_total,
+    double Esc) {
+
+    int FDn = stencil.FDn();
+    int order = 2 * FDn;
+    double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
+    double dV = grid.dV();
+    int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
+    int DMnd = domain.Nd_d();
+    int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
+
+    bool is_orth = grid.lattice().is_orthogonal();
+    const Lattice* lattice = &grid.lattice();
+    Mat3 uvec_inv, uvec;
+    if (!is_orth) {
+        uvec_inv = lattice->lat_uvec_inv();
+        uvec = lattice->lat_uvec();
+    }
+    double inv_4PI = 0.25 / constants::PI;
+
+    const double* D1_x = stencil.D1_coeff_x();
+    const double* D1_y = stencil.D1_coeff_y();
+    const double* D1_z = stencil.D1_coeff_z();
+    const double* D2_x = stencil.D2_coeff_x();
+    const double* D2_y = stencil.D2_coeff_y();
+    const double* D2_z = stencil.D2_coeff_z();
+
+    // Compute ∇φ on DM domain
+    int Nd_ex = (nx+2*FDn) * (ny+2*FDn) * (nz+2*FDn);
+    std::vector<double> phi_ex(Nd_ex);
+    halo.execute(phi, phi_ex.data(), 1);
+    std::vector<double> Dphi_x(DMnd), Dphi_y(DMnd), Dphi_z(DMnd);
+    gradient.apply(phi_ex.data(), Dphi_x.data(), 0);
+    gradient.apply(phi_ex.data(), Dphi_y.data(), 1);
+    gradient.apply(phi_ex.data(), Dphi_z.data(), 2);
+
+    // Transform ∇φ to Cartesian for non-orth (matching reference line 693)
+    if (!is_orth) {
+        nonCart2Cart_grad_arrays(uvec_inv, Dphi_x.data(), Dphi_y.data(), Dphi_z.data(), DMnd);
+    }
+
+    std::array<double, 6> sel = {}, scorr = {};
+
+    // Part 1: (1/4π)|∇φ|² + 0.5·(b-ρ)·φ on diagonal
+    for (int i = 0; i < DMnd; ++i) {
+        double temp1 = 0.5 * (b_total[i] - rho[i]) * phi[i];
+        sel[0] += inv_4PI * Dphi_x[i] * Dphi_x[i] + temp1;
+        sel[1] += inv_4PI * Dphi_x[i] * Dphi_y[i];
+        sel[2] += inv_4PI * Dphi_x[i] * Dphi_z[i];
+        sel[3] += inv_4PI * Dphi_y[i] * Dphi_y[i] + temp1;
+        sel[4] += inv_4PI * Dphi_y[i] * Dphi_z[i];
+        sel[5] += inv_4PI * Dphi_z[i] * Dphi_z[i] + temp1;
+    }
+
+    // Part 2: Per-atom contributions with doubled extended grid
+    int ntypes = crystal.n_types();
+    for (int it = 0; it < ntypes; ++it) {
+        const auto& psd = crystal.types()[it].psd();
+        const auto& inf = influence[it];
+        const auto& r_grid = psd.radial_grid();
+        const auto& rVloc = psd.rVloc();
+        const auto& rVloc_d = psd.rVloc_spline_d();
+        double Znucl = psd.Zval();
+        double rchrg = r_grid.back();
+        double rc_ref = 0.5;
+
+        for (int iat = 0; iat < inf.n_atom; ++iat) {
+            Vec3 pos = inf.coords[iat];
+
+            int i_s = inf.xs[iat], i_e = inf.xe[iat];
+            int j_s = inf.ys[iat], j_e = inf.ye[iat];
+            int k_s = inf.zs[iat], k_e = inf.ze[iat];
+            int lnx = i_e - i_s + 1;
+            int lny = j_e - j_s + 1;
+            int lnz = k_e - k_s + 1;
+
+            int nxp = lnx + order;
+            int nyp = lny + order;
+            int nzp = lnz + order;
+            int nx2p = nxp + order;
+            int ny2p = nyp + order;
+            int nz2p = nzp + order;
+            int nd_2ex = nx2p * ny2p * nz2p;
+            int nd_ex_loc = nxp * nyp * nzp;
+
+            int icor = i_s - order;
+            int jcor = j_s - order;
+            int kcor = k_s - order;
+            double x0_shift = pos.x - dx * icor;
+            double y0_shift = pos.y - dy * jcor;
+            double z0_shift = pos.z - dz * kcor;
+
+            std::vector<double> R(nd_2ex);
+            std::vector<int> ind_interp;
+            std::vector<double> R_interp;
+
+            int count = 0;
+            for (int kk = 0; kk < nz2p; ++kk) {
+                double rz = kk * dz - z0_shift;
+                for (int jj = 0; jj < ny2p; ++jj) {
+                    double ry = jj * dy - y0_shift;
+                    for (int ii = 0; ii < nx2p; ++ii) {
+                        double rx = ii * dx - x0_shift;
+                        R[count] = is_orth ? std::sqrt(rx*rx + ry*ry + rz*rz)
+                                           : lattice->metric_distance(rx, ry, rz);
+                        if (R[count] <= rchrg) {
+                            ind_interp.push_back(count);
+                            R_interp.push_back(R[count]);
+                        }
+                        count++;
+                    }
+                }
+            }
+
+            std::vector<double> VJ(nd_2ex), VJ_ref_arr(nd_2ex);
+            for (int i = 0; i < nd_2ex; ++i) {
+                if (R[i] > rchrg) VJ[i] = -Znucl / R[i];
+            }
+            if (!R_interp.empty()) {
+                std::vector<double> VJ_interp;
+                Pseudopotential::spline_interp(r_grid, rVloc, rVloc_d, R_interp, VJ_interp);
+                for (size_t idx = 0; idx < ind_interp.size(); ++idx) {
+                    if (R_interp[idx] < 1e-10) VJ[ind_interp[idx]] = psd.Vloc_0();
+                    else VJ[ind_interp[idx]] = VJ_interp[idx] / R_interp[idx];
+                }
+            }
+            for (int i = 0; i < nd_2ex; ++i) {
+                VJ_ref_arr[i] = Electrostatics::V_ref(R[i], rc_ref, Znucl);
+            }
+
+            // bJ and bJ_ref on FDn-extended grid
+            std::vector<double> bJ(nd_ex_loc, 0.0), bJ_ref(nd_ex_loc, 0.0);
+            if (is_orth) {
+                Electrostatics::calc_lapV(VJ.data(), bJ.data(), nxp, nyp, nzp,
+                                          nx2p, ny2p, nz2p, FDn, D2_x, D2_y, D2_z, -inv_4PI);
+                Electrostatics::calc_lapV(VJ_ref_arr.data(), bJ_ref.data(), nxp, nyp, nzp,
+                                          nx2p, ny2p, nz2p, FDn, D2_x, D2_y, D2_z, -inv_4PI);
+            } else {
+                Electrostatics::calc_lapV_nonorth(VJ.data(), bJ.data(), nxp, nyp, nzp,
+                                                   nx2p, ny2p, nz2p, FDn, stencil, -inv_4PI);
+                Electrostatics::calc_lapV_nonorth(VJ_ref_arr.data(), bJ_ref.data(), nxp, nyp, nzp,
+                                                   nx2p, ny2p, nz2p, FDn, stencil, -inv_4PI);
+            }
+
+            int dI = i_s - xs, dJ = j_s - ys, dK = k_s - zs;
+
+            for (int kk = 0; kk < lnz; ++kk) {
+                int kp = kk + FDn, kp2 = kk + order;
+                int k_DM = kk + dK;
+                int kshift_DM = k_DM * nx * ny;
+                int kshift_p = kp * nxp * nyp;
+                int kshift_2p = kp2 * nx2p * ny2p;
+
+                for (int jj = 0; jj < lny; ++jj) {
+                    int jp = jj + FDn, jp2 = jj + order;
+                    int j_DM = jj + dJ;
+                    int jshift_DM = kshift_DM + j_DM * nx;
+                    int jshift_p = kshift_p + jp * nxp;
+                    int jshift_2p = kshift_2p + jp2 * nx2p;
+
+                    for (int ii = 0; ii < lnx; ++ii) {
+                        int ip = ii + FDn, ip2 = ii + order;
+                        int i_DM = ii + dI;
+                        int ishift_DM = jshift_DM + i_DM;
+                        int ishift_p = jshift_p + ip;
+                        int ishift_2p = jshift_2p + ip2;
+
+                        double DbJ_x=0, DbJ_y=0, DbJ_z=0;
+                        double DbJr_x=0, DbJr_y=0, DbJr_z=0;
+                        double DVJ_x=0, DVJ_y=0, DVJ_z=0;
+                        double DVJr_x=0, DVJr_y=0, DVJr_z=0;
+
+                        for (int p = 1; p <= FDn; ++p) {
+                            DbJ_x += (bJ[ishift_p+p] - bJ[ishift_p-p]) * D1_x[p];
+                            DbJ_y += (bJ[ishift_p+p*nxp] - bJ[ishift_p-p*nxp]) * D1_y[p];
+                            DbJ_z += (bJ[ishift_p+p*nxp*nyp] - bJ[ishift_p-p*nxp*nyp]) * D1_z[p];
+                            DbJr_x += (bJ_ref[ishift_p+p] - bJ_ref[ishift_p-p]) * D1_x[p];
+                            DbJr_y += (bJ_ref[ishift_p+p*nxp] - bJ_ref[ishift_p-p*nxp]) * D1_y[p];
+                            DbJr_z += (bJ_ref[ishift_p+p*nxp*nyp] - bJ_ref[ishift_p-p*nxp*nyp]) * D1_z[p];
+                            DVJ_x += (VJ[ishift_2p+p] - VJ[ishift_2p-p]) * D1_x[p];
+                            DVJ_y += (VJ[ishift_2p+p*nx2p] - VJ[ishift_2p-p*nx2p]) * D1_y[p];
+                            DVJ_z += (VJ[ishift_2p+p*nx2p*ny2p] - VJ[ishift_2p-p*nx2p*ny2p]) * D1_z[p];
+                            DVJr_x += (VJ_ref_arr[ishift_2p+p] - VJ_ref_arr[ishift_2p-p]) * D1_x[p];
+                            DVJr_y += (VJ_ref_arr[ishift_2p+p*nx2p] - VJ_ref_arr[ishift_2p-p*nx2p]) * D1_y[p];
+                            DVJr_z += (VJ_ref_arr[ishift_2p+p*nx2p*ny2p] - VJ_ref_arr[ishift_2p-p*nx2p*ny2p]) * D1_z[p];
+                        }
+
+                        // Position difference in non-Cart coords
+                        double x1 = (i_DM + xs) * dx - pos.x;
+                        double x2 = (j_DM + ys) * dy - pos.y;
+                        double x3 = (k_DM + zs) * dz - pos.z;
+
+                        // Transform to Cartesian for non-orth (matching ref lines 967-971)
+                        if (!is_orth) {
+                            nonCart2Cart_coord(uvec, x1, x2, x3);
+                            nonCart2Cart_grad(uvec_inv, DbJ_x, DbJ_y, DbJ_z);
+                            nonCart2Cart_grad(uvec_inv, DbJr_x, DbJr_y, DbJr_z);
+                            nonCart2Cart_grad(uvec_inv, DVJ_x, DVJ_y, DVJ_z);
+                            nonCart2Cart_grad(uvec_inv, DVJr_x, DVJr_y, DVJr_z);
+                        }
+
+                        sel[0] += DbJ_x * x1 * phi[ishift_DM];
+                        sel[1] += DbJ_x * x2 * phi[ishift_DM];
+                        sel[2] += DbJ_x * x3 * phi[ishift_DM];
+                        sel[3] += DbJ_y * x2 * phi[ishift_DM];
+                        sel[4] += DbJ_y * x3 * phi[ishift_DM];
+                        sel[5] += DbJ_z * x3 * phi[ishift_DM];
+
+                        double t1 = Vloc[ishift_DM] - VJ_ref_arr[ishift_2p];
+                        double t2 = Vloc[ishift_DM];
+                        double t3 = b_total[ishift_DM] + b_ref_total[ishift_DM];
+                        double tx = DbJr_x*t1 + DbJ_x*t2 + (DVJr_x-DVJ_x)*t3 - DVJr_x*bJ_ref[ishift_p];
+                        double ty = DbJr_y*t1 + DbJ_y*t2 + (DVJr_y-DVJ_y)*t3 - DVJr_y*bJ_ref[ishift_p];
+                        double tz = DbJr_z*t1 + DbJ_z*t2 + (DVJr_z-DVJ_z)*t3 - DVJr_z*bJ_ref[ishift_p];
+
+                        scorr[0] += tx * x1;
+                        scorr[1] += tx * x2;
+                        scorr[2] += tx * x3;
+                        scorr[3] += ty * x2;
+                        scorr[4] += ty * x3;
+                        scorr[5] += tz * x3;
+                    }
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < 6; ++i) {
+        stress_el_[i] = (sel[i] + 0.5 * scorr[i]) * dV;
+    }
+
+    stress_el_[0] += Esc;
+    stress_el_[3] += Esc;
+    stress_el_[5] += Esc;
+
+    for (int i = 0; i < 6; ++i) stress_el_[i] /= cell_measure_;
+}
+
+// ---------------------------------------------------------------------------
+// Nonlocal + kinetic stress (matching reference Calculate_nonlocal_kinetic_stress_linear)
+// ---------------------------------------------------------------------------
+void Stress::compute_nonlocal_kinetic(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
@@ -357,14 +649,9 @@ void Stress::compute_nonlocal(
     const Domain& domain,
     const FDGrid& grid,
     const std::vector<double>& kpt_weights,
-    const MPIComm& dmcomm,
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
     const MPIComm& spincomm) {
-
-    stress_nl_.fill(0.0);
-
-    if (!vnl.is_setup()) return;
 
     int Nspin = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
@@ -372,307 +659,221 @@ void Stress::compute_nonlocal(
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
     int ntypes = crystal.n_types();
-    double occfac = (Nspin == 1) ? 2.0 : 1.0;
-
+    int n_atom = crystal.n_atom_total();
     int FDn = gradient.stencil().FDn();
-    int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
-    int nx_d = nx, ny_d = ny;
-    int Nd_ex = (nx + 2 * FDn) * (ny + 2 * FDn) * (nz + 2 * FDn);
-    double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
-    int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
+    double occfac = (Nspin == 1) ? 2.0 : 1.0;
+    double spn_fac = occfac * 2.0;
 
-    // Build per-type gamma list
-    struct TypeInfo {
-        int nproj;
-        std::vector<double> gamma;
-    };
-    std::vector<TypeInfo> type_info(ntypes);
-    for (int it = 0; it < ntypes; ++it) {
+    bool is_orth = grid.lattice().is_orthogonal();
+    Mat3 uvec_inv, uvec;
+    if (!is_orth) {
+        uvec_inv = grid.lattice().lat_uvec_inv();
+        uvec = grid.lattice().lat_uvec();
+    }
+
+    int nx_d = domain.Nx_d(), ny_d = domain.Ny_d(), nz_d = domain.Nz_d();
+    int Nd_ex = (nx_d+2*FDn) * (ny_d+2*FDn) * (nz_d+2*FDn);
+
+    stress_k_.fill(0.0);
+    stress_nl_.fill(0.0);
+
+    // Build per-unique-atom projector info (same as Forces)
+    std::vector<int> IP_displ(n_atom + 1, 0);
+    for (int ia = 0; ia < n_atom; ++ia) {
+        int it = crystal.type_indices()[ia];
+        IP_displ[ia + 1] = IP_displ[ia] + crystal.types()[it].psd().nproj_per_atom();
+    }
+    int total_nproj = IP_displ[n_atom];
+
+    // Build flat Gamma array
+    std::vector<double> Gamma_flat(total_nproj, 0.0);
+    for (int ia = 0; ia < n_atom; ++ia) {
+        int it = crystal.type_indices()[ia];
         const auto& psd = crystal.types()[it].psd();
-        type_info[it].nproj = psd.nproj_per_atom();
+        int offset = IP_displ[ia];
+        int col = 0;
         for (int l = 0; l <= psd.lmax(); ++l) {
             if (l == psd.lloc()) continue;
             for (int p = 0; p < psd.ppl()[l]; ++p) {
                 double g = psd.Gamma()[l][p];
                 for (int m = -l; m <= l; ++m) {
-                    type_info[it].gamma.push_back(g);
+                    Gamma_flat[offset + col] = g;
+                    col++;
                 }
             }
         }
     }
 
-    // Also compute nonlocal energy for diagonal correction
-    double E_nl = 0.0;
+    const auto& Chi = vnl.Chi();
+
+    double energy_nl = 0.0;
+    std::array<double, 6> sk = {}, snl = {};
 
     for (int s = 0; s < Nspin; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
-            const NDArray<double>& psi_sk = wfn.psi(s, k);
-            const NDArray<double>& occ_sk = wfn.occupations(s, k);
-            double wk = kpt_weights[k];
+            const auto& psi_sk = wfn.psi(s, k);
+            const auto& occ_sk = wfn.occupations(s, k);
 
             for (int n = 0; n < Nband; ++n) {
                 double g_n = occ_sk(n);
-                if (std::abs(g_n) < 1e-15) continue;
-
                 const double* psi_n = psi_sk.data() + n * Nd_d;
 
-                // Compute alpha = <χ|ψ>
-                std::vector<double> alpha;
-                compute_chi_x_local(crystal, nloc_influence, domain, grid,
-                                    psi_n, dV, alpha, dmcomm);
-
-                // Nonlocal energy: E_nl += occfac * wk * g_n * Σ Γ * |<χ|ψ>|²
-                {
-                    int po = 0;
-                    for (int it = 0; it < ntypes; ++it) {
-                        const auto& inf = nloc_influence[it];
-                        int np = type_info[it].nproj;
-                        if (np == 0) continue;
-                        for (int iat = 0; iat < inf.n_atom; ++iat) {
-                            if (inf.ndc[iat] == 0) { po += np; continue; }
-                            for (int jp = 0; jp < np; ++jp) {
-                                E_nl += occfac * wk * g_n * type_info[it].gamma[jp] *
-                                        alpha[po + jp] * alpha[po + jp];
-                            }
-                            po += np;
-                        }
+                // Compute ∇ψ in all 3 non-Cart directions, then transform to Cartesian
+                // dpsi_cart[dim] = Cartesian gradient in direction dim
+                std::vector<double> dpsi_cart[3];
+                if (is_orth) {
+                    for (int dim = 0; dim < 3; ++dim) {
+                        dpsi_cart[dim].resize(Nd_d);
+                        std::vector<double> psi_ex(Nd_ex);
+                        halo.execute(psi_n, psi_ex.data(), 1);
+                        gradient.apply(psi_ex.data(), dpsi_cart[dim].data(), dim);
+                    }
+                } else {
+                    // Compute non-Cart gradients first
+                    std::vector<double> dpsi_nc[3];
+                    for (int dim = 0; dim < 3; ++dim) {
+                        dpsi_nc[dim].resize(Nd_d);
+                        std::vector<double> psi_ex(Nd_ex);
+                        halo.execute(psi_n, psi_ex.data(), 1);
+                        gradient.apply(psi_ex.data(), dpsi_nc[dim].data(), dim);
+                    }
+                    // Transform to Cartesian: dpsi_cart[α] = Σ_μ uvec_inv(α,μ) * dpsi_nc[μ]
+                    // (matching reference lines 1148-1158)
+                    for (int dim = 0; dim < 3; ++dim) {
+                        dpsi_cart[dim].resize(Nd_d);
+                    }
+                    for (int i = 0; i < Nd_d; ++i) {
+                        double d0 = dpsi_nc[0][i], d1 = dpsi_nc[1][i], d2 = dpsi_nc[2][i];
+                        dpsi_cart[0][i] = uvec_inv(0,0)*d0 + uvec_inv(0,1)*d1 + uvec_inv(0,2)*d2;
+                        dpsi_cart[1][i] = uvec_inv(1,0)*d0 + uvec_inv(1,1)*d1 + uvec_inv(1,2)*d2;
+                        dpsi_cart[2][i] = uvec_inv(2,0)*d0 + uvec_inv(2,1)*d1 + uvec_inv(2,2)*d2;
                     }
                 }
 
-                // Extend psi for gradient
-                std::vector<double> psi_ex(Nd_ex, 0.0);
-                halo.execute(psi_n, psi_ex.data(), 1);
+                // Kinetic stress: σ_αβ = -occfac * g_n * <∂ψ/∂x_Cart_α | ∂ψ/∂x_Cart_β>
+                int cnt = 0;
+                for (int dim = 0; dim < 3; ++dim) {
+                    for (int dim2 = dim; dim2 < 3; ++dim2) {
+                        double dot = 0.0;
+                        for (int i = 0; i < Nd_d; ++i) dot += dpsi_cart[dim][i] * dpsi_cart[dim2][i];
+                        sk[cnt] -= occfac * g_n * dot * dV;
+                        cnt++;
+                    }
+                }
 
-                // For each stress component (α,β), compute <χ|(x-R)_β · ∂ψ/∂x_α>
-                for (int c = 0; c < 6; ++c) {
-                    int d_alpha = dim1[c];
-                    int d_beta  = dim2[c];
+                if (total_nproj == 0) continue;
 
-                    // Compute ∂ψ/∂x_α
-                    std::vector<double> Dpsi(Nd_d, 0.0);
-                    gradient.apply(psi_ex.data(), Dpsi.data(), d_alpha);
+                // Compute alpha = <χ|ψ>*dV, accumulated per unique atom
+                std::vector<double> alpha(total_nproj, 0.0);
+                for (int it = 0; it < ntypes; ++it) {
+                    const auto& inf = nloc_influence[it];
+                    int nproj = crystal.types()[it].psd().nproj_per_atom();
+                    if (nproj == 0) continue;
+                    for (int iat = 0; iat < inf.n_atom; ++iat) {
+                        int ndc = inf.ndc[iat];
+                        if (ndc == 0) continue;
+                        int orig_atom = inf.atom_index[iat];
+                        int offset = IP_displ[orig_atom];
+                        const auto& gpos = inf.grid_pos[iat];
+                        const auto& chi_iat = Chi[it][iat];
+                        for (int jp = 0; jp < nproj; ++jp) {
+                            double dot = 0.0;
+                            for (int ig = 0; ig < ndc; ++ig)
+                                dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
+                            alpha[offset + jp] += dot * dV;
+                        }
+                    }
+                }
+                // Nonlocal energy
+                for (int ia = 0; ia < n_atom; ++ia) {
+                    int off = IP_displ[ia];
+                    int np = IP_displ[ia + 1] - off;
+                    for (int jp = 0; jp < np; ++jp)
+                        energy_nl += g_n * Gamma_flat[off + jp] * alpha[off + jp] * alpha[off + jp];
+                }
 
-                    // Multiply by (x-R_J)_β and compute <χ|(x-R)_β · ∂ψ/∂x_α>
-                    // This needs per-atom computation
-                    int proj_offset = 0;
-                    for (int it = 0; it < ntypes; ++it) {
-                        const auto& psd = crystal.types()[it].psd();
-                        const auto& inf = nloc_influence[it];
-                        int nproj = type_info[it].nproj;
-                        if (nproj == 0) continue;
+                // Nonlocal stress: beta = <χ|(x-R)_Cart_dim2 · ∂ψ/∂x_Cart_dim>
+                cnt = 0;
+                for (int dim = 0; dim < 3; ++dim) {
+                    for (int dim2 = dim; dim2 < 3; ++dim2) {
+                        std::vector<double> beta(total_nproj, 0.0);
+                        for (int it = 0; it < ntypes; ++it) {
+                            const auto& inf = nloc_influence[it];
+                            int nproj = crystal.types()[it].psd().nproj_per_atom();
+                            if (nproj == 0) continue;
+                            for (int iat = 0; iat < inf.n_atom; ++iat) {
+                                int ndc = inf.ndc[iat];
+                                if (ndc == 0) continue;
+                                int orig_atom = inf.atom_index[iat];
+                                int offset = IP_displ[orig_atom];
+                                const auto& gpos = inf.grid_pos[iat];
+                                const auto& chi_iat = Chi[it][iat];
+                                Vec3 ap = inf.coords[iat];
 
-                        for (int iat = 0; iat < inf.n_atom; ++iat) {
-                            int ndc = inf.ndc[iat];
-                            if (ndc == 0) { proj_offset += nproj; continue; }
+                                for (int jp = 0; jp < nproj; ++jp) {
+                                    double dot = 0.0;
+                                    for (int ig = 0; ig < ndc; ++ig) {
+                                        int flat = gpos[ig];
+                                        int li = flat % nx_d;
+                                        int lj = (flat / nx_d) % ny_d;
+                                        int lk = flat / (nx_d * ny_d);
 
-                            const auto& gpos = inf.grid_pos[iat];
-                            Vec3 atom_pos = inf.coords[iat];
+                                        // Position in non-Cart
+                                        double r1 = (li + domain.vertices().xs) * grid.dx() - ap.x;
+                                        double r2 = (lj + domain.vertices().ys) * grid.dy() - ap.y;
+                                        double r3 = (lk + domain.vertices().zs) * grid.dz() - ap.z;
 
-                            // Compute χ^T · [(x-R)_β · ∂ψ/∂x_α]
-                            std::vector<double> rx(ndc), ry(ndc), rz(ndc), rr(ndc);
-                            for (int ig = 0; ig < ndc; ++ig) {
-                                int flat = gpos[ig];
-                                int li = flat % nx_d;
-                                int lj = (flat / nx_d) % ny_d;
-                                int lk = flat / (nx_d * ny_d);
-                                int gi = li + xs;
-                                int gj = lj + ys;
-                                int gk = lk + zs;
-                                rx[ig] = gi * dx - atom_pos.x;
-                                ry[ig] = gj * dy - atom_pos.y;
-                                rz[ig] = gk * dz - atom_pos.z;
-                                rr[ig] = std::sqrt(rx[ig] * rx[ig] + ry[ig] * ry[ig] + rz[ig] * rz[ig]);
-                            }
+                                        // Transform to Cartesian
+                                        if (!is_orth) nonCart2Cart_coord(uvec, r1, r2, r3);
 
-                            // Select the (x-R)_β component
-                            const double* xR_beta;
-                            if (d_beta == 0) xR_beta = rx.data();
-                            else if (d_beta == 1) xR_beta = ry.data();
-                            else xR_beta = rz.data();
-
-                            // Compute the weighted integral for each projector
-                            int col = 0;
-                            for (int l = 0; l <= psd.lmax(); ++l) {
-                                if (l == psd.lloc()) continue;
-                                for (int p = 0; p < psd.ppl()[l]; ++p) {
-                                    std::vector<double> udv_interp;
-                                    Pseudopotential::spline_interp(
-                                        psd.radial_grid(), psd.UdV()[l][p], psd.UdV_spline_d()[l][p],
-                                        rr, udv_interp);
-
-                                    for (int m = -l; m <= l; ++m) {
-                                        double beta_val = 0.0;
-                                        for (int ig = 0; ig < ndc; ++ig) {
-                                            double ylm = Ylm_stress(l, m, rx[ig], ry[ig], rz[ig], rr[ig]);
-                                            double chi = ylm * udv_interp[ig];
-                                            beta_val += chi * xR_beta[ig] * Dpsi[gpos[ig]];
-                                        }
-                                        beta_val *= dV;
-
-                                        // MPI reduce this inner product
-                                        // (done after all atoms below)
-
-                                        double SJ = type_info[it].gamma[col] *
-                                                    alpha[proj_offset + col] * beta_val;
-
-                                        stress_nl_[c] -= occfac * wk * 2.0 * g_n * SJ;
-                                        col++;
+                                        double xR = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
+                                        // dpsi_cart is already in Cartesian
+                                        dot += chi_iat(ig, jp) * xR * dpsi_cart[dim][gpos[ig]];
                                     }
+                                    beta[offset + jp] += dot * dV;
                                 }
                             }
-                            proj_offset += nproj;
                         }
+                        // Accumulate nonlocal stress per unique atom
+                        for (int ia = 0; ia < n_atom; ++ia) {
+                            int off = IP_displ[ia];
+                            int np = IP_displ[ia + 1] - off;
+                            for (int jp = 0; jp < np; ++jp)
+                                snl[cnt] -= Gamma_flat[off + jp] * alpha[off + jp] * beta[off + jp] * g_n;
+                        }
+                        cnt++;
                     }
                 }
             }
         }
     }
 
-    // MPI reductions for stress_nl and E_nl
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_nl_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, dmcomm.comm());
-        E_nl = dmcomm.allreduce_sum(E_nl);
-    }
-    if (!bandcomm.is_null() && bandcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_nl_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, bandcomm.comm());
-        double tmp = E_nl;
-        MPI_Allreduce(&tmp, &E_nl, 1, MPI_DOUBLE, MPI_SUM, bandcomm.comm());
-    }
-    if (!kptcomm.is_null() && kptcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_nl_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, kptcomm.comm());
-        double tmp = E_nl;
-        MPI_Allreduce(&tmp, &E_nl, 1, MPI_DOUBLE, MPI_SUM, kptcomm.comm());
-    }
-    if (!spincomm.is_null() && spincomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, stress_nl_.data(), 6,
-                      MPI_DOUBLE, MPI_SUM, spincomm.comm());
-        double tmp = E_nl;
-        MPI_Allreduce(&tmp, &E_nl, 1, MPI_DOUBLE, MPI_SUM, spincomm.comm());
-    }
+    // Scale nonlocal by spn_fac
+    for (int i = 0; i < 6; ++i) snl[i] *= spn_fac;
+    energy_nl *= occfac;
 
-    // Subtract nonlocal energy from diagonal (matching reference SPARC)
-    stress_nl_[0] -= E_nl;
-    stress_nl_[3] -= E_nl;
-    stress_nl_[5] -= E_nl;
+    // Subtract E_nl from diagonal
+    stress_nl_[0] = snl[0] - energy_nl;
+    stress_nl_[1] = snl[1];
+    stress_nl_[2] = snl[2];
+    stress_nl_[3] = snl[3] - energy_nl;
+    stress_nl_[4] = snl[4];
+    stress_nl_[5] = snl[5] - energy_nl;
+    for (int i = 0; i < 6; ++i) stress_k_[i] = sk[i];
 
-    // Normalize by cell volume
+    // Allreduce across spin, kpt, band
+    auto allreduce6 = [](std::array<double,6>& arr, const MPIComm& comm) {
+        if (!comm.is_null() && comm.size() > 1)
+            MPI_Allreduce(MPI_IN_PLACE, arr.data(), 6, MPI_DOUBLE, MPI_SUM, comm.comm());
+    };
+    allreduce6(stress_nl_, spincomm); allreduce6(stress_k_, spincomm);
+    allreduce6(stress_nl_, kptcomm);  allreduce6(stress_k_, kptcomm);
+    allreduce6(stress_nl_, bandcomm); allreduce6(stress_k_, bandcomm);
+
     for (int i = 0; i < 6; ++i) {
         stress_nl_[i] /= cell_measure_;
+        stress_k_[i] /= cell_measure_;
     }
-}
-
-// Helper: compute <χ|x> without MPI reduction (for internal use)
-void Stress::compute_chi_x_local(
-    const Crystal& crystal,
-    const std::vector<AtomNlocInfluence>& nloc_influence,
-    const Domain& domain,
-    const FDGrid& grid,
-    const double* x,
-    double dV,
-    std::vector<double>& result,
-    const MPIComm& dmcomm) {
-
-    int ntypes = crystal.n_types();
-    int nx_d = domain.Nx_d(), ny_d = domain.Ny_d();
-    double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
-
-    int total_nproj = 0;
-    for (int it = 0; it < ntypes; ++it) {
-        int nproj = crystal.types()[it].psd().nproj_per_atom();
-        total_nproj += nproj * nloc_influence[it].n_atom;
-    }
-    result.assign(total_nproj, 0.0);
-
-    int proj_offset = 0;
-    for (int it = 0; it < ntypes; ++it) {
-        const auto& psd = crystal.types()[it].psd();
-        const auto& inf = nloc_influence[it];
-        int nproj = psd.nproj_per_atom();
-        if (nproj == 0) continue;
-
-        for (int iat = 0; iat < inf.n_atom; ++iat) {
-            int ndc = inf.ndc[iat];
-            if (ndc == 0) { proj_offset += nproj; continue; }
-
-            const auto& gpos = inf.grid_pos[iat];
-            Vec3 atom_pos = inf.coords[iat];
-
-            std::vector<double> rx(ndc), ry(ndc), rz(ndc), rr(ndc);
-            for (int ig = 0; ig < ndc; ++ig) {
-                int flat = gpos[ig];
-                int li = flat % nx_d;
-                int lj = (flat / nx_d) % ny_d;
-                int lk = flat / (nx_d * ny_d);
-                rx[ig] = (li + domain.vertices().xs) * dx - atom_pos.x;
-                ry[ig] = (lj + domain.vertices().ys) * dy - atom_pos.y;
-                rz[ig] = (lk + domain.vertices().zs) * dz - atom_pos.z;
-                rr[ig] = std::sqrt(rx[ig] * rx[ig] + ry[ig] * ry[ig] + rz[ig] * rz[ig]);
-            }
-
-            int col = 0;
-            for (int l = 0; l <= psd.lmax(); ++l) {
-                if (l == psd.lloc()) continue;
-                for (int p = 0; p < psd.ppl()[l]; ++p) {
-                    std::vector<double> udv_interp;
-                    Pseudopotential::spline_interp(
-                        psd.radial_grid(), psd.UdV()[l][p], psd.UdV_spline_d()[l][p],
-                        rr, udv_interp);
-
-                    for (int m = -l; m <= l; ++m) {
-                        double dot = 0.0;
-                        for (int ig = 0; ig < ndc; ++ig) {
-                            double ylm = Ylm_stress(l, m, rx[ig], ry[ig], rz[ig], rr[ig]);
-                            dot += ylm * udv_interp[ig] * x[gpos[ig]];
-                        }
-                        result[proj_offset + col] = dot * dV;
-                        col++;
-                    }
-                }
-            }
-            proj_offset += nproj;
-        }
-    }
-
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, result.data(), total_nproj,
-                      MPI_DOUBLE, MPI_SUM, dmcomm.comm());
-    }
-}
-
-// Real spherical harmonics (same convention as NonlocalProjector)
-double Stress::Ylm_stress(int l, int m, double x, double y, double z, double r) {
-    if (r < 1e-14) return 0.0;
-    double invr = 1.0 / r;
-    double xn = x * invr, yn = y * invr, zn = z * invr;
-
-    if (l == 0) return 1.0;
-    if (l == 1) {
-        if (m == -1) return yn;
-        if (m ==  0) return zn;
-        if (m ==  1) return xn;
-    }
-    if (l == 2) {
-        double x2 = xn * xn, y2 = yn * yn, z2 = zn * zn;
-        if (m == -2) return xn * yn * std::sqrt(3.0);
-        if (m == -1) return yn * zn * std::sqrt(3.0);
-        if (m ==  0) return 0.5 * (3.0 * z2 - 1.0);
-        if (m ==  1) return xn * zn * std::sqrt(3.0);
-        if (m ==  2) return 0.5 * std::sqrt(3.0) * (x2 - y2);
-    }
-    if (l == 3) {
-        double x2 = xn * xn, y2 = yn * yn, z2 = zn * zn;
-        if (m == -3) return 0.5 * std::sqrt(2.5) * yn * (3.0 * x2 - y2);
-        if (m == -2) return xn * yn * zn * std::sqrt(15.0);
-        if (m == -1) return 0.25 * std::sqrt(1.5) * yn * (5.0 * z2 - 1.0);
-        if (m ==  0) return 0.5 * zn * (5.0 * z2 - 3.0);
-        if (m ==  1) return 0.25 * std::sqrt(1.5) * xn * (5.0 * z2 - 1.0);
-        if (m ==  2) return 0.5 * std::sqrt(15.0) * zn * (x2 - y2);
-        if (m ==  3) return 0.5 * std::sqrt(2.5) * xn * (x2 - 3.0 * y2);
-    }
-    return 0.0;
 }
 
 } // namespace sparc

@@ -9,13 +9,14 @@ namespace sparc {
 // Real spherical harmonics Y_lm(x, y, z, r)
 // Fully normalized: matching reference SPARC convention (tools.c RealSphericalHarmonic)
 double NonlocalProjector::spherical_harmonic(int l, int m, double x, double y, double z, double r) {
+    // l = 0: Y00 = 0.5*sqrt(1/pi) — constant, no direction needed
+    if (l == 0) return 0.282094791773878;
+
+    // For l > 0, direction is undefined at r=0; return 0 (projectors vanish at origin)
     if (r < 1e-14) return 0.0;
 
     double invr = 1.0 / r;
     double xn = x * invr, yn = y * invr, zn = z * invr;
-
-    // l = 0: Y00 = 0.5*sqrt(1/pi)
-    if (l == 0) return 0.282094791773878;
 
     // l = 1: coefficients = sqrt(3/(4*pi))
     if (l == 1) {
@@ -89,6 +90,9 @@ void NonlocalProjector::setup(const Crystal& crystal,
             const auto& gpos = inf.grid_pos[iat];
             Vec3 atom_pos = inf.coords[iat];
 
+            bool is_orth = grid.lattice().is_orthogonal();
+            const auto& lattice = grid.lattice();
+
             std::vector<double> rx(ndc), ry(ndc), rz(ndc), rr(ndc);
             for (int ig = 0; ig < ndc; ++ig) {
                 int flat = gpos[ig];
@@ -98,9 +102,22 @@ void NonlocalProjector::setup(const Crystal& crystal,
                 int gi = li + domain.vertices().xs;
                 int gj = lj + domain.vertices().ys;
                 int gk = lk + domain.vertices().zs;
-                rx[ig] = gi * dx - atom_pos.x;
-                ry[ig] = gj * dy - atom_pos.y;
-                rz[ig] = gk * dz - atom_pos.z;
+                // Displacement in non-Cart coords
+                double dx_nc = gi * dx - atom_pos.x;
+                double dy_nc = gj * dy - atom_pos.y;
+                double dz_nc = gk * dz - atom_pos.z;
+                if (is_orth) {
+                    // Non-Cart = Cartesian for orthogonal cells
+                    rx[ig] = dx_nc;
+                    ry[ig] = dy_nc;
+                    rz[ig] = dz_nc;
+                } else {
+                    // Convert non-Cart displacement to Cartesian for Ylm
+                    Vec3 cart = lattice.nonCart_to_cart({dx_nc, dy_nc, dz_nc});
+                    rx[ig] = cart.x;
+                    ry[ig] = cart.y;
+                    rz[ig] = cart.z;
+                }
                 rr[ig] = std::sqrt(rx[ig] * rx[ig] + ry[ig] * ry[ig] + rz[ig] * rz[ig]);
             }
 
@@ -142,8 +159,7 @@ void NonlocalProjector::setup(const Crystal& crystal,
     is_setup_ = true;
 }
 
-void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double dV,
-                               const MPIComm& comm) const {
+void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double dV) const {
     if (!is_setup_ || total_nproj_ == 0) return;
 
     int Nd_d = domain_->Nd_d();
@@ -196,12 +212,6 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
                 }
             }
         }
-    }
-
-    // Step 2: Allreduce alpha across domain communicator
-    if (!comm.is_null() && comm.size() > 1) {
-        MPI_Allreduce(MPI_IN_PLACE, alpha.data(),
-                      static_cast<int>(alpha.size()), MPI_DOUBLE, MPI_SUM, comm.comm());
     }
 
     // Step 2b: Apply Gamma to alpha (matching reference: iterate over ALL atoms sequentially)

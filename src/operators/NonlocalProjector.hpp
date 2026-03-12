@@ -6,7 +6,6 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "atoms/Crystal.hpp"
-#include "parallel/MPIComm.hpp"
 
 namespace sparc {
 
@@ -31,8 +30,7 @@ public:
     // Apply Vnl to psi: Hpsi += Vnl * psi
     // psi: local domain array, shape = (Nd_d, ncol) column-major
     // Hpsi: output, same shape (accumulated into)
-    void apply(const double* psi, double* Hpsi, int ncol, double dV,
-               const MPIComm& comm) const;
+    void apply(const double* psi, double* Hpsi, int ncol, double dV) const;
 
     bool is_setup() const { return is_setup_; }
 
@@ -60,7 +58,8 @@ private:
     const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;
     const Domain* domain_ = nullptr;
 
-    // Spherical harmonics
+public:
+    // Spherical harmonics (public for use by Forces/Stress)
     static double spherical_harmonic(int l, int m, double x, double y, double z, double r);
 };
 

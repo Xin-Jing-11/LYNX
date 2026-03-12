@@ -18,13 +18,22 @@ double Crystal::total_Zval() const {
 
 void Crystal::wrap_positions() {
     if (!lattice_) return;
+    Vec3 L = lattice_->lengths();
     for (auto& pos : positions_) {
-        Vec3 frac = lattice_->cart_to_frac(pos);
-        // Wrap to [0, 1)
-        frac.x -= std::floor(frac.x);
-        frac.y -= std::floor(frac.y);
-        frac.z -= std::floor(frac.z);
-        pos = lattice_->frac_to_cart(frac);
+        // Positions are in non-Cart coords for non-orth, Cartesian for orth
+        // In both cases, wrap to [0, L_i)
+        if (lattice_->is_orthogonal()) {
+            Vec3 frac = lattice_->cart_to_frac(pos);
+            frac.x -= std::floor(frac.x);
+            frac.y -= std::floor(frac.y);
+            frac.z -= std::floor(frac.z);
+            pos = lattice_->frac_to_cart(frac);
+        } else {
+            // Non-Cart coords: range [0, L_i)
+            pos.x -= std::floor(pos.x / L.x) * L.x;
+            pos.y -= std::floor(pos.y / L.y) * L.y;
+            pos.z -= std::floor(pos.z / L.z) * L.z;
+        }
     }
 }
 
@@ -36,19 +45,27 @@ void Crystal::compute_atom_influence(const Domain& domain, double rc_max,
     const auto& grid = domain.global_grid();
     Vec3 L = lattice_->lengths();
     double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
+    bool is_orth = lattice_->is_orthogonal();
 
     for (int it = 0; it < n_types(); ++it) {
         auto& inf = influence[it];
         inf = AtomInfluence{};
 
+        // For non-orth: extent factors for bounding box in non-Cart coords
+        Vec3 ext_inf = is_orth ? Vec3{1.0, 1.0, 1.0} : lattice_->nonCart_sphere_extent();
+
         for (int ia = 0; ia < n_atom_total(); ++ia) {
             if (type_indices_[ia] != it) continue;
 
-            // Check all periodic images within rc_max of the domain
+            // Positions are in non-Cart coords (same coordinate system as grid)
             Vec3 pos = positions_[ia];
-            int n_images_x = (grid.bcx() == BCType::Periodic) ? static_cast<int>(std::ceil(rc_max / L.x)) : 0;
-            int n_images_y = (grid.bcy() == BCType::Periodic) ? static_cast<int>(std::ceil(rc_max / L.y)) : 0;
-            int n_images_z = (grid.bcz() == BCType::Periodic) ? static_cast<int>(std::ceil(rc_max / L.z)) : 0;
+            // For non-orth, Cartesian sphere extends further in non-Cart coords
+            double ext_x = rc_max * ext_inf.x;
+            double ext_y = rc_max * ext_inf.y;
+            double ext_z = rc_max * ext_inf.z;
+            int n_images_x = (grid.bcx() == BCType::Periodic) ? static_cast<int>(std::ceil(ext_x / L.x)) : 0;
+            int n_images_y = (grid.bcy() == BCType::Periodic) ? static_cast<int>(std::ceil(ext_y / L.y)) : 0;
+            int n_images_z = (grid.bcz() == BCType::Periodic) ? static_cast<int>(std::ceil(ext_z / L.z)) : 0;
 
             for (int iz = -n_images_z; iz <= n_images_z; ++iz) {
                 for (int iy = -n_images_y; iy <= n_images_y; ++iy) {
@@ -58,13 +75,32 @@ void Crystal::compute_atom_influence(const Domain& domain, double rc_max,
                         img.y = pos.y + iy * L.y;
                         img.z = pos.z + iz * L.z;
 
-                        // Overlap region in grid indices
-                        int xs_g = static_cast<int>(std::ceil((img.x - rc_max) / dx));
-                        int xe_g = static_cast<int>(std::floor((img.x + rc_max) / dx));
-                        int ys_g = static_cast<int>(std::ceil((img.y - rc_max) / dy));
-                        int ye_g = static_cast<int>(std::floor((img.y + rc_max) / dy));
-                        int zs_g = static_cast<int>(std::ceil((img.z - rc_max) / dz));
-                        int ze_g = static_cast<int>(std::floor((img.z + rc_max) / dz));
+                        // For non-orth: need to compute bounding box in grid indices
+                        // The rc_max sphere in Cartesian corresponds to a parallelepiped
+                        // in non-Cart coords. Use a conservative estimate.
+                        int xs_g, xe_g, ys_g, ye_g, zs_g, ze_g;
+                        if (is_orth) {
+                            xs_g = static_cast<int>(std::ceil((img.x - rc_max) / dx));
+                            xe_g = static_cast<int>(std::floor((img.x + rc_max) / dx));
+                            ys_g = static_cast<int>(std::ceil((img.y - rc_max) / dy));
+                            ye_g = static_cast<int>(std::floor((img.y + rc_max) / dy));
+                            zs_g = static_cast<int>(std::ceil((img.z - rc_max) / dz));
+                            ze_g = static_cast<int>(std::floor((img.z + rc_max) / dz));
+                        } else {
+                            // Non-orth: a Cartesian sphere of radius rc_max extends
+                            // differently in non-Cart coords. Use metric correction:
+                            // extent_i = rc_max * ||row_i(LatUVec^{-1})|| / d_i
+                            Vec3 ext = lattice_->nonCart_sphere_extent();
+                            double rc_x = rc_max * ext.x / dx;
+                            double rc_y = rc_max * ext.y / dy;
+                            double rc_z = rc_max * ext.z / dz;
+                            xs_g = static_cast<int>(std::ceil(img.x / dx - rc_x));
+                            xe_g = static_cast<int>(std::floor(img.x / dx + rc_x));
+                            ys_g = static_cast<int>(std::ceil(img.y / dy - rc_y));
+                            ye_g = static_cast<int>(std::floor(img.y / dy + rc_y));
+                            zs_g = static_cast<int>(std::ceil(img.z / dz - rc_z));
+                            ze_g = static_cast<int>(std::floor(img.z / dz + rc_z));
+                        }
 
                         // Intersect with local domain
                         int xs_l = std::max(xs_g, domain.vertices().xs);
@@ -100,6 +136,7 @@ void Crystal::compute_nloc_influence(const Domain& domain,
     const auto& grid = domain.global_grid();
     Vec3 L = lattice_->lengths();
     double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
+    bool is_orth = lattice_->is_orthogonal();
 
     for (int it = 0; it < n_types(); ++it) {
         auto& inf = nloc_influence[it];
@@ -111,13 +148,20 @@ void Crystal::compute_nloc_influence(const Domain& domain,
             rc_max = std::max(rc_max, r);
         if (rc_max < 1e-14) continue;
 
+        // For non-orth: extent factors for bounding box in non-Cart coords
+        Vec3 ext = is_orth ? Vec3{1.0, 1.0, 1.0} : lattice_->nonCart_sphere_extent();
+
         for (int ia = 0; ia < n_atom_total(); ++ia) {
             if (type_indices_[ia] != it) continue;
             Vec3 pos = positions_[ia];
 
-            int n_images_x = (grid.bcx() == BCType::Periodic) ? static_cast<int>(std::ceil(rc_max / L.x)) : 0;
-            int n_images_y = (grid.bcy() == BCType::Periodic) ? static_cast<int>(std::ceil(rc_max / L.y)) : 0;
-            int n_images_z = (grid.bcz() == BCType::Periodic) ? static_cast<int>(std::ceil(rc_max / L.z)) : 0;
+            // For non-orth cells, the Cartesian sphere extends further in non-Cart coords
+            double ext_x = rc_max * ext.x;
+            double ext_y = rc_max * ext.y;
+            double ext_z = rc_max * ext.z;
+            int n_images_x = (grid.bcx() == BCType::Periodic) ? static_cast<int>(std::ceil(ext_x / L.x)) : 0;
+            int n_images_y = (grid.bcy() == BCType::Periodic) ? static_cast<int>(std::ceil(ext_y / L.y)) : 0;
+            int n_images_z = (grid.bcz() == BCType::Periodic) ? static_cast<int>(std::ceil(ext_z / L.z)) : 0;
 
             for (int iz = -n_images_z; iz <= n_images_z; ++iz) {
                 for (int iy = -n_images_y; iy <= n_images_y; ++iy) {
@@ -127,13 +171,27 @@ void Crystal::compute_nloc_influence(const Domain& domain,
                         img.y = pos.y + iy * L.y;
                         img.z = pos.z + iz * L.z;
 
-                        // Find grid points within rc_max sphere
-                        int xs_g = static_cast<int>(std::ceil((img.x - rc_max) / dx));
-                        int xe_g = static_cast<int>(std::floor((img.x + rc_max) / dx));
-                        int ys_g = static_cast<int>(std::ceil((img.y - rc_max) / dy));
-                        int ye_g = static_cast<int>(std::floor((img.y + rc_max) / dy));
-                        int zs_g = static_cast<int>(std::ceil((img.z - rc_max) / dz));
-                        int ze_g = static_cast<int>(std::floor((img.z + rc_max) / dz));
+                        // Bounding box in grid indices
+                        int xs_g, xe_g, ys_g, ye_g, zs_g, ze_g;
+                        if (is_orth) {
+                            xs_g = static_cast<int>(std::ceil((img.x - rc_max) / dx));
+                            xe_g = static_cast<int>(std::floor((img.x + rc_max) / dx));
+                            ys_g = static_cast<int>(std::ceil((img.y - rc_max) / dy));
+                            ye_g = static_cast<int>(std::floor((img.y + rc_max) / dy));
+                            zs_g = static_cast<int>(std::ceil((img.z - rc_max) / dz));
+                            ze_g = static_cast<int>(std::floor((img.z + rc_max) / dz));
+                        } else {
+                            Vec3 ext = lattice_->nonCart_sphere_extent();
+                            double rc_x = rc_max * ext.x / dx;
+                            double rc_y = rc_max * ext.y / dy;
+                            double rc_z = rc_max * ext.z / dz;
+                            xs_g = static_cast<int>(std::ceil(img.x / dx - rc_x));
+                            xe_g = static_cast<int>(std::floor(img.x / dx + rc_x));
+                            ys_g = static_cast<int>(std::ceil(img.y / dy - rc_y));
+                            ye_g = static_cast<int>(std::floor(img.y / dy + rc_y));
+                            zs_g = static_cast<int>(std::ceil(img.z / dz - rc_z));
+                            ze_g = static_cast<int>(std::floor(img.z / dz + rc_z));
+                        }
 
                         int xs_l = std::max(xs_g, domain.vertices().xs);
                         int xe_l = std::min(xe_g, domain.vertices().xe);
@@ -155,9 +213,15 @@ void Crystal::compute_nloc_influence(const Domain& domain,
                                 double yr = j * dy - img.y;
                                 for (int i = xs_l; i <= xe_l; ++i) {
                                     double xr = i * dx - img.x;
-                                    double r2 = xr * xr + yr * yr + zr * zr;
+                                    // Distance: for orth, Euclidean; for non-orth, use metric
+                                    double r2;
+                                    if (is_orth) {
+                                        r2 = xr * xr + yr * yr + zr * zr;
+                                    } else {
+                                        double d = lattice_->metric_distance(xr, yr, zr);
+                                        r2 = d * d;
+                                    }
                                     if (r2 <= rc_max * rc_max) {
-                                        // Local index in the domain
                                         int li = i - domain.vertices().xs;
                                         int lj = j - domain.vertices().ys;
                                         int lk = k - domain.vertices().zs;

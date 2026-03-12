@@ -43,7 +43,6 @@ struct SystemSetup {
     FDGrid grid;
     FDStencil stencil;
     Domain domain;
-    MPIComm dmcomm_wrap;
     MPIComm bandcomm_wrap;
     MPIComm kptcomm_wrap;
     MPIComm spincomm_wrap;
@@ -85,7 +84,7 @@ struct SystemSetup {
         Nd_d = domain.Nd_d();
 
         // Use MPI_COMM_SELF for serial
-        dmcomm_wrap = MPIComm(MPI_COMM_SELF);
+        // dmcomm removed (no domain decomposition)
         bandcomm_wrap = MPIComm(MPI_COMM_SELF);
         kptcomm_wrap = MPIComm(MPI_COMM_SELF);
         spincomm_wrap = MPIComm(MPI_COMM_SELF);
@@ -132,25 +131,19 @@ struct SystemSetup {
         crystal->compute_nloc_influence(domain, nloc_influence);
 
         // Electrostatics
-        elec.compute_pseudocharge(*crystal, influence, domain, grid, stencil, dmcomm_wrap);
+        elec.compute_pseudocharge(*crystal, influence, domain, grid, stencil);
         Vloc.resize(Nd_d, 0.0);
-        elec.compute_Vloc(*crystal, influence, domain, grid, Vloc.data(), dmcomm_wrap);
-        elec.compute_Ec(Vloc.data(), Nd_d, grid.dV(), dmcomm_wrap);
-
-        // Create Cartesian communicator for HaloExchange
-        int dims[3] = {1, 1, 1};
-        int periods[3] = {1, 1, 1}; // periodic
-        MPI_Comm cart_comm;
-        MPI_Cart_create(MPI_COMM_SELF, 3, dims, periods, 0, &cart_comm);
+        elec.compute_Vloc(*crystal, influence, domain, grid, Vloc.data());
+        elec.compute_Ec(Vloc.data(), Nd_d, grid.dV());
 
         // Operators
-        halo = new HaloExchange(domain, stencil.FDn(), cart_comm);
+        halo = new HaloExchange(domain, stencil.FDn());
         laplacian = new Laplacian(stencil, domain);
         gradient = new Gradient(stencil, domain);
         vnl = new NonlocalProjector();
         vnl->setup(*crystal, nloc_influence, domain, grid);
         hamiltonian = new Hamiltonian();
-        hamiltonian->setup(stencil, domain, grid, *halo, vnl, dmcomm_wrap);
+        hamiltonian->setup(stencil, domain, grid, *halo, vnl);
     }
 };
 
@@ -316,7 +309,7 @@ TEST_F(CompareRef, PoissonSolverWithRefDensity) {
 
     // Solve -Lap(phi) = rhs
     PoissonSolver poisson;
-    poisson.setup(*sys->laplacian, sys->stencil, sys->domain, sys->grid, *sys->halo, sys->dmcomm_wrap);
+    poisson.setup(*sys->laplacian, sys->stencil, sys->domain, sys->grid, *sys->halo);
     std::vector<double> phi(Nd_d, 0.0);
     poisson.solve(rhs.data(), phi.data(), 1e-6);
 

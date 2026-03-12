@@ -55,14 +55,35 @@ int main(int argc, char** argv) {
 
         sparc::OutputWriter::print_summary(config, lattice, grid, rank);
 
+        if (rank == 0 && !lattice.is_orthogonal()) {
+            auto& lT = lattice.lapc_T();
+            std::printf("lapcT = [[%.6f, %.6f, %.6f],\n"
+                        "         [%.6f, %.6f, %.6f],\n"
+                        "         [%.6f, %.6f, %.6f]]\n",
+                lT(0,0), lT(0,1), lT(0,2), lT(1,0), lT(1,1), lT(1,2), lT(2,0), lT(2,1), lT(2,2));
+            std::printf("dV = %.10e, jacobian = %.6f\n", grid.dV(), lattice.jacobian());
+            // Dump stencil coefficients for comparison with reference
+            int FDn = stencil.FDn();
+            std::printf("DUMP_STENCIL FDn=%d\n", FDn);
+            for (int p = 0; p <= FDn; ++p) {
+                std::printf("DUMP_D2_COEFF p=%d x=%.15e y=%.15e z=%.15e\n",
+                            p, stencil.D2_coeff_x()[p], stencil.D2_coeff_y()[p], stencil.D2_coeff_z()[p]);
+            }
+            std::printf("DUMP_D2_XY");
+            for (int p = 0; p <= FDn; ++p) std::printf(" %.15e", stencil.D2_coeff_xy()[p]);
+            std::printf("\n");
+            std::printf("DUMP_D1_Y");
+            for (int p = 0; p <= FDn; ++p) std::printf(" %.15e", stencil.D1_coeff_y()[p]);
+            std::printf("\n");
+        }
+
         // ===== Setup parallelization =====
         int Nkpts = config.Kx * config.Ky * config.Kz;
         int Nspin = (config.spin_type == sparc::SpinType::None) ? 1 : 2;
         sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
 
-        const auto& domain = parallel.psi_domain();
-        const auto& dmcomm = parallel.dmcomm();
+        const auto& domain = parallel.domain();
         const auto& bandcomm = parallel.bandcomm();
         const auto& kptcomm = parallel.kptcomm();
         const auto& spincomm = parallel.spincomm();
@@ -95,7 +116,19 @@ int main(int argc, char** argv) {
             for (int ia = 0; ia < n_atoms; ++ia) {
                 sparc::Vec3 pos = at_in.coords[ia];
                 if (at_in.fractional) {
-                    pos = lattice.frac_to_cart(pos);
+                    // For non-orthogonal: store in non-Cartesian coords (scaled fractional)
+                    // For orthogonal: non-Cart = Cartesian, so frac_to_cart is fine
+                    if (lattice.is_orthogonal()) {
+                        pos = lattice.frac_to_cart(pos);
+                    } else {
+                        sparc::Vec3 L = lattice.lengths();
+                        pos = {pos.x * L.x, pos.y * L.y, pos.z * L.z};
+                    }
+                } else {
+                    // Cartesian input: convert to non-Cart for non-orth cells
+                    if (!lattice.is_orthogonal()) {
+                        pos = lattice.cart_to_nonCart(pos);
+                    }
                 }
                 all_positions.push_back(pos);
                 type_indices.push_back(static_cast<int>(it));
@@ -128,8 +161,10 @@ int main(int argc, char** argv) {
         }
         // Add margin for FD stencil and pseudocharge tail (matches reference behavior)
         // Reference uses Calculate_PseudochargeCutoff to find per-type cutoffs.
-        // Adding ~2*h margin covers the FD stencil tail sufficiently.
-        rc_max += 2.0 * std::max({grid.dx(), grid.dy(), grid.dz()});
+        // Adding ~8*h margin covers the pseudocharge tail sufficiently for most systems.
+        // TODO: implement proper Calculate_PseudochargeCutoff for per-type adaptive cutoffs.
+        double h_max = std::max({grid.dx(), grid.dy(), grid.dz()});
+        rc_max += 8.0 * h_max;
 
         std::vector<sparc::AtomInfluence> influence;
         crystal.compute_atom_influence(domain, rc_max, influence);
@@ -138,27 +173,42 @@ int main(int argc, char** argv) {
         crystal.compute_nloc_influence(domain, nloc_influence);
 
         if (rank == 0) {
-            std::printf("Atom influence computed (rc_max = %.4f Bohr)\n", rc_max);
+            int total_inf = 0;
+            for (auto& inf : influence) total_inf += inf.n_atom;
+            std::printf("Atom influence computed (rc_max = %.4f Bohr, %d entries)\n", rc_max, total_inf);
+            std::printf("Computing pseudocharge...\n");
+            std::fflush(stdout);
         }
 
         // ===== Electrostatics: pseudocharge + Vloc =====
         sparc::Electrostatics elec;
-        elec.compute_pseudocharge(crystal, influence, domain, grid, stencil, dmcomm);
+        elec.compute_pseudocharge(crystal, influence, domain, grid, stencil);
 
         int Nd_d = domain.Nd_d();
         std::vector<double> Vloc(Nd_d, 0.0);
-        elec.compute_Vloc(crystal, influence, domain, grid, Vloc.data(), dmcomm);
-        elec.compute_Ec(Vloc.data(), Nd_d, grid.dV(), dmcomm);
+        elec.compute_Vloc(crystal, influence, domain, grid, Vloc.data());
+        elec.compute_Ec(Vloc.data(), Nd_d, grid.dV());
 
         if (rank == 0) {
             std::printf("Pseudocharge: int(b) = %.6f (expected: %.1f)\n",
                         elec.int_b(), -static_cast<double>(Nelectron));
             std::printf("Eself = %.6f, Ec = %.6f, Esc = %.6f Ha\n",
                         elec.Eself(), elec.Ec(), elec.Eself() + elec.Ec());
+
+            // Debug: print pseudocharge norm and stats
+            double b_norm2 = 0, b_min = 1e99, b_max = -1e99;
+            for (int i = 0; i < Nd_d; ++i) {
+                double bi = elec.pseudocharge().data()[i];
+                b_norm2 += bi * bi;
+                b_min = std::min(b_min, bi);
+                b_max = std::max(b_max, bi);
+            }
+            std::printf("DEBUG_PSCHG: b_2norm=%.10f b_min=%.10f b_max=%.10f\n",
+                        std::sqrt(b_norm2), b_min, b_max);
         }
 
         // ===== Setup operators =====
-        sparc::HaloExchange halo(domain, stencil.FDn(), dmcomm.comm());
+        sparc::HaloExchange halo(domain, stencil.FDn());
         sparc::Laplacian laplacian(stencil, domain);
         sparc::Gradient gradient(stencil, domain);
 
@@ -172,7 +222,7 @@ int main(int argc, char** argv) {
 
         // Setup Hamiltonian
         sparc::Hamiltonian hamiltonian;
-        hamiltonian.setup(stencil, domain, grid, halo, &vnl, dmcomm);
+        hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
         // ===== Setup SCF =====
         int Nstates = config.Nstates;
@@ -193,7 +243,7 @@ int main(int argc, char** argv) {
 
         sparc::SCF scf;
         scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-                  halo, &vnl, dmcomm, bandcomm, kptcomm, spincomm, scf_params);
+                  halo, &vnl, bandcomm, kptcomm, spincomm, scf_params, Nspin);
 
         // ===== Allocate wavefunctions =====
         sparc::Wavefunction wfn;
@@ -204,32 +254,68 @@ int main(int argc, char** argv) {
         {
             std::vector<double> rho_at(Nd_d, 0.0);
             elec.compute_atomic_density(crystal, influence, domain, grid,
-                                        rho_at.data(), Nelectron, dmcomm);
+                                        rho_at.data(), Nelectron);
 
             // Check if atomic density is reasonable (no extreme spikes)
             double rho_max = 0;
             for (int i = 0; i < Nd_d; ++i)
                 rho_max = std::max(rho_max, rho_at[i]);
 
-            scf.set_initial_density(rho_at.data(), Nd_d);
+            // Compute initial magnetization from per-atom spin values
+            // Reference: electronicGroundState.c:Calculate_elecDens
+            // atom_spin[J] * rho_at_J(r) for each atom with nonzero spin
+            std::vector<double> mag_init;
+            if (Nspin == 2) {
+                mag_init.resize(Nd_d, 0.0);
+                // Simple approach: distribute initial magnetization proportional to
+                // atomic density. Total mag = sum(atom_spin_J * Zval_J / total_Zval) * rho_at(r)
+                double total_spin = 0.0;
+                int atom_idx = 0;
+                for (size_t it = 0; it < config.atom_types.size(); ++it) {
+                    const auto& at_in = config.atom_types[it];
+                    for (size_t ia = 0; ia < at_in.coords.size(); ++ia) {
+                        double atom_spin = 0.0;
+                        if (ia < at_in.spin.size()) atom_spin = at_in.spin[ia];
+                        total_spin += atom_spin;
+                        atom_idx++;
+                    }
+                }
+                // Scale magnetization: mag = (total_spin / Nelectron) * rho_at
+                if (std::abs(total_spin) > 1e-12) {
+                    double scale = total_spin / static_cast<double>(Nelectron);
+                    for (int i = 0; i < Nd_d; ++i) {
+                        mag_init[i] = scale * rho_at[i];
+                    }
+                }
+            }
+
+            scf.set_initial_density(rho_at.data(), Nd_d,
+                                    Nspin == 2 ? mag_init.data() : nullptr);
             if (rank == 0) {
-                double rsum = 0;
-                for (int i = 0; i < Nd_d; ++i) rsum += rho_at[i];
+                double rsum = 0, rsum2 = 0;
+                for (int i = 0; i < Nd_d; ++i) { rsum += rho_at[i]; rsum2 += rho_at[i]*rho_at[i]; }
                 std::printf("Atomic density: max=%.4f, int*dV=%.6f (expected %d)\n",
                             rho_max, rsum * grid.dV(), Nelectron);
+                std::printf("DEBUG_RHO0: sum=%.10f norm2=%.10f rho[0]=%.10e rho[100]=%.10e rho[1000]=%.10e\n",
+                            rsum, std::sqrt(rsum2), rho_at[0], rho_at[100], rho_at[1000]);
+                if (Nspin == 2) {
+                    double msum = 0;
+                    for (int i = 0; i < Nd_d; ++i) msum += mag_init[i];
+                    std::printf("Initial magnetization: int*dV=%.6f\n", msum * grid.dV());
+                }
             }
         }
 
         // ===== Compute NLCC core density =====
         std::vector<double> rho_core(Nd_d, 0.0);
         bool has_nlcc = elec.compute_core_density(crystal, influence, domain, grid,
-                                                   rho_core.data(), dmcomm);
+                                                   rho_core.data());
+        // DEBUG: temporarily disable NLCC to isolate energy discrepancy
+        // has_nlcc = false;
         if (rank == 0) {
             if (has_nlcc) {
                 double rc_sum = 0;
                 for (int i = 0; i < Nd_d; ++i) rc_sum += rho_core[i];
-                if (!dmcomm.is_null() && dmcomm.size() > 1)
-                    rc_sum = dmcomm.allreduce_sum(rc_sum);
                 std::printf("NLCC: core charge integral = %.6f\n", rc_sum * grid.dV());
             } else {
                 std::printf("NLCC: not present for any atom type\n");
@@ -245,6 +331,27 @@ int main(int argc, char** argv) {
                               has_nlcc ? rho_core.data() : nullptr);
 
         if (rank == 0) {
+            // Debug: dump norms for comparison with reference
+            {
+                double norm_b = 0, norm_phi = 0, norm_rho = 0, rho_sum = 0;
+                double b_min = 1e99, b_max = -1e99, phi_min = 1e99, phi_max = -1e99;
+                const double* b = elec.pseudocharge().data();
+                const double* phi = scf.phi();
+                const double* rho = scf.density().rho_total().data();
+                for (int i = 0; i < Nd_d; ++i) {
+                    norm_b += b[i]*b[i];
+                    b_min = std::min(b_min, b[i]); b_max = std::max(b_max, b[i]);
+                    norm_phi += phi[i]*phi[i];
+                    phi_min = std::min(phi_min, phi[i]); phi_max = std::max(phi_max, phi[i]);
+                    norm_rho += rho[i]*rho[i]; rho_sum += rho[i];
+                }
+                std::printf("DEBUG_OURS: b_2norm=%.10f b_min=%.10f b_max=%.10f\n", std::sqrt(norm_b), b_min, b_max);
+                std::printf("DEBUG_OURS: phi_2norm=%.10f phi_min=%.10f phi_max=%.10f\n", std::sqrt(norm_phi), phi_min, phi_max);
+                std::printf("DEBUG_OURS: rho_2norm=%.10f rho_sum=%.10f\n", std::sqrt(norm_rho), rho_sum);
+                std::printf("DEBUG_OURS: rho[0]=%.10e rho[100]=%.10e rho[1000]=%.10e\n", rho[0], rho[100], rho[1000]);
+                std::printf("DEBUG_OURS: b[0]=%.10e b[100]=%.10e b[1000]=%.10e\n", b[0], b[100], b[1000]);
+                std::printf("DEBUG_OURS: phi[0]=%.10e phi[100]=%.10e phi[1000]=%.10e\n", phi[0], phi[100], phi[1000]);
+            }
             std::printf("\n===== SCF %s =====\n", scf.converged() ? "CONVERGED" : "NOT CONVERGED");
             const auto& E = scf.energy();
             std::printf("  Eband   = %18.10f Ha\n", E.Eband);
@@ -262,13 +369,38 @@ int main(int argc, char** argv) {
         if (config.print_forces) {
             std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
             sparc::Forces forces;
-            auto f = forces.compute(wfn, crystal, nloc_influence, vnl,
-                                    gradient, halo, domain, grid,
+            auto f = forces.compute(wfn, crystal, influence, nloc_influence, vnl,
+                                    stencil, gradient, halo, domain, grid,
                                     scf.phi(), scf.density().rho_total().data(),
-                                    kpt_weights, dmcomm, bandcomm, kptcomm, spincomm);
+                                    Vloc.data(),
+                                    elec.pseudocharge().data(),
+                                    elec.pseudocharge_ref().data(),
+                                    scf.Vxc(),
+                                    has_nlcc ? rho_core.data() : nullptr,
+                                    kpt_weights, bandcomm, kptcomm, spincomm);
 
             if (rank == 0) {
-                std::printf("\nAtomic forces (Ha/Bohr):\n");
+                std::printf("\nLocal forces (Ha/Bohr):\n");
+                const auto& fl = forces.local_forces();
+                for (int i = 0; i < Natom; ++i) {
+                    std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                                i + 1, fl[3*i], fl[3*i+1], fl[3*i+2]);
+                }
+                std::printf("\nNonlocal forces (Ha/Bohr):\n");
+                const auto& fn = forces.nonlocal_forces();
+                for (int i = 0; i < Natom; ++i) {
+                    std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                                i + 1, fn[3*i], fn[3*i+1], fn[3*i+2]);
+                }
+                if (has_nlcc) {
+                    std::printf("\nNLCC XC forces (Ha/Bohr):\n");
+                    const auto& fxc = forces.xc_forces();
+                    for (int i = 0; i < Natom; ++i) {
+                        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                                    i + 1, fxc[3*i], fxc[3*i+1], fxc[3*i+2]);
+                    }
+                }
+                std::printf("\nTotal forces (Ha/Bohr):\n");
                 for (int i = 0; i < Natom; ++i) {
                     std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
                                 i + 1, f[3*i], f[3*i+1], f[3*i+2]);
@@ -280,13 +412,19 @@ int main(int argc, char** argv) {
         if (config.calc_stress || config.calc_pressure) {
             std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
             sparc::Stress stress;
-            auto sigma = stress.compute(wfn, crystal, nloc_influence, vnl,
-                                        gradient, halo, domain, grid,
+            auto sigma = stress.compute(wfn, crystal, influence, nloc_influence, vnl,
+                                        stencil, gradient, halo, domain, grid,
                                         scf.phi(), scf.density().rho_total().data(),
+                                        Vloc.data(),
                                         elec.pseudocharge().data(),
+                                        elec.pseudocharge_ref().data(),
                                         scf.exc(), scf.Vxc(),
-                                        scf.energy().Exc, config.xc,
-                                        kpt_weights, dmcomm, bandcomm, kptcomm, spincomm);
+                                        scf.Dxcdgrho(),
+                                        scf.energy().Exc,
+                                        elec.Eself() + elec.Ec(),
+                                        config.xc,
+                                        has_nlcc ? rho_core.data() : nullptr,
+                                        kpt_weights, bandcomm, kptcomm, spincomm);
 
             if (rank == 0) {
                 std::printf("\nStress tensor (GPa):\n");

@@ -24,13 +24,15 @@ public:
     // rho: (Nd_d,) electron density
     // Vxc: (Nd_d,) output XC potential
     // exc: (Nd_d,) output XC energy density (per particle)
-    void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d) const;
+    void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
+                  double* Dxcdgrho = nullptr) const;
 
     // Evaluate for spin-polarized (collinear)
     // rho: [DMnd*3] layout: rho[0..DMnd-1] = total, rho[DMnd..2*DMnd-1] = up,
     //       rho[2*DMnd..3*DMnd-1] = down  (matching reference SPARC convention)
     // Vxc: [DMnd*2] layout: Vxc[0..DMnd-1] = up, Vxc[DMnd..2*DMnd-1] = down
-    void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d) const;
+    void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
+                       double* Dxcdgrho = nullptr) const;
 
     XCType type() const { return type_; }
     bool is_gga() const {
@@ -59,7 +61,9 @@ private:
     static void slater_spin(int DMnd, const double* rho, double* ex, double* vx);
     static void pw_spin(int DMnd, const double* rho, double* ec, double* vc);
 
+public:
     // --- GGA functionals (matching reference SPARC exactly) ---
+    // Public for use by Stress (v2xc recomputation)
 
     // PBE exchange: iflag=1(PBE), 2(PBEsol), 3(RPBE), 4(ZY-revPBE)
     // ex: energy density per particle
@@ -71,6 +75,8 @@ private:
     // PBE correlation
     static void pbec(int DMnd, const double* rho, const double* sigma,
                      int iflag, double* ec, double* vc, double* v2c);
+
+private:
 
     // Spin-polarized GGA
     static void pbex_spin(int DMnd, const double* rho, const double* sigma,

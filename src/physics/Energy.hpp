@@ -7,7 +7,6 @@
 #include "electronic/Wavefunction.hpp"
 #include "electronic/ElectronDensity.hpp"
 #include "xc/XCFunctional.hpp"
-#include "parallel/MPIComm.hpp"
 
 #include <vector>
 
@@ -36,11 +35,11 @@ public:
 
     // Compute XC energy: Exc = integral rho * exc dV
     static double xc_energy(const double* rho, const double* exc,
-                             int Nd_d, double dV, const MPIComm& dmcomm);
+                             int Nd_d, double dV);
 
     // Compute Hartree energy: Ehart = 0.5 * integral rho * phi dV
     static double hartree_energy(const double* rho, const double* phi,
-                                  int Nd_d, double dV, const MPIComm& dmcomm);
+                                  int Nd_d, double dV);
 
     // Compute total energy from components
     static double total_energy(const EnergyComponents& E);
@@ -60,7 +59,6 @@ public:
         SmearingType smearing,
         const std::vector<double>& kpt_weights,
         int Nd_d, double dV,
-        const MPIComm& dmcomm,
         const double* rho_core = nullptr,  // NLCC core density
         double Ef = 0.0);  // Fermi level (needed for Gaussian entropy)
 };

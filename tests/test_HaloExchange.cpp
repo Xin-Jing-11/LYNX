@@ -17,7 +17,7 @@ TEST(HaloExchange, PeriodicSingleProcess) {
     Domain domain(grid, v);
 
     int FDn = 3;
-    HaloExchange halo(domain, FDn, MPI_COMM_NULL);
+    HaloExchange halo(domain, FDn);
 
     EXPECT_EQ(halo.nx_ex(), 16);
     EXPECT_EQ(halo.ny_ex(), 16);
@@ -67,7 +67,7 @@ TEST(HaloExchange, ExtendedDimensions) {
     DomainVertices v{0, 19, 0, 29, 0, 39};
     Domain domain(grid, v);
 
-    HaloExchange halo(domain, 6, MPI_COMM_NULL);
+    HaloExchange halo(domain, 6);
     EXPECT_EQ(halo.nx_ex(), 32);
     EXPECT_EQ(halo.ny_ex(), 42);
     EXPECT_EQ(halo.nz_ex(), 52);

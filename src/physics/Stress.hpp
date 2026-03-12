@@ -5,8 +5,8 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "atoms/Crystal.hpp"
+#include "operators/FDStencil.hpp"
 #include "operators/Gradient.hpp"
-#include "operators/Laplacian.hpp"
 #include "operators/NonlocalProjector.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "xc/XCFunctional.hpp"
@@ -18,42 +18,48 @@
 
 namespace sparc {
 
-// Stress tensor calculation for single-point DFT.
-// Components: kinetic, XC, electrostatic, nonlocal.
+// Stress tensor calculation matching reference SPARC.
+// Components: kinetic, XC, electrostatic (local), nonlocal.
 // Stored as 6-component Voigt notation:
-//   [σ_xx, σ_xy, σ_xz, σ_yy, σ_yz, σ_zz]
+//   [σ_xx, σ_xy, σ_xz, σ_yy, σ_yz, σ_zz] (indices 0-5)
+//
+// Total: stress = stress_k + stress_xc + stress_nl + stress_el
+// All components normalized by cell_measure (volume for 3D periodic).
 class Stress {
 public:
     Stress() = default;
 
-    // Compute full stress tensor
-    // Returns 6-component stress in Ha/Bohr³
+    // Compute full stress tensor. Returns 6-component Voigt stress in Ha/Bohr³.
     std::array<double, 6> compute(
         const Wavefunction& wfn,
         const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
         const std::vector<AtomNlocInfluence>& nloc_influence,
         const NonlocalProjector& vnl,
+        const FDStencil& stencil,
         const Gradient& gradient,
         const HaloExchange& halo,
         const Domain& domain,
         const FDGrid& grid,
-        const double* phi,
-        const double* rho,
-        const double* rho_b,
-        const double* exc,
-        const double* Vxc,
-        double Exc,
+        const double* phi,           // electrostatic potential
+        const double* rho,           // electron density
+        const double* Vloc,          // correction potential Vc
+        const double* b,             // pseudocharge density
+        const double* b_ref,         // reference pseudocharge density
+        const double* exc,           // XC energy density
+        const double* Vxc,           // XC potential
+        const double* Dxcdgrho,      // GGA: stored v2x+v2c from SCF (nullptr for LDA)
+        double Exc,                  // total XC energy
+        double Esc,                  // self + correction energy (Eself + Ec)
         XCType xc_type,
+        const double* rho_core,      // NLCC core density (nullptr if no NLCC)
         const std::vector<double>& kpt_weights,
-        const MPIComm& dmcomm,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm);
 
-    // Compute pressure: P = -(1/3) * Tr(σ)
     double pressure() const;
 
-    // Access components
     const std::array<double, 6>& kinetic_stress() const { return stress_k_; }
     const std::array<double, 6>& xc_stress() const { return stress_xc_; }
     const std::array<double, 6>& electrostatic_stress() const { return stress_el_; }
@@ -68,45 +74,47 @@ private:
     std::array<double, 6> stress_total_ = {};
     double cell_measure_ = 0.0;
 
-    // Kinetic stress: -Σ g_n <∂ψ/∂x_α | ∂ψ/∂x_β>
-    void compute_kinetic(
-        const Wavefunction& wfn,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const std::vector<double>& kpt_weights,
-        const MPIComm& dmcomm,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const MPIComm& spincomm);
-
-    // XC stress: (Exc)*δ_αβ - GGA gradient correction
-    void compute_xc(
+    // XC stress: diagonal = (Exc - Exc_corr), GGA correction = -∫ Dxcdgrho * ∂ρ/∂x_α * ∂ρ/∂x_β dV
+    void compute_xc_stress(
         const double* rho,
         const double* exc,
         const double* Vxc,
+        const double* Dxcdgrho,
         double Exc,
         XCType xc_type,
+        const double* rho_core,
+        const Gradient& gradient,
+        const HaloExchange& halo,
+        const Domain& domain,
+        const FDGrid& grid);
+
+    // Electrostatic stress: uses ∇φ, ∇bJ, ∇VJ, etc. (matching reference)
+    void compute_electrostatic(
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const FDStencil& stencil,
         const Gradient& gradient,
         const HaloExchange& halo,
         const Domain& domain,
         const FDGrid& grid,
-        const MPIComm& dmcomm);
-
-    // Electrostatic stress: (1/4π)|∇φ|² terms + correction
-    void compute_electrostatic(
         const double* phi,
         const double* rho,
-        const double* rho_b,
-        const Gradient& gradient,
-        const HaloExchange& halo,
+        const double* Vloc,
+        const double* b,
+        const double* b_ref,
+        double Esc);
+
+    // NLCC XC stress correction: ∫ ∇(ρ_core_J) · (x-R_J) · Vxc dV
+    void compute_xc_nlcc_stress(
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const FDStencil& stencil,
         const Domain& domain,
         const FDGrid& grid,
-        const MPIComm& dmcomm);
+        const double* Vxc);
 
-    // Nonlocal stress: Γ * <χ|ψ> * <χ|(x-R_J)·∂ψ/∂x>
-    void compute_nonlocal(
+    // Nonlocal+kinetic stress combined (matching reference)
+    void compute_nonlocal_kinetic(
         const Wavefunction& wfn,
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
@@ -116,24 +124,9 @@ private:
         const Domain& domain,
         const FDGrid& grid,
         const std::vector<double>& kpt_weights,
-        const MPIComm& dmcomm,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm);
-
-    // Helper: compute <χ|x> for all projectors
-    static void compute_chi_x_local(
-        const Crystal& crystal,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* x,
-        double dV,
-        std::vector<double>& result,
-        const MPIComm& dmcomm);
-
-    // Real spherical harmonics
-    static double Ylm_stress(int l, int m, double x, double y, double z, double r);
 };
 
 } // namespace sparc

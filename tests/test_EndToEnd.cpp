@@ -31,7 +31,6 @@
 #include "physics/Electrostatics.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
-#include "parallel/CartTopology.hpp"
 #include "parallel/Parallelization.hpp"
 
 using namespace sparc;
@@ -70,8 +69,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                              grid, Nspin, Nkpts, config.Nstates);
 
-    const auto& domain = parallel.psi_domain();
-    const auto& dmcomm = parallel.dmcomm();
+    const auto& domain = parallel.domain();
     const auto& bandcomm = parallel.bandcomm();
     const auto& kptcomm = parallel.kptcomm();
     const auto& spincomm = parallel.spincomm();
@@ -121,6 +119,7 @@ static DFTResult run_single_point(const std::string& json_file) {
         if (!psd.radial_grid().empty())
             rc_max = std::max(rc_max, psd.radial_grid().back());
     }
+    rc_max += 2.0 * std::max({grid.dx(), grid.dy(), grid.dz()});
 
     std::vector<AtomInfluence> influence;
     crystal.compute_atom_influence(domain, rc_max, influence);
@@ -130,14 +129,15 @@ static DFTResult run_single_point(const std::string& json_file) {
 
     // Electrostatics
     Electrostatics elec;
-    elec.compute_pseudocharge(crystal, influence, domain, grid, stencil, dmcomm);
+    elec.compute_pseudocharge(crystal, influence, domain, grid, stencil);
 
     int Nd_d = domain.Nd_d();
     std::vector<double> Vloc(Nd_d, 0.0);
-    elec.compute_Vloc(crystal, influence, domain, grid, Vloc.data(), dmcomm);
+    elec.compute_Vloc(crystal, influence, domain, grid, Vloc.data());
+    elec.compute_Ec(Vloc.data(), Nd_d, grid.dV());
 
     // Operators
-    HaloExchange halo(domain, stencil.FDn(), dmcomm.comm());
+    HaloExchange halo(domain, stencil.FDn());
     Laplacian laplacian(stencil, domain);
     Gradient gradient(stencil, domain);
 
@@ -145,7 +145,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     vnl.setup(crystal, nloc_influence, domain, grid);
 
     Hamiltonian hamiltonian;
-    hamiltonian.setup(stencil, domain, grid, halo, &vnl, dmcomm);
+    hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
     // SCF
     int Nstates = config.Nstates;
@@ -164,14 +164,20 @@ static DFTResult run_single_point(const std::string& json_file) {
 
     SCF scf;
     scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-              halo, &vnl, dmcomm, bandcomm, kptcomm, spincomm, scf_params);
+              halo, &vnl, bandcomm, kptcomm, spincomm, scf_params);
 
     Wavefunction wfn;
     wfn.allocate(Nd_d, Nstates, Nspin, Nkpts);
 
+    // Compute NLCC core density
+    std::vector<double> rho_core(Nd_d, 0.0);
+    bool has_nlcc = elec.compute_core_density(crystal, influence, domain, grid,
+                                               rho_core.data());
+
     scf.run(wfn, Nelectron, Natom,
             elec.pseudocharge().data(), Vloc.data(),
-            elec.Eself(), elec.Ec(), config.xc);
+            elec.Eself(), elec.Ec(), config.xc,
+            has_nlcc ? rho_core.data() : nullptr);
 
     result.Etotal = scf.energy().Etotal;
     result.Eband = scf.energy().Eband;
@@ -185,23 +191,34 @@ static DFTResult run_single_point(const std::string& json_file) {
     if (config.print_forces) {
         std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
         Forces forces;
-        result.forces = forces.compute(wfn, crystal, nloc_influence, vnl,
-                                       gradient, halo, domain, grid,
+        result.forces = forces.compute(wfn, crystal, influence, nloc_influence, vnl,
+                                       stencil, gradient, halo, domain, grid,
                                        scf.phi(), scf.density().rho_total().data(),
-                                       kpt_weights, dmcomm, bandcomm, kptcomm, spincomm);
+                                       Vloc.data(),
+                                       elec.pseudocharge().data(),
+                                       elec.pseudocharge_ref().data(),
+                                       scf.Vxc(),
+                                       has_nlcc ? rho_core.data() : nullptr,
+                                       kpt_weights, bandcomm, kptcomm, spincomm);
     }
 
     // Stress
     if (config.calc_stress || config.calc_pressure) {
         std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
         Stress stress_calc;
-        result.stress = stress_calc.compute(wfn, crystal, nloc_influence, vnl,
-                                            gradient, halo, domain, grid,
+        result.stress = stress_calc.compute(wfn, crystal, influence, nloc_influence, vnl,
+                                            stencil, gradient, halo, domain, grid,
                                             scf.phi(), scf.density().rho_total().data(),
+                                            Vloc.data(),
                                             elec.pseudocharge().data(),
+                                            elec.pseudocharge_ref().data(),
                                             scf.exc(), scf.Vxc(),
-                                            scf.energy().Exc, config.xc,
-                                            kpt_weights, dmcomm, bandcomm, kptcomm, spincomm);
+                                            scf.Dxcdgrho(),
+                                            scf.energy().Exc,
+                                            elec.Eself() + elec.Ec(),
+                                            config.xc,
+                                            has_nlcc ? rho_core.data() : nullptr,
+                                            kpt_weights, bandcomm, kptcomm, spincomm);
         result.pressure = stress_calc.pressure();
     }
 
@@ -256,9 +273,8 @@ TEST(EndToEnd, PseudochargeComputation) {
     EXPECT_EQ(influence.size(), 1u);
     EXPECT_GT(influence[0].n_atom, 0);
 
-    MPIComm null_comm;
     Electrostatics elec;
-    elec.compute_pseudocharge(crystal, influence, domain, grid, stencil, null_comm);
+    elec.compute_pseudocharge(crystal, influence, domain, grid, stencil);
 
     double int_b = elec.int_b();
     std::printf("  Integral of pseudocharge: %.6f (expected: %.1f)\n", int_b, -4.0);

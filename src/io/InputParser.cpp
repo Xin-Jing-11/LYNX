@@ -181,9 +181,7 @@ SystemConfig InputParser::parse(const std::string& json_file) {
         if (par.contains("npspin")) config.parallel.npspin = par["npspin"].get<int>();
         if (par.contains("npkpt")) config.parallel.npkpt = par["npkpt"].get<int>();
         if (par.contains("npband")) config.parallel.npband = par["npband"].get<int>();
-        if (par.contains("npNdx")) config.parallel.npNdx = par["npNdx"].get<int>();
-        if (par.contains("npNdy")) config.parallel.npNdy = par["npNdy"].get<int>();
-        if (par.contains("npNdz")) config.parallel.npNdz = par["npNdz"].get<int>();
+        // npNdx/y/z removed (no domain decomposition)
     }
 
     // Output

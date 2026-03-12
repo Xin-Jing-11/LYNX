@@ -34,12 +34,10 @@ namespace sparc {
 void EigenSolver::setup(const Hamiltonian& H,
                          const HaloExchange& halo,
                          const Domain& domain,
-                         const MPIComm& dmcomm,
                          const MPIComm& bandcomm) {
     H_ = &H;
     halo_ = &halo;
     domain_ = &domain;
-    dmcomm_ = &dmcomm;
     bandcomm_ = &bandcomm;
 }
 
@@ -110,11 +108,6 @@ void EigenSolver::orthogonalize(double* X, int Nd_d, int Nband, double dV) {
     dgemm_(&transT, &transN, &Nband, &Nband, &Nd_d,
            &alpha, X, &Nd_d, X, &Nd_d, &beta, S.data(), &Nband);
 
-    // Allreduce over domain communicator
-    if (!dmcomm_->is_null() && dmcomm_->size() > 1) {
-        dmcomm_->allreduce_sum(S.data(), Nband * Nband);
-    }
-
     // Cholesky: S = R^T * R (upper triangular)
     char uplo = 'U';
     int info;
@@ -144,11 +137,6 @@ void EigenSolver::project_hamiltonian(const double* X, const double* Veff,
     double alpha = dV, beta_v = 0.0;
     dgemm_(&transT, &transN, &Nband, &Nband, &Nd_d,
            &alpha, X, &Nd_d, HX.data(), &Nd_d, &beta_v, Hs, &Nband);
-
-    // Allreduce
-    if (!dmcomm_->is_null() && dmcomm_->size() > 1) {
-        dmcomm_->allreduce_sum(Hs, Nband * Nband);
-    }
 
     // Symmetrize
     for (int i = 0; i < Nband; ++i) {
@@ -199,14 +187,17 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
     std::vector<double> V_j(Nd_d), V_jm1(Nd_d), V_jp1(Nd_d);
     std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
 
+    // Local comm for dot products (no domain decomposition)
+    MPIComm self_comm(MPI_COMM_SELF);
+
     // Initial vector: match reference srand(rank*100+1), range [0,1]
-    int rank = dmcomm_->rank();
+    int rank = 0;  // single domain process
     std::srand(rank * 100 + 1);
     for (int i = 0; i < Nd_d; ++i)
         V_jm1[i] = (double)std::rand() / RAND_MAX;
 
     // Normalize
-    double vscal = std::sqrt(LinearSolver::dot(V_jm1.data(), V_jm1.data(), Nd_d, *dmcomm_));
+    double vscal = std::sqrt(LinearSolver::dot(V_jm1.data(), V_jm1.data(), Nd_d, self_comm));
     vscal = 1.0 / vscal;
     for (int i = 0; i < Nd_d; ++i) V_jm1[i] *= vscal;
 
@@ -216,22 +207,22 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
     H_->apply(V_jm1.data(), Veff, V_j.data(), 1);
 
     // a[0] = <V_jm1, V_j>
-    a[0] = LinearSolver::dot(V_jm1.data(), V_j.data(), Nd_d, *dmcomm_);
+    a[0] = LinearSolver::dot(V_jm1.data(), V_j.data(), Nd_d, self_comm);
 
     // Orthogonalize: V_j = V_j - a[0]*V_jm1
     for (int i = 0; i < Nd_d; ++i)
         V_j[i] -= a[0] * V_jm1[i];
 
     // b[0] = ||V_j||
-    b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, *dmcomm_));
+    b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, self_comm));
 
     if (b[0] == 0.0) {
         // Invariant subspace; pick random vector orthogonal to V_jm1
         for (int i = 0; i < Nd_d; ++i)
             V_j[i] = -1.0 + 2.0 * ((double)std::rand() / RAND_MAX);
-        double dot_val = LinearSolver::dot(V_j.data(), V_jm1.data(), Nd_d, *dmcomm_);
+        double dot_val = LinearSolver::dot(V_j.data(), V_jm1.data(), Nd_d, self_comm);
         for (int i = 0; i < Nd_d; ++i) V_j[i] -= dot_val * V_jm1[i];
-        b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, *dmcomm_));
+        b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, self_comm));
     }
 
     // Scale V_j
@@ -251,7 +242,7 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
         H_->apply(V_j.data(), Veff, V_jp1.data(), 1);
 
         // a[j+1] = <V_j, V_{j+1}>
-        a[j + 1] = LinearSolver::dot(V_j.data(), V_jp1.data(), Nd_d, *dmcomm_);
+        a[j + 1] = LinearSolver::dot(V_j.data(), V_jp1.data(), Nd_d, self_comm);
 
         // V_{j+1} = V_{j+1} - a[j+1]*V_j - b[j]*V_{j-1}
         for (int i = 0; i < Nd_d; ++i) {
@@ -259,7 +250,7 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
             V_jm1[i] = V_j[i];
         }
 
-        b[j + 1] = std::sqrt(LinearSolver::dot(V_jp1.data(), V_jp1.data(), Nd_d, *dmcomm_));
+        b[j + 1] = std::sqrt(LinearSolver::dot(V_jp1.data(), V_jp1.data(), Nd_d, self_comm));
         if (b[j + 1] == 0.0) break;
 
         vscal = 1.0 / b[j + 1];

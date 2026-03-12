@@ -31,7 +31,7 @@ struct LapTestSetup {
         verts = {0, N - 1, 0, N - 1, 0, N - 1};
         domain = Domain(grid, verts);
         stencil = FDStencil(order, grid, lat);
-        halo = HaloExchange(domain, stencil.FDn(), MPI_COMM_NULL);
+        halo = HaloExchange(domain, stencil.FDn());
         lap = Laplacian(stencil, domain);
     }
 };

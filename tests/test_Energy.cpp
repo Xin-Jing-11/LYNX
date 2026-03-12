@@ -31,8 +31,7 @@ TEST(Energy, XCEnergy) {
     std::vector<double> rho(Nd_d, 0.02);
     std::vector<double> exc(Nd_d, -0.5);
 
-    MPIComm null_comm;
-    double Exc = Energy::xc_energy(rho.data(), exc.data(), Nd_d, dV, null_comm);
+    double Exc = Energy::xc_energy(rho.data(), exc.data(), Nd_d, dV);
 
     EXPECT_NEAR(Exc, 0.02 * (-0.5) * Nd_d * dV, 1e-10);
 }
@@ -44,8 +43,7 @@ TEST(Energy, HartreeEnergy) {
     std::vector<double> rho(Nd_d, 0.02);
     std::vector<double> phi(Nd_d, 1.0);
 
-    MPIComm null_comm;
-    double Ehart = Energy::hartree_energy(rho.data(), phi.data(), Nd_d, dV, null_comm);
+    double Ehart = Energy::hartree_energy(rho.data(), phi.data(), Nd_d, dV);
 
     // 0.5 * int rho * phi dV = 0.5 * 0.02 * 1.0 * 50 * 0.1 = 0.05
     EXPECT_NEAR(Ehart, 0.05, 1e-10);

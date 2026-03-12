@@ -4,9 +4,7 @@ add_library(sparc_core
     core/FDGrid.cpp
     core/Domain.cpp
     parallel/MPIComm.cpp
-    parallel/CartTopology.cpp
     parallel/Parallelization.cpp
-    parallel/D2DTransfer.cpp
     parallel/HaloExchange.cpp
     atoms/AtomType.cpp
     atoms/Pseudopotential.cpp
@@ -49,6 +47,20 @@ endif()
 
 add_executable(sparc main.cpp)
 target_link_libraries(sparc PRIVATE sparc_core)
+
+if(USE_CUDA)
+    target_sources(sparc_core PRIVATE
+        core/gpu_common.cu
+        parallel/HaloExchange.cu
+        operators/Laplacian.cu
+        operators/Gradient.cu
+        operators/Hamiltonian.cu
+        operators/NonlocalProjector.cu
+    )
+    target_link_libraries(sparc_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver)
+    target_compile_definitions(sparc_core PUBLIC USE_CUDA)
+    set_target_properties(sparc_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+endif()
 
 add_executable(sparc_hpsi_compare ../tests/test_HamiltonianCompare.cpp)
 target_link_libraries(sparc_hpsi_compare PRIVATE sparc_core)

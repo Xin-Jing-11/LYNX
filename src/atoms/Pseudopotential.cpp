@@ -116,8 +116,15 @@ void Pseudopotential::load_psp8(const std::string& filename) {
                     if (ri > 1e-10) {
                         UdV_[l][p][i] = proj_val / ri;
                     } else {
-                        UdV_[l][p][i] = 0.0;  // p_l(0) = 0 for l>0; finite for l=0 but r→0 term negligible
+                        UdV_[l][p][i] = 0.0;  // Will be fixed below
                     }
+                }
+            }
+            // Fix r=0 boundary: copy from r=dr (matching reference SPARC)
+            // Critical for l=0 projectors which are non-zero at the origin
+            for (int p = 0; p < nprj; ++p) {
+                if (mmax > 1) {
+                    UdV_[l][p][0] = UdV_[l][p][1];
                 }
             }
             have_rgrid = true;
@@ -254,73 +261,174 @@ void Pseudopotential::compute_splines() {
         spline_deriv(r_, rho_c_, rho_c_d_);
 }
 
+// Compute first derivatives at node points using tridiagonal system
+// (matches reference SPARC getYD_gen)
 void Pseudopotential::spline_deriv(const std::vector<double>& x,
                                    const std::vector<double>& y,
-                                   std::vector<double>& y2) {
+                                   std::vector<double>& yd) {
     int n = static_cast<int>(x.size());
-    y2.resize(n, 0.0);
-    if (n < 3) return;
-
-    std::vector<double> u(n, 0.0);
-
-    // Natural spline: y2[0] = y2[n-1] = 0
-    y2[0] = 0.0;
-    u[0] = 0.0;
-
-    for (int i = 1; i < n - 1; ++i) {
-        double sig = (x[i] - x[i-1]) / (x[i+1] - x[i-1]);
-        double p = sig * y2[i-1] + 2.0;
-        y2[i] = (sig - 1.0) / p;
-        u[i] = (y[i+1] - y[i]) / (x[i+1] - x[i])
-             - (y[i] - y[i-1]) / (x[i] - x[i-1]);
-        u[i] = (6.0 * u[i] / (x[i+1] - x[i-1]) - sig * u[i-1]) / p;
+    yd.resize(n, 0.0);
+    if (n < 2) return;
+    if (n == 2) {
+        yd[0] = yd[1] = (y[1] - y[0]) / (x[1] - x[0]);
+        return;
     }
 
-    y2[n-1] = 0.0;
-    for (int k = n - 2; k >= 0; --k)
-        y2[k] = y2[k] * y2[k+1] + u[k];
+    // Build tridiagonal system for first derivatives
+    std::vector<double> A(n, 0.0), B(n, 0.0), C(n, 0.0);
+
+    // First row (non-standard BC matching reference getYD_gen)
+    double h0 = x[1] - x[0];
+    double h1 = x[2] - x[1];
+    double r0 = (y[1] - y[0]) / h0;
+    double r1 = (y[2] - y[1]) / h1;
+    B[0] = h1 * (h0 + h1);
+    C[0] = (h0 + h1) * (h0 + h1);
+    yd[0] = r0 * (3.0 * h0 * h1 + 2.0 * h1 * h1) + r1 * h0 * h0;
+
+    // Interior rows
+    for (int i = 1; i < n - 1; ++i) {
+        h0 = x[i] - x[i-1];
+        h1 = x[i+1] - x[i];
+        r0 = (y[i] - y[i-1]) / h0;
+        r1 = (y[i+1] - y[i]) / h1;
+        A[i] = h1;
+        B[i] = 2.0 * (h0 + h1);
+        C[i] = h0;
+        yd[i] = 3.0 * (r0 * h1 + r1 * h0);
+    }
+
+    // Last row
+    int i = n - 1;
+    h0 = x[i-1] - x[i-2];
+    h1 = x[i] - x[i-1];
+    r0 = (y[i-1] - y[i-2]) / h0;
+    r1 = (y[i] - y[i-1]) / h1;
+    A[i] = (h0 + h1) * (h0 + h1);
+    B[i] = h0 * (h0 + h1);
+    yd[i] = r0 * h1 * h1 + r1 * (3.0 * h0 * h1 + 2.0 * h0 * h0);
+
+    // Solve tridiagonal system (Gauss elimination)
+    // Forward sweep
+    std::vector<double> F(n, 0.0);
+    double b = B[0];
+    yd[0] = yd[0] / b;
+    for (int j = 1; j < n; ++j) {
+        F[j] = C[j-1] / b;
+        b = B[j] - A[j] * F[j];
+        if (std::abs(b) < 1e-30) b = 1e-30;
+        yd[j] = (yd[j] - A[j] * yd[j-1]) / b;
+    }
+    // Back substitution
+    for (int j = n - 2; j >= 0; --j) {
+        yd[j] -= F[j+1] * yd[j+1];
+    }
 }
 
+// Hermite cubic spline interpolation (matches reference SPARC SplineInterp)
 void Pseudopotential::spline_interp(const std::vector<double>& r_grid,
                                     const std::vector<double>& f,
-                                    const std::vector<double>& f_d,
+                                    const std::vector<double>& yd,
                                     const std::vector<double>& r_interp,
                                     std::vector<double>& f_interp) {
     int n = static_cast<int>(r_grid.size());
     int m = static_cast<int>(r_interp.size());
     f_interp.resize(m);
 
-    for (int j = 0; j < m; ++j) {
-        double r = r_interp[j];
+    // Check if grid is uniform
+    bool is_uniform = true;
+    if (n > 2) {
+        double delta = r_grid[1] - r_grid[0];
+        for (int i = 2; i < n; ++i) {
+            if (std::abs((r_grid[i] - r_grid[i-1]) - delta) > 1e-10 * std::max(1.0, delta)) {
+                is_uniform = false;
+                break;
+            }
+        }
+    }
+
+    double delta_x = (n >= 2) ? (r_grid[1] - r_grid[0]) : 1.0;
+    double x1_max = r_grid[n - 1];
+
+    for (int i = 0; i < m; ++i) {
+        double r = r_interp[i];
 
         // Clamp to grid range
         if (r <= r_grid[0]) {
-            f_interp[j] = f[0];
+            f_interp[i] = f[0];
             continue;
         }
-        if (r >= r_grid[n - 1]) {
-            f_interp[j] = f[n - 1];
+        if (r >= x1_max) {
+            f_interp[i] = f[n - 1];
             continue;
         }
 
-        // Binary search for interval
+        // Find interval
+        int j;
+        if (is_uniform) {
+            j = static_cast<int>((r - r_grid[0]) / delta_x);
+            if (j >= n - 1) j = n - 2;
+        } else {
+            // Binary search
+            int lo = 0, hi = n - 1;
+            while (hi - lo > 1) {
+                int mid = (lo + hi) / 2;
+                if (r_grid[mid] > r) hi = mid;
+                else lo = mid;
+            }
+            j = lo;
+        }
+
+        // Hermite interpolation coefficients
+        double p1 = r_grid[j];
+        double p3 = r_grid[j + 1];
+        double dx = 1.0 / (p3 - p1);
+        double dy = (f[j + 1] - f[j]) * dx;
+        double A0 = f[j];
+        double A1 = yd[j];
+        double A2 = dx * (3.0 * dy - 2.0 * yd[j] - yd[j + 1]);
+        double A3 = dx * dx * (-2.0 * dy + yd[j] + yd[j + 1]);
+
+        // Horner's rule
+        double x = r - p1;
+        f_interp[i] = ((A3 * x + A2) * x + A1) * x + A0;
+    }
+}
+
+double Pseudopotential::spline_interp_single(const std::vector<double>& r_grid,
+                                              const std::vector<double>& f,
+                                              const std::vector<double>& yd,
+                                              double r) {
+    int n = static_cast<int>(r_grid.size());
+    if (r <= r_grid[0]) return f[0];
+    if (r >= r_grid[n - 1]) return f[n - 1];
+
+    // Find interval (uniform grid fast path)
+    double delta_x = r_grid[1] - r_grid[0];
+    int j = static_cast<int>((r - r_grid[0]) / delta_x);
+    if (j >= n - 1) j = n - 2;
+    // Verify uniform grid assumption; if not, binary search
+    if (r < r_grid[j] || r > r_grid[j + 1]) {
         int lo = 0, hi = n - 1;
         while (hi - lo > 1) {
             int mid = (lo + hi) / 2;
             if (r_grid[mid] > r) hi = mid;
             else lo = mid;
         }
-
-        double h = r_grid[hi] - r_grid[lo];
-        if (h < 1e-30) {
-            f_interp[j] = f[lo];
-            continue;
-        }
-        double a = (r_grid[hi] - r) / h;
-        double b = (r - r_grid[lo]) / h;
-        f_interp[j] = a * f[lo] + b * f[hi]
-                     + ((a * a * a - a) * f_d[lo] + (b * b * b - b) * f_d[hi]) * h * h / 6.0;
+        j = lo;
     }
+
+    double p1 = r_grid[j];
+    double p3 = r_grid[j + 1];
+    double dx = 1.0 / (p3 - p1);
+    double dy = (f[j + 1] - f[j]) * dx;
+    double A0 = f[j];
+    double A1 = yd[j];
+    double A2 = dx * (3.0 * dy - 2.0 * yd[j] - yd[j + 1]);
+    double A3 = dx * dx * (-2.0 * dy + yd[j] + yd[j + 1]);
+
+    double x = r - p1;
+    return ((A3 * x + A2) * x + A1) * x + A0;
 }
 
 } // namespace sparc

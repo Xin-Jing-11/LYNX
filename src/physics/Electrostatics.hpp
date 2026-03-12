@@ -6,7 +6,6 @@
 #include "core/FDGrid.hpp"
 #include "atoms/Crystal.hpp"
 #include "operators/FDStencil.hpp"
-#include "parallel/MPIComm.hpp"
 
 #include <vector>
 
@@ -25,8 +24,7 @@ public:
         const std::vector<AtomInfluence>& influence,
         const Domain& domain,
         const FDGrid& grid,
-        const FDStencil& stencil,
-        const MPIComm& dmcomm);
+        const FDStencil& stencil);
 
     // Access results
     const NDArray<double>& pseudocharge() const { return b_; }
@@ -42,12 +40,11 @@ public:
         const std::vector<AtomInfluence>& influence,
         const Domain& domain,
         const FDGrid& grid,
-        double* Vloc,
-        const MPIComm& dmcomm);
+        double* Vloc);
 
     // Compute correction energy Ec = 0.5 * ∫(b + b_ref) * Vc * dV
     // Must be called after compute_pseudocharge and compute_Vloc.
-    void compute_Ec(const double* Vloc, int Nd_d, double dV, const MPIComm& dmcomm);
+    void compute_Ec(const double* Vloc, int Nd_d, double dV);
 
     // Compute initial atomic density (superposition of atomic densities)
     void compute_atomic_density(
@@ -56,8 +53,7 @@ public:
         const Domain& domain,
         const FDGrid& grid,
         double* rho_at,
-        int Nelectron,
-        const MPIComm& dmcomm);
+        int Nelectron);
 
     const NDArray<double>& pseudocharge_ref() const { return b_ref_; }
 
@@ -69,16 +65,7 @@ public:
         const std::vector<AtomInfluence>& influence,
         const Domain& domain,
         const FDGrid& grid,
-        double* rho_core,
-        const MPIComm& dmcomm);
-
-private:
-    NDArray<double> b_;      // total pseudocharge density
-    NDArray<double> b_ref_;  // reference pseudocharge density (from -Z/r)
-    double Eself_Ec_ = 0.0;  // combined self + correction energy
-    double Eself_ = 0.0;
-    double Ec_ = 0.0;
-    double int_b_ = 0.0;     // integral of b (should equal -total_Z)
+        double* rho_core);
 
     // Reference potential: smooth version of -Z/r (no singularity)
     static double V_ref(double r, double rc, double Znucl);
@@ -92,6 +79,23 @@ private:
         int FDn,
         const double* D2_x, const double* D2_y, const double* D2_z,
         double coef);
+
+    // Non-orthogonal version with mixed derivatives
+    static void calc_lapV_nonorth(
+        const double* V, double* lapV,
+        int nx, int ny, int nz,
+        int nxp, int nyp, int nzp,
+        int FDn,
+        const FDStencil& stencil,
+        double coef);
+
+private:
+    NDArray<double> b_;      // total pseudocharge density
+    NDArray<double> b_ref_;  // reference pseudocharge density (from -Z/r)
+    double Eself_Ec_ = 0.0;  // combined self + correction energy
+    double Eself_ = 0.0;
+    double Ec_ = 0.0;
+    double int_b_ = 0.0;     // integral of b (should equal -total_Z)
 };
 
 } // namespace sparc

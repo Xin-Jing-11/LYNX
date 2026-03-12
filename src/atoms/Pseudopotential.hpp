@@ -44,8 +44,10 @@ public:
     const std::vector<double>& rho_iso_atom_spline_d() const { return rho_iso_atom_d_; }
 
     // Core charge for NLCC
+    bool has_nlcc() const { return fchrg_ > 0.0 && !rho_c_.empty(); }
     double fchrg() const { return fchrg_; }
     const std::vector<double>& rho_c() const { return rho_c_; }
+    const std::vector<double>& rho_c_table() const { return rho_c_; }
     const std::vector<double>& rho_c_spline_d() const { return rho_c_d_; }
 
     // Valence charge and XC info from pseudopotential
@@ -66,10 +68,16 @@ public:
                               const std::vector<double>& r_interp,
                               std::vector<double>& f_interp);
 
+    // Fast single-point spline interpolation (no heap allocation)
+    static double spline_interp_single(const std::vector<double>& r_grid,
+                                       const std::vector<double>& f,
+                                       const std::vector<double>& f_d,
+                                       double r);
+
 private:
     std::vector<double> r_;                 // radial grid
     std::vector<double> rVloc_;             // r * Vloc
-    std::vector<double> rVloc_d_;           // spline 2nd derivative of rVloc
+    std::vector<double> rVloc_d_;           // spline 1st derivative of rVloc
     double Vloc_0_ = 0.0;                  // Vloc(r=0)
 
     int lmax_ = -1;
@@ -89,10 +97,10 @@ private:
     int pspxc_ = 0;
     bool is_r_uniform_ = false;
 
-    // Natural cubic spline: compute second derivatives
+    // Hermite cubic spline: compute first derivatives (matches reference SPARC getYD_gen)
     static void spline_deriv(const std::vector<double>& x,
                              const std::vector<double>& y,
-                             std::vector<double>& y2);
+                             std::vector<double>& yd);
 };
 
 } // namespace sparc

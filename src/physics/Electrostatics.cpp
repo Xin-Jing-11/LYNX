@@ -1,11 +1,14 @@
 #include "physics/Electrostatics.hpp"
 #include "core/constants.hpp"
+#include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
+#include "operators/FDStencil.hpp"
 #include <cmath>
 #include <cstring>
 #include <vector>
 #include <algorithm>
 #include <mpi.h>
+#include <chrono>
 
 namespace sparc {
 
@@ -29,6 +32,15 @@ double Electrostatics::V_ref(double r, double rc, double Znucl) {
     double a7 = 1.8 / rc8;
 
     return -Znucl * (r2 * (r3 * (a5 + r * (a6 + r * a7)) + a3) + a0);
+}
+
+// Helper: compute distance from non-Cartesian coordinate differences
+static double compute_distance(double rx, double ry, double rz, bool is_orth, const Lattice* lattice) {
+    if (is_orth) {
+        return std::sqrt(rx * rx + ry * ry + rz * rz);
+    } else {
+        return lattice->metric_distance(rx, ry, rz);
+    }
 }
 
 // Compute Laplacian of V on a grid of size nxp×nyp×nzp,
@@ -66,13 +78,71 @@ void Electrostatics::calc_lapV(
     }
 }
 
+// Non-orthogonal version with mixed derivatives
+void Electrostatics::calc_lapV_nonorth(
+    const double* V, double* lapV,
+    int nx, int ny, int nz,
+    int nxp, int nyp, int nzp,
+    int FDn,
+    const FDStencil& stencil,
+    double coef) {
+
+    const double* cx = stencil.D2_coeff_x();
+    const double* cy = stencil.D2_coeff_y();
+    const double* cz = stencil.D2_coeff_z();
+    const double* cxy = stencil.D2_coeff_xy();
+    const double* cxz = stencil.D2_coeff_xz();
+    const double* cyz = stencil.D2_coeff_yz();
+    const double* d1y = stencil.D1_coeff_y();
+    const double* d1z = stencil.D1_coeff_z();
+
+    bool has_xy = cxy && std::abs(cxy[1]) > 1e-30;
+    bool has_xz = cxz && std::abs(cxz[1]) > 1e-30;
+    bool has_yz = cyz && std::abs(cyz[1]) > 1e-30;
+    double w2_diag = (cx[0] + cy[0] + cz[0]) * coef;
+
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                int idx = (i + FDn) + (j + FDn) * nxp + (k + FDn) * nxp * nyp;
+                double val = w2_diag * V[idx];
+
+                for (int p = 1; p <= FDn; ++p) {
+                    val += coef * cx[p] * (V[idx + p] + V[idx - p]);
+                    val += coef * cy[p] * (V[idx + p * nxp] + V[idx - p * nxp]);
+                    val += coef * cz[p] * (V[idx + p * nxp * nyp] + V[idx - p * nxp * nyp]);
+                }
+                if (has_xy) {
+                    for (int p = 1; p <= FDn; ++p)
+                        for (int q = 1; q <= FDn; ++q)
+                            val += coef * cxy[p] * d1y[q] *
+                                   (V[idx+p+q*nxp] - V[idx+p-q*nxp] - V[idx-p+q*nxp] + V[idx-p-q*nxp]);
+                }
+                if (has_xz) {
+                    for (int p = 1; p <= FDn; ++p)
+                        for (int q = 1; q <= FDn; ++q)
+                            val += coef * cxz[p] * d1z[q] *
+                                   (V[idx+p+q*nxp*nyp] - V[idx+p-q*nxp*nyp] - V[idx-p+q*nxp*nyp] + V[idx-p-q*nxp*nyp]);
+                }
+                if (has_yz) {
+                    for (int p = 1; p <= FDn; ++p)
+                        for (int q = 1; q <= FDn; ++q)
+                            val += coef * cyz[p] * d1z[q] *
+                                   (V[idx+p*nxp+q*nxp*nyp] - V[idx+p*nxp-q*nxp*nyp] - V[idx-p*nxp+q*nxp*nyp] + V[idx-p*nxp-q*nxp*nyp]);
+                }
+
+                lapV[i + j * nx + k * nx * ny] = val;
+            }
+        }
+    }
+}
+
 void Electrostatics::compute_pseudocharge(
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
     const Domain& domain,
     const FDGrid& grid,
-    const FDStencil& stencil,
-    const MPIComm& dmcomm) {
+    const FDStencil& stencil) {
 
     int Nd_d = domain.Nd_d();
     int FDn = stencil.FDn();
@@ -82,6 +152,8 @@ void Electrostatics::compute_pseudocharge(
     int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
 
     double inv_4PI = -0.25 / constants::PI;  // -1/(4π) for b = -1/(4π) * Lap(V)
+    bool is_orth = grid.lattice().is_orthogonal();
+    const Lattice* lattice = &grid.lattice();
 
     // FD stencil coefficients (already scaled by 1/dx², etc.)
     const double* D2_x = stencil.D2_coeff_x();
@@ -97,6 +169,7 @@ void Electrostatics::compute_pseudocharge(
     Eself_ = 0.0;
     Ec_ = 0.0;
     int_b_ = 0.0;
+    auto t0 = std::chrono::steady_clock::now();
 
     int ntypes = crystal.n_types();
     for (int it = 0; it < ntypes; ++it) {
@@ -109,6 +182,8 @@ void Electrostatics::compute_pseudocharge(
 
         // Reference cutoff radius (must match SPARC's REFERENCE_CUTOFF = 0.5 Bohr)
         double rc_ref = 0.5;
+        std::printf("  pschg: type=%d, %d images, Znucl=%.1f\n", it, inf.n_atom, Znucl);
+        std::fflush(stdout);
 
         for (int iat = 0; iat < inf.n_atom; ++iat) {
             Vec3 pos = inf.coords[iat];
@@ -126,6 +201,11 @@ void Electrostatics::compute_pseudocharge(
             int nyp = ny_loc + 2 * FDn;
             int nzp = nz_loc + 2 * FDn;
             int ndp = nxp * nyp * nzp;
+            if (iat % 10 == 0) {
+                std::printf("    img %d/%d: box=[%d:%d,%d:%d,%d:%d] ext=%dx%dx%d=%d\n",
+                    iat, inf.n_atom, i_s, i_e, j_s, j_e, k_s, k_e, nxp, nyp, nzp, ndp);
+                std::fflush(stdout);
+            }
 
             // Compute V_J and V_ref on the extended grid
             std::vector<double> VJ(ndp, 0.0);
@@ -140,7 +220,7 @@ void Electrostatics::compute_pseudocharge(
                     for (int ii = 0; ii < nxp; ++ii) {
                         int gi = (i_s - FDn + ii);
                         double rx = gi * dx - pos.x;
-                        double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+                        double r = compute_distance(rx, ry, rz, is_orth, lattice);
 
                         int idx = ii + jj * nxp + kk * nxp * nyp;
 
@@ -148,10 +228,8 @@ void Electrostatics::compute_pseudocharge(
                         if (r < 1e-10) {
                             VJ[idx] = psd.Vloc_0();
                         } else if (r < r_grid.back()) {
-                            std::vector<double> rpts = {r};
-                            std::vector<double> vals;
-                            Pseudopotential::spline_interp(r_grid, rVloc, rVloc_d, rpts, vals);
-                            VJ[idx] = vals[0] / r;
+                            VJ[idx] = Pseudopotential::spline_interp_single(
+                                r_grid, rVloc, rVloc_d, r) / r;
                         } else {
                             VJ[idx] = -Znucl / r;
                         }
@@ -166,10 +244,17 @@ void Electrostatics::compute_pseudocharge(
             std::vector<double> bJ(nx_loc * ny_loc * nz_loc, 0.0);
             std::vector<double> bJ_ref(nx_loc * ny_loc * nz_loc, 0.0);
 
-            calc_lapV(VJ.data(), bJ.data(), nx_loc, ny_loc, nz_loc,
-                      nxp, nyp, nzp, FDn, D2_x, D2_y, D2_z, inv_4PI);
-            calc_lapV(VJ_ref.data(), bJ_ref.data(), nx_loc, ny_loc, nz_loc,
-                      nxp, nyp, nzp, FDn, D2_x, D2_y, D2_z, inv_4PI);
+            if (is_orth) {
+                calc_lapV(VJ.data(), bJ.data(), nx_loc, ny_loc, nz_loc,
+                          nxp, nyp, nzp, FDn, D2_x, D2_y, D2_z, inv_4PI);
+                calc_lapV(VJ_ref.data(), bJ_ref.data(), nx_loc, ny_loc, nz_loc,
+                          nxp, nyp, nzp, FDn, D2_x, D2_y, D2_z, inv_4PI);
+            } else {
+                calc_lapV_nonorth(VJ.data(), bJ.data(), nx_loc, ny_loc, nz_loc,
+                                  nxp, nyp, nzp, FDn, stencil, inv_4PI);
+                calc_lapV_nonorth(VJ_ref.data(), bJ_ref.data(), nx_loc, ny_loc, nz_loc,
+                                  nxp, nyp, nzp, FDn, stencil, inv_4PI);
+            }
 
             // Accumulate into global arrays and compute Eself
             for (int kk = 0; kk < nz_loc; ++kk) {
@@ -211,23 +296,18 @@ void Electrostatics::compute_pseudocharge(
         }
     }
 
-    // Compute Ec: 0.5 * ∫ (b + b_ref) * Vc dV
-    // where Vc is the correction potential (difference between atomic and reference)
-    // For now, compute the combined Eself + Ec
-    // Ec = 0.5 * ∫ (b + b_ref) * Vc dV (requires Vc which needs Poisson solve)
-    // We'll compute Ec later when we have Vc
+    {
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::printf("  pschg loop done in %.1f ms\n", ms);
+        std::fflush(stdout);
+    }
 
     // Integral of pseudocharge (should equal -total_Z)
     for (int i = 0; i < Nd_d; ++i) {
         int_b_ += b_.data()[i];
     }
     int_b_ *= dV;
-
-    // MPI reduction
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        Eself_ = dmcomm.allreduce_sum(Eself_);
-        int_b_ = dmcomm.allreduce_sum(int_b_);
-    }
 
     // Eself = -0.5 * dV * Σ(bJ_ref * VJ_ref), matching reference SPARC
     Eself_ *= dV * 0.5;
@@ -239,13 +319,14 @@ void Electrostatics::compute_Vloc(
     const std::vector<AtomInfluence>& influence,
     const Domain& domain,
     const FDGrid& grid,
-    double* Vloc,
-    const MPIComm& dmcomm) {
+    double* Vloc) {
 
     int Nd_d = domain.Nd_d();
     double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
     int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
     int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
+    bool is_orth = grid.lattice().is_orthogonal();
+    const Lattice* lattice = &grid.lattice();
 
     std::memset(Vloc, 0, Nd_d * sizeof(double));
 
@@ -283,7 +364,7 @@ void Electrostatics::compute_Vloc(
                         if (li < 0 || li >= nx) continue;
                         double rx = gi * dx - pos.x;
 
-                        double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+                        double r = compute_distance(rx, ry, rz, is_orth, lattice);
                         int idx = li + lj * nx + lk * nx * ny;
 
                         // V_loc contribution = V_J(r) - V_ref(r)
@@ -292,10 +373,8 @@ void Electrostatics::compute_Vloc(
                         if (r < 1e-10) {
                             vj = psd.Vloc_0();
                         } else if (r < r_grid.back()) {
-                            std::vector<double> rpts = {r};
-                            std::vector<double> vals;
-                            Pseudopotential::spline_interp(r_grid, rVloc, rVloc_d, rpts, vals);
-                            vj = vals[0] / r;
+                            vj = Pseudopotential::spline_interp_single(
+                                r_grid, rVloc, rVloc_d, r) / r;
                         } else {
                             vj = -Znucl / r;
                         }
@@ -309,7 +388,7 @@ void Electrostatics::compute_Vloc(
     }
 }
 
-void Electrostatics::compute_Ec(const double* Vloc, int Nd_d, double dV, const MPIComm& dmcomm) {
+void Electrostatics::compute_Ec(const double* Vloc, int Nd_d, double dV) {
     // Ec = 0.5 * ∫(b + b_ref) * Vc * dV
     // where Vc = Vloc = V_J - V_ref (the correction potential)
     Ec_ = 0.0;
@@ -317,10 +396,6 @@ void Electrostatics::compute_Ec(const double* Vloc, int Nd_d, double dV, const M
         Ec_ += (b_.data()[i] + b_ref_.data()[i]) * Vloc[i];
     }
     Ec_ *= dV * 0.5;
-
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        Ec_ = dmcomm.allreduce_sum(Ec_);
-    }
 
     Eself_Ec_ = Eself_ + Ec_;
 }
@@ -331,14 +406,15 @@ void Electrostatics::compute_atomic_density(
     const Domain& domain,
     const FDGrid& grid,
     double* rho_at,
-    int Nelectron,
-    const MPIComm& dmcomm) {
+    int Nelectron) {
 
     int Nd_d = domain.Nd_d();
     double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
     double dV = grid.dV();
     int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
     int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
+    bool is_orth = grid.lattice().is_orthogonal();
+    const Lattice* lattice = &grid.lattice();
 
     std::memset(rho_at, 0, Nd_d * sizeof(double));
 
@@ -374,17 +450,15 @@ void Electrostatics::compute_atomic_density(
                         if (li < 0 || li >= nx) continue;
                         double rx = gi * dx - pos.x;
 
-                        double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+                        double r = compute_distance(rx, ry, rz, is_orth, lattice);
                         int idx = li + lj * nx + lk * nx * ny;
 
                         // Interpolate isolated atom density
                         // rho_iso stores ρ_v(r)/(4π), use directly (no r² division)
                         double rho_val = 0.0;
                         if (r < r_grid.back()) {
-                            std::vector<double> rpts = {r};
-                            std::vector<double> vals;
-                            Pseudopotential::spline_interp(r_grid, rho_iso, rho_iso_d, rpts, vals);
-                            rho_val = vals[0];
+                            rho_val = Pseudopotential::spline_interp_single(
+                                r_grid, rho_iso, rho_iso_d, r);
                         }
                         rho_at[idx] += rho_val;
                     }
@@ -396,9 +470,6 @@ void Electrostatics::compute_atomic_density(
     // Rescale so integral = Nelectron
     double sum = 0.0;
     for (int i = 0; i < Nd_d; ++i) sum += rho_at[i];
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        sum = dmcomm.allreduce_sum(sum);
-    }
     double int_rho = sum * dV;
     if (int_rho > 1e-10) {
         double scale = Nelectron / int_rho;
@@ -411,13 +482,14 @@ bool Electrostatics::compute_core_density(
     const std::vector<AtomInfluence>& influence,
     const Domain& domain,
     const FDGrid& grid,
-    double* rho_core,
-    const MPIComm& dmcomm) {
+    double* rho_core) {
 
     int Nd_d = domain.Nd_d();
     double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
     int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
     int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
+    bool is_orth = grid.lattice().is_orthogonal();
+    const Lattice* lattice = &grid.lattice();
 
     std::memset(rho_core, 0, Nd_d * sizeof(double));
 
@@ -460,14 +532,12 @@ bool Electrostatics::compute_core_density(
                         if (li < 0 || li >= nx) continue;
                         double rx = gi * dx - pos.x;
 
-                        double r = std::sqrt(rx * rx + ry * ry + rz * rz);
+                        double r = compute_distance(rx, ry, rz, is_orth, lattice);
                         int idx = li + lj * nx + lk * nx * ny;
 
                         if (r < rchrg) {
-                            std::vector<double> rpts = {r};
-                            std::vector<double> vals;
-                            Pseudopotential::spline_interp(r_grid, rho_c, rho_c_d, rpts, vals);
-                            rho_core[idx] += vals[0];
+                            rho_core[idx] += Pseudopotential::spline_interp_single(
+                                r_grid, rho_c, rho_c_d, r);
                         }
                     }
                 }

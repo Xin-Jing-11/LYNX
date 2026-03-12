@@ -5,7 +5,6 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "operators/Laplacian.hpp"
-#include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "solvers/LinearSolver.hpp"
 
@@ -26,13 +25,13 @@ public:
                double mixing_param,
                const Laplacian* laplacian = nullptr,
                const HaloExchange* halo = nullptr,
-               const FDGrid* grid = nullptr,
-               const MPIComm* dmcomm = nullptr);
+               const FDGrid* grid = nullptr);  // no domain comm needed
 
     // Mix density: x_k is the current input, g_k is the output from SCF.
     // After mixing, x_k is updated in-place with the new mixed density.
+    // ncol: number of density columns (1 for non-spin, 3 for collinear spin [total,up,down])
     // Reference: Mixing_periodic_pulay
-    void mix(double* x_k_inout, const double* g_k, int Nd_d);
+    void mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol = 1);
 
     // Reset history (e.g., at start of new SCF)
     void reset();
@@ -59,7 +58,6 @@ private:
     const Laplacian* laplacian_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const FDGrid* grid_ = nullptr;
-    const MPIComm* dmcomm_ = nullptr;
     double precond_tol_ = 1e-4;  // TOL_PRECOND: default h_eff^2 * 1e-3
 
     // Apply Kerker preconditioner: solve -(Lap - kTF²)*Pf = (Lap - idiemac*kTF²)*f

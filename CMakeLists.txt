@@ -1,12 +1,26 @@
 cmake_minimum_required(VERSION 3.18)
-project(SPARC LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Options
+# Options (must be before project() for CUDA arch to take effect)
 option(USE_MKL "Use Intel MKL for BLAS/LAPACK/ScaLAPACK" OFF)
 option(USE_CUDA "Enable CUDA" OFF)
 option(BUILD_TESTS "Build tests" ON)
+
+# Set CUDA architectures before project() so compiler identification uses valid arch
+if(USE_CUDA)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;120")
+    endif()
+    project(SPARC LANGUAGES CXX CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    find_package(CUDAToolkit REQUIRED)
+    message(STATUS "CUDA enabled: architectures ${CMAKE_CUDA_ARCHITECTURES}")
+else()
+    project(SPARC LANGUAGES CXX)
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # MPI
 find_package(MPI REQUIRED)

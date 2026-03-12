@@ -1,7 +1,6 @@
 #pragma once
 
 #include "MPIComm.hpp"
-#include "CartTopology.hpp"
 #include "core/FDGrid.hpp"
 #include "core/Domain.hpp"
 
@@ -11,8 +10,6 @@ struct ParallelParams {
     int npspin = 1;
     int npkpt = 1;
     int npband = 1;
-    int npNdx = 0, npNdy = 0, npNdz = 0;         // domain decomp for psi (0 = auto)
-    int npNdx_phi = 0, npNdy_phi = 0, npNdz_phi = 0;  // domain decomp for phi
 };
 
 class Parallelization {
@@ -24,8 +21,6 @@ public:
     const MPIComm& spincomm() const { return spincomm_; }
     const MPIComm& kptcomm() const { return kptcomm_; }
     const MPIComm& bandcomm() const { return bandcomm_; }
-    const MPIComm& dmcomm() const { return dmcomm_; }
-    const MPIComm& dmcomm_phi() const { return dmcomm_phi_; }
 
     const MPIComm& spin_bridge() const { return spin_bridge_; }
     const MPIComm& kpt_bridge() const { return kpt_bridge_; }
@@ -40,8 +35,7 @@ public:
     int band_start() const { return band_start_; }
     int band_end() const { return band_end_; }
 
-    const Domain& psi_domain() const { return psi_domain_; }
-    const Domain& phi_domain() const { return phi_domain_; }
+    const Domain& domain() const { return domain_; }
 
     static int block_size(int N, int np, int rank);
     static int block_start(int N, int np, int rank);
@@ -51,18 +45,12 @@ private:
     MPIComm spincomm_, spin_bridge_;
     MPIComm kptcomm_, kpt_bridge_;
     MPIComm bandcomm_;
-    MPIComm dmcomm_, dmcomm_phi_;
 
     int spin_index_ = -1, kpt_index_ = -1, band_index_ = -1;
     int Nspin_local_ = 0, Nkpts_local_ = 0, Nband_local_ = 0;
     int band_start_ = 0, band_end_ = 0;
 
-    Domain psi_domain_, phi_domain_;
-
-    void setup_spin(int Nspin);
-    void setup_kpt(int Nkpts);
-    void setup_band(int Nstates);
-    void setup_domain(const FDGrid& grid, const ParallelParams& params);
+    Domain domain_;
 };
 
 } // namespace sparc

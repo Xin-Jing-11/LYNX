@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "atoms/Crystal.hpp"
+#include "operators/FDStencil.hpp"
 #include "operators/Gradient.hpp"
 #include "operators/NonlocalProjector.hpp"
 #include "electronic/Wavefunction.hpp"
@@ -15,10 +16,11 @@
 
 namespace sparc {
 
-// Force calculation for Kohn-Sham DFT.
-// Two main contributions:
-//   F_local  = -∫ ρ(r) ∇V_J^loc(r-R_J) dV  (Hellmann-Feynman local)
-//   F_nloc   = -2·occfac·Σ_n f_n Γ <χ|ψ><χ|∇ψ>  (nonlocal KB projectors)
+// Force calculation matching reference SPARC.
+// Three contributions:
+//   F_local  = -∫ b_J · ∇φ dV + 0.5 * correction  (electrostatic + pseudocharge)
+//   F_nloc   = -occfac·2·Σ g_n Γ <χ|ψ><χ|∇ψ>      (nonlocal KB projectors)
+//   F_xc     = ∫ Vxc · ∇ρ_core_J dV                (NLCC correction)
 class Forces {
 public:
     Forces() = default;
@@ -27,65 +29,74 @@ public:
     std::vector<double> compute(
         const Wavefunction& wfn,
         const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
         const std::vector<AtomNlocInfluence>& nloc_influence,
         const NonlocalProjector& vnl,
+        const FDStencil& stencil,
         const Gradient& gradient,
         const HaloExchange& halo,
         const Domain& domain,
         const FDGrid& grid,
-        const double* phi,
-        const double* rho,
+        const double* phi,           // electrostatic potential
+        const double* rho,           // electron density
+        const double* Vloc,          // correction potential Vc = V_ref - V_J
+        const double* b,             // pseudocharge density
+        const double* b_ref,         // reference pseudocharge density
+        const double* Vxc,           // XC potential (for NLCC force)
+        const double* rho_core,      // NLCC core density (nullptr if no NLCC)
         const std::vector<double>& kpt_weights,
-        const MPIComm& dmcomm,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm);
 
     const std::vector<double>& local_forces() const { return f_local_; }
     const std::vector<double>& nonlocal_forces() const { return f_nloc_; }
+    const std::vector<double>& xc_forces() const { return f_xc_; }
     const std::vector<double>& total_forces() const { return f_total_; }
 
 private:
     std::vector<double> f_local_;
     std::vector<double> f_nloc_;
+    std::vector<double> f_xc_;
     std::vector<double> f_total_;
 
-    // Local force via Hellmann-Feynman: F_J = -∫ ρ(r) ∇V_J^loc dV
+    // Local force: F = -∫ bJ · ∇φ dV + 0.5 * ∫ [∇VcJ·(b+b_ref) - ∇Vc·(bJ+bJ_ref)] dV
     void compute_local(
         const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const FDStencil& stencil,
+        const Gradient& gradient,
+        const HaloExchange& halo,
         const Domain& domain,
         const FDGrid& grid,
-        const double* rho,
-        const MPIComm& dmcomm);
+        const double* phi,
+        const double* Vloc,
+        const double* b,
+        const double* b_ref);
 
-    // Nonlocal force: F_J = -2·occfac·Σ_n f_n Γ <χ|ψ><χ|∇ψ>
+    // Nonlocal force: F = -occfac·2·Σ g_n Γ <χ|ψ><χ|∇ψ>
     void compute_nonlocal(
         const Wavefunction& wfn,
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
         const Gradient& gradient,
         const HaloExchange& halo,
         const Domain& domain,
         const FDGrid& grid,
         const std::vector<double>& kpt_weights,
-        const MPIComm& dmcomm,
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm);
 
-    // Compute <χ_J|x> for all projectors of all atoms
-    static void compute_chi_x(
+    // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
+    void compute_xc_nlcc(
         const Crystal& crystal,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const std::vector<AtomInfluence>& influence,
+        const FDStencil& stencil,
         const Domain& domain,
         const FDGrid& grid,
-        const double* x,
-        double dV,
-        std::vector<double>& result,
-        const MPIComm& dmcomm);
-
-    // Real spherical harmonics (same convention as NonlocalProjector)
-    static double Ylm(int l, int m, double x, double y, double z, double r);
+        const double* Vxc);
 
     // Symmetrize forces: subtract mean to ensure sum = 0
     static void symmetrize(std::vector<double>& forces, int n_atom);

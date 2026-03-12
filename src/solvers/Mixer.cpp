@@ -1,4 +1,5 @@
 #include "solvers/Mixer.hpp"
+#include "parallel/MPIComm.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -14,8 +15,7 @@ void Mixer::setup(int Nd_d,
                    double mixing_param,
                    const Laplacian* laplacian,
                    const HaloExchange* halo,
-                   const FDGrid* grid,
-                   const MPIComm* dmcomm) {
+                   const FDGrid* grid) {
     Nd_d_ = Nd_d;
     var_ = var;
     precond_type_ = precond_type;
@@ -24,7 +24,6 @@ void Mixer::setup(int Nd_d,
     laplacian_ = laplacian;
     halo_ = halo;
     grid_ = grid;
-    dmcomm_ = dmcomm;
     if (grid) Nd_ = grid->Nd();
 
     // Compute TOL_PRECOND = h_eff^2 * 1e-3 (reference: initialization.c:2655-2664)
@@ -55,7 +54,7 @@ void Mixer::reset() {
 }
 
 void Mixer::apply_kerker(const double* f, double amix, double* Pf) const {
-    if (!laplacian_ || !halo_ || !dmcomm_) {
+    if (!laplacian_ || !halo_) {
         // No preconditioner available, just scale
         for (int i = 0; i < Nd_d_; ++i)
             Pf[i] = amix * f[i];
@@ -126,7 +125,8 @@ void Mixer::apply_kerker(const double* f, double amix, double* Pf) const {
     params.max_iter = 1000;
 
     LinearSolver::PrecondFunc precond_fn = jacobi_precond;
-    LinearSolver::aar(op, Lf.data(), Pf, Nd_d, params, *dmcomm_, &precond_fn);
+    MPIComm self_comm(MPI_COMM_SELF);
+    LinearSolver::aar(op, Lf.data(), Pf, Nd_d, params, self_comm, &precond_fn);
 
     // Step 3: Scale by -amix (reference: Pf[i] *= -a)
     for (int i = 0; i < Nd_d; ++i) {
@@ -134,13 +134,14 @@ void Mixer::apply_kerker(const double* f, double amix, double* Pf) const {
     }
 }
 
-void Mixer::mix(double* x_k, const double* g_k, int Nd_d) {
+void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
     // Reference: Mixing_periodic_pulay
     // x_k = current input density (x^{in}_k)
     // g_k = output density from SCF (g(x_k) = x^{out}_k)
     // After this call, x_k is updated to x_{k+1}
+    // ncol: number of density columns (1 for non-spin, 3 for spin [total,up,down])
 
-    int N = Nd_d;  // for non-spin, N = Nd_d
+    int N = Nd_d * ncol;  // total vector length
 
     // Allocate state on first call
     if (f_k_.empty()) {
@@ -209,12 +210,6 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d) {
             }
         }
 
-        // MPI allreduce (for parallel)
-        if (dmcomm_ && !dmcomm_->is_null() && dmcomm_->size() > 1) {
-            dmcomm_->allreduce_sum(FtF.data(), cols * cols);
-            dmcomm_->allreduce_sum(Ftf.data(), cols);
-        }
-
         // Solve FtF * Gamma = Ftf via least squares (Gaussian elimination)
         std::vector<double> Gamma(cols, 0.0);
         {
@@ -275,9 +270,16 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d) {
     }
 
     // Apply preconditioner to f_wavg -> Pf
+    // Reference: Kerker only on column 0 (total density), no preconditioner on magnetization
     std::vector<double> Pf(N);
-    if (precond_type_ == MixingPrecond::Kerker && laplacian_ && halo_ && dmcomm_) {
+    if (precond_type_ == MixingPrecond::Kerker && laplacian_ && halo_) {
+        // Column 0: Kerker preconditioner
         apply_kerker(f_wavg.data(), amix, Pf.data());
+        // Columns 1+: no preconditioner (MixingPrecondMag default = none)
+        for (int c = 1; c < ncol; ++c) {
+            for (int i = 0; i < Nd_d_; ++i)
+                Pf[c * Nd_d_ + i] = amix * f_wavg[c * Nd_d_ + i];
+        }
     } else {
         // No preconditioner: Pf = amix * f_wavg
         for (int i = 0; i < N; ++i)

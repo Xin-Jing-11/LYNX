@@ -80,8 +80,7 @@ int main(int argc, char** argv) {
         int Nkpts = 1, Nspin = 1;
         sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
-        const auto& domain = parallel.psi_domain();
-        const auto& dmcomm = parallel.dmcomm();
+        const auto& domain = parallel.domain();
         int Nd_d = domain.Nd_d();
 
         printf("=== H*psi Comparison Test ===\n");
@@ -160,11 +159,11 @@ int main(int argc, char** argv) {
 
         // === Step 4: Setup Hamiltonian and apply local part ===
         printf("\n--- Step 4: Local H*psi (Lap + Veff) ---\n");
-        sparc::HaloExchange halo(domain, stencil.FDn(), dmcomm.comm());
+        sparc::HaloExchange halo(domain, stencil.FDn());
 
         // Setup Hamiltonian WITHOUT nonlocal (to test local part separately)
         sparc::Hamiltonian hamiltonian;
-        hamiltonian.setup(stencil, domain, grid, halo, nullptr, dmcomm);
+        hamiltonian.setup(stencil, domain, grid, halo, nullptr);
 
         std::vector<double> Hpsi_local(Nd_d, 0.0);
         // Use reference Veff to isolate Hamiltonian from upstream differences
@@ -258,7 +257,7 @@ int main(int argc, char** argv) {
 
         // Setup full Hamiltonian
         sparc::Hamiltonian hamiltonian_full;
-        hamiltonian_full.setup(stencil, domain, grid, halo, &vnl, dmcomm);
+        hamiltonian_full.setup(stencil, domain, grid, halo, &vnl);
 
         std::vector<double> Hpsi_full(Nd_d, 0.0);
         hamiltonian_full.apply(psi.data(), ref_Veff.data(), Hpsi_full.data(), 1, 0.0);

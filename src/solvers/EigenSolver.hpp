@@ -22,7 +22,6 @@ public:
     void setup(const Hamiltonian& H,
                const HaloExchange& halo,
                const Domain& domain,
-               const MPIComm& dmcomm,
                const MPIComm& bandcomm);
 
     // Chebyshev-filtered subspace iteration.
@@ -53,7 +52,6 @@ private:
     const Hamiltonian* H_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const Domain* domain_ = nullptr;
-    const MPIComm* dmcomm_ = nullptr;
     const MPIComm* bandcomm_ = nullptr;
     double lambda_cutoff_ = 0.0;
 

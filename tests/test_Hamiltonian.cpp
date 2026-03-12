@@ -20,7 +20,6 @@ struct HamTestSetup {
     Domain domain;
     FDStencil stencil;
     HaloExchange halo;
-    MPIComm comm;
     Hamiltonian ham;
 
     HamTestSetup(int N = 20) {
@@ -32,9 +31,8 @@ struct HamTestSetup {
         verts = {0, N - 1, 0, N - 1, 0, N - 1};
         domain = Domain(grid, verts);
         stencil = FDStencil(12, grid, lat);
-        halo = HaloExchange(domain, stencil.FDn(), MPI_COMM_NULL);
-        comm = MPIComm(MPI_COMM_NULL);
-        ham.setup(stencil, domain, grid, halo, nullptr, comm);
+        halo = HaloExchange(domain, stencil.FDn());
+        ham.setup(stencil, domain, grid, halo, nullptr);
     }
 };
 

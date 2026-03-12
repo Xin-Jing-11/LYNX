@@ -47,3 +47,12 @@ target_link_libraries(sparc_compare_tests PRIVATE sparc_core GTest::gtest)
 add_test(NAME CompareRef
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:sparc_compare_tests>)
 set_tests_properties(CompareRef PROPERTIES TIMEOUT 120)
+
+# GPU kernel tests
+if(USE_CUDA)
+    add_executable(sparc_gpu_tests test_GPUKernels.cu)
+    target_link_libraries(sparc_gpu_tests PRIVATE sparc_core GTest::gtest)
+    set_target_properties(sparc_gpu_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    add_test(NAME GPUKernels COMMAND $<TARGET_FILE:sparc_gpu_tests>)
+    set_tests_properties(GPUKernels PROPERTIES TIMEOUT 120)
+endif()

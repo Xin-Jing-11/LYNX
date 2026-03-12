@@ -55,11 +55,11 @@ public:
                const Hamiltonian& hamiltonian,
                const HaloExchange& halo,
                const NonlocalProjector* vnl,
-               const MPIComm& dmcomm,
                const MPIComm& bandcomm,
                const MPIComm& kptcomm,
                const MPIComm& spincomm,
-               const SCFParams& params);
+               const SCFParams& params,
+               int Nspin = 1);  // dmcomm removed (no domain decomposition)
 
     // Run self-consistent field loop
     // Returns total energy
@@ -84,6 +84,7 @@ public:
     const double* Vxc() const { return Vxc_.data(); }
     const double* exc() const { return exc_.data(); }
     const double* Veff() const { return Veff_.data(); }
+    const double* Dxcdgrho() const { return Dxcdgrho_.data(); }
 
 private:
     const FDGrid* grid_ = nullptr;
@@ -94,7 +95,6 @@ private:
     const Hamiltonian* hamiltonian_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;
-    const MPIComm* dmcomm_ = nullptr;
     const MPIComm* bandcomm_ = nullptr;
     const MPIComm* kptcomm_ = nullptr;
     const MPIComm* spincomm_ = nullptr;
@@ -110,12 +110,16 @@ private:
     NDArray<double> Vxc_;       // XC potential
     NDArray<double> exc_;       // XC energy density
     NDArray<double> phi_;       // electrostatic potential
+    NDArray<double> Dxcdgrho_;  // GGA: dExc/d(|∇ρ|²) = v2x + v2c (stored like reference)
 
     XCType xc_type_ = XCType::GGA_PBE;
     const double* Vloc_ = nullptr;
     const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
 
+    int Nspin_ = 1;  // number of spin channels
+
     // Compute effective potential: Veff = Vxc + phi + Vloc
+    // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns
     void compute_Veff(const double* rho, const double* rho_b, const double* Vloc);
 
     // Initialize density from superposition of atomic densities (simplified)
@@ -123,7 +127,9 @@ private:
 
 public:
     // Set initial density from external source (e.g., atomic superposition)
-    void set_initial_density(const double* rho_init, int Nd_d);
+    // For spin: rho_init is total density (Nd_d), mag_init is magnetization (Nd_d, may be null)
+    void set_initial_density(const double* rho_init, int Nd_d,
+                             const double* mag_init = nullptr);
 };
 
 } // namespace sparc

@@ -6,7 +6,6 @@
 #include "core/FDGrid.hpp"
 #include "operators/Laplacian.hpp"
 #include "operators/FDStencil.hpp"
-#include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "solvers/LinearSolver.hpp"
 
@@ -23,8 +22,7 @@ public:
                const FDStencil& stencil,
                const Domain& domain,
                const FDGrid& grid,
-               const HaloExchange& halo,
-               const MPIComm& dmcomm);
+               const HaloExchange& halo);  // no domain comm needed
 
     // Solve: -Lap(phi) = rhs
     // rhs: (Nd_d,) right-hand side = 4*pi*(rho + b)
@@ -41,7 +39,6 @@ private:
     const Domain* domain_ = nullptr;
     const FDGrid* grid_ = nullptr;
     const HaloExchange* halo_ = nullptr;
-    const MPIComm* dmcomm_ = nullptr;
 
     AARParams aar_params_;
     double jacobi_weight_ = 0.0;  // Jacobi preconditioner weight

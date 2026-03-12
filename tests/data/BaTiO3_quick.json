@@ -1,0 +1,60 @@
+{
+  "lattice": {
+    "vectors": [[7.63, 0, 0], [0, 7.63, 0], [0, 0, 7.63]],
+    "cell_type": "orthogonal"
+  },
+  "grid": {
+    "Nx": 15, "Ny": 15, "Nz": 15,
+    "fd_order": 12,
+    "boundary_conditions": ["periodic", "periodic", "periodic"]
+  },
+  "atoms": [
+    {
+      "element": "Ba",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/56_Ba_10_2.8_2.8_pbe_n_v1.0.psp8",
+      "fractional": false,
+      "coordinates": [[7.540463013371621, 7.248833728543416, 7.518607464589964]]
+    },
+    {
+      "element": "Ti",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/22_Ti_12_2.0_2.8_pbe_n_v1.0.psp8",
+      "fractional": false,
+      "coordinates": [[3.725768164762889, 3.878328962888697, 3.426961342823767]]
+    },
+    {
+      "element": "O",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "fractional": false,
+      "coordinates": [
+        [4.052740031589397, 7.190115020153727, 3.856885000727702],
+        [7.090600941523509, 3.476460666072041, 3.727807248988862],
+        [3.601707961096307, 3.648353082729004, 0.199860166191001]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "spin": "none",
+    "temperature": 2320.903624310025,
+    "smearing": "gaussian",
+    "Nstates": 29
+  },
+  "kpoints": {
+    "grid": [1, 1, 1],
+    "shift": [0, 0, 0]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-6,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": true,
+    "calc_stress": true,
+    "calc_pressure": true
+  }
+}

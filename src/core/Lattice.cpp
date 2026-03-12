@@ -36,9 +36,21 @@ void Lattice::compute_derived() {
     Mat3 ltrans = latvec_.transpose();
     metric_T_ = ltrans * latvec_;
 
-    // Laplacian transformation: lapc_T = gradT^T * gradT
-    Mat3 gt_trans = grad_T_.transpose();
-    lapc_T_ = gt_trans * grad_T_;
+    // Laplacian transformation: lapc_T = (LatUVec^{-1})^T * LatUVec^{-1}
+    // Must use unit lattice vectors (not full latvec), matching reference SPARC
+    lat_uvec_inv_ = lat_uvec_.inverse();
+    lapc_T_ = lat_uvec_inv_.transpose() * lat_uvec_inv_;
+
+    // Non-Cart sphere extent factors: ||column_i(U^{-1})||
+    // Since nc = (U^{-1})^T * cart, by Cauchy-Schwarz:
+    //   |nc_i| = |column_i(U^{-1}) · cart| ≤ ||column_i(U^{-1})|| * ||cart||
+    // So f_i = ||column_i(U^{-1})|| = sqrt(sum_j (U^{-1}_{ji})^2)
+    for (int i = 0; i < 3; ++i) {
+        double sum = 0.0;
+        for (int j = 0; j < 3; ++j)
+            sum += lat_uvec_inv_(j, i) * lat_uvec_inv_(j, i);
+        (&nc_sphere_extent_.x)[i] = std::sqrt(sum);
+    }
 }
 
 Vec3 Lattice::lengths() const {
@@ -72,6 +84,30 @@ Vec3 Lattice::cart_to_frac(const Vec3& cart) const {
     frac.y = cart.x * inv(0, 1) + cart.y * inv(1, 1) + cart.z * inv(2, 1);
     frac.z = cart.x * inv(0, 2) + cart.y * inv(1, 2) + cart.z * inv(2, 2);
     return frac;
+}
+
+Vec3 Lattice::cart_to_nonCart(const Vec3& cart) const {
+    // Non-Cart coords = fractional * |a_i|
+    Vec3 frac = cart_to_frac(cart);
+    Vec3 L = lengths();
+    return {frac.x * L.x, frac.y * L.y, frac.z * L.z};
+}
+
+Vec3 Lattice::nonCart_to_cart(const Vec3& nc) const {
+    // Non-Cart to Cartesian: nc_i / |a_i| = frac_i, then frac_to_cart
+    // Equivalent to: cart_j = sum_i (nc_i / |a_i|) * latvec(i,j)
+    //              = sum_i nc_i * LatUVec(i,j)
+    Vec3 cart;
+    cart.x = nc.x * lat_uvec_(0, 0) + nc.y * lat_uvec_(1, 0) + nc.z * lat_uvec_(2, 0);
+    cart.y = nc.x * lat_uvec_(0, 1) + nc.y * lat_uvec_(1, 1) + nc.z * lat_uvec_(2, 1);
+    cart.z = nc.x * lat_uvec_(0, 2) + nc.y * lat_uvec_(1, 2) + nc.z * lat_uvec_(2, 2);
+    return cart;
+}
+
+double Lattice::metric_distance(double dx, double dy, double dz) const {
+    // Convert non-Cart coordinate difference to Cartesian, return Euclidean distance
+    Vec3 cart = nonCart_to_cart({dx, dy, dz});
+    return std::sqrt(cart.x*cart.x + cart.y*cart.y + cart.z*cart.z);
 }
 
 Mat3 Lattice::reciprocal_latvec() const {

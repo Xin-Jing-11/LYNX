@@ -1,0 +1,60 @@
+{
+  "lattice": {
+    "vectors": [
+      [6.3251, 0.0, 0.0],
+      [-3.16255, 5.477726318, 0.0],
+      [0.0, 0.0, 9.46]
+    ],
+    "cell_type": "nonorthogonal"
+  },
+  "grid": {
+    "Nx": 32, "Ny": 32, "Nz": 48,
+    "fd_order": 12,
+    "boundary_conditions": ["periodic", "periodic", "periodic"]
+  },
+  "atoms": [
+    {
+      "element": "Mg",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/12_Mg_10_1.9_2.0_pbe_v1.0.psp8",
+      "fractional": true,
+      "coordinates": [
+        [0.646667, 0.313333, 0.500632],
+        [0.303333, 0.636667, 0.000632]
+      ]
+    },
+    {
+      "element": "O",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "fractional": true,
+      "coordinates": [
+        [0.656667, 0.343333, 0.903968],
+        [0.313333, 0.616667, 0.403968]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "spin": "none",
+    "temperature": 315.773,
+    "smearing": "gaussian",
+    "Nstates": 30
+  },
+  "kpoints": {
+    "grid": [1, 1, 1],
+    "shift": [0, 0, 0]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-6,
+    "mixing": "potential",
+    "preconditioner": "none",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": false,
+    "calc_stress": true,
+    "calc_pressure": true
+  }
+}

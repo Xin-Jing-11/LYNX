@@ -111,14 +111,16 @@ TEST(Lattice, ZeroVolumeThrows) {
 }
 
 TEST(Lattice, LapcT_Orthogonal) {
-    // For orthogonal cells, lapcT should be diagonal with 1/L^2 entries
+    // lapcT = (LatUVec^{-1})^T * LatUVec^{-1}
+    // For orthogonal cells, LatUVec = I (unit vectors), so lapcT = I.
+    // The 1/dx^2 scaling is applied separately in FDStencil, not in lapcT.
     Mat3 lv;
     lv(0, 0) = 10.0; lv(1, 1) = 10.0; lv(2, 2) = 10.0;
     Lattice lat(lv, CellType::Orthogonal);
 
     auto& lt = lat.lapc_T();
-    EXPECT_NEAR(lt(0, 0), 0.01, 1e-12);  // 1/10^2
-    EXPECT_NEAR(lt(1, 1), 0.01, 1e-12);
-    EXPECT_NEAR(lt(2, 2), 0.01, 1e-12);
+    EXPECT_NEAR(lt(0, 0), 1.0, 1e-12);
+    EXPECT_NEAR(lt(1, 1), 1.0, 1e-12);
+    EXPECT_NEAR(lt(2, 2), 1.0, 1e-12);
     EXPECT_NEAR(lt(0, 1), 0.0, 1e-12);
 }

@@ -1,4 +1,5 @@
 #include "solvers/PoissonSolver.hpp"
+#include "parallel/MPIComm.hpp"
 #include <vector>
 #include <cmath>
 #include <cstdio>
@@ -9,14 +10,12 @@ void PoissonSolver::setup(const Laplacian& laplacian,
                             const FDStencil& stencil,
                             const Domain& domain,
                             const FDGrid& grid,
-                            const HaloExchange& halo,
-                            const MPIComm& dmcomm) {
+                            const HaloExchange& halo) {
     laplacian_ = &laplacian;
     stencil_ = &stencil;
     domain_ = &domain;
     grid_ = &grid;
     halo_ = &halo;
-    dmcomm_ = &dmcomm;
 
     // Jacobi preconditioner weight: m_inv = -1 / (D2x[0] + D2y[0] + D2z[0] + c)
     // For Poisson (c=0): m_inv = -1 / (D2x[0] + D2y[0] + D2z[0])
@@ -55,7 +54,8 @@ int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
             f[i] = m_inv * r[i];
     };
 
-    int iters = LinearSolver::aar(op, rhs, phi, Nd_d, params, *dmcomm_, &jacobi);
+    MPIComm self_comm(MPI_COMM_SELF);
+    int iters = LinearSolver::aar(op, rhs, phi, Nd_d, params, self_comm, &jacobi);
     return iters;
 }
 

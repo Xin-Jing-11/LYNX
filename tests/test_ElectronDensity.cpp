@@ -53,11 +53,10 @@ TEST(ElectronDensity, ComputeFromWavefunction) {
     MPIComm null_comm;
     density.compute(wfn, kpt_weights, dV, null_comm, null_comm);
 
-    // Each point should have density = 2 * sum(f_n * |psi_n|^2)
-    // = 2 * (1.0 + 1.0) * (1/(Nd_d*dV)) = 2 * 2 / (Nd_d*dV)
-    // Wait: density is computed without spin_fac inside; it's in occ.
-    // rho = sum kw * f * |psi|^2 = 1.0 * 1.0 * norm_val^2 * 2 bands
-    double expected = 2.0 * norm_val * norm_val;  // 2 bands, each f=1
+    // rho = sum_n spin_fac * w_k * f_n * |psi_n|^2
+    // spin_fac = 2.0 (non-spin-polarized), w_k = 1.0, f_n = 1.0 for both bands
+    // = 2.0 * 1.0 * 1.0 * norm_val^2 * 2 bands = 4.0 * norm_val^2
+    double expected = 2.0 * 2.0 * norm_val * norm_val;  // spin_fac=2 * 2 bands
     for (int i = 0; i < Nd_d; ++i) {
         EXPECT_NEAR(density.rho_total()(i), expected, 1e-10);
     }

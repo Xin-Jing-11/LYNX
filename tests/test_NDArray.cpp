@@ -131,11 +131,11 @@ TEST(NDArray, Index3D) {
 }
 
 TEST(NDArray, LeadingDimensionPadded) {
-    // For 2D arrays, ld should be >= rows and aligned
+    // For 2D arrays, ld should be >= rows
+    // Note: padding is currently disabled (ld == rows) to avoid stride bugs
+    // with EigenSolver. When re-enabled, ld should be multiple of 8.
     NDArray<double> arr(10, 5);
     EXPECT_GE(arr.ld(), 10);
-    // ld should be multiple of alignment / sizeof(double) = 64/8 = 8
-    EXPECT_EQ(arr.ld() % 8, 0);
 }
 
 TEST(NDArray, ComplexType) {

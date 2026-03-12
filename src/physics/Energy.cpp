@@ -24,30 +24,22 @@ double Energy::band_energy(const Wavefunction& wfn,
 }
 
 double Energy::xc_energy(const double* rho, const double* exc,
-                           int Nd_d, double dV, const MPIComm& dmcomm) {
+                           int Nd_d, double dV) {
     double local_sum = 0.0;
     for (int i = 0; i < Nd_d; ++i) {
         local_sum += rho[i] * exc[i];
     }
     local_sum *= dV;
-
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        return dmcomm.allreduce_sum(local_sum);
-    }
     return local_sum;
 }
 
 double Energy::hartree_energy(const double* rho, const double* phi,
-                                int Nd_d, double dV, const MPIComm& dmcomm) {
+                                int Nd_d, double dV) {
     double local_sum = 0.0;
     for (int i = 0; i < Nd_d; ++i) {
         local_sum += rho[i] * phi[i];
     }
     local_sum *= 0.5 * dV;
-
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        return dmcomm.allreduce_sum(local_sum);
-    }
     return local_sum;
 }
 
@@ -73,7 +65,6 @@ EnergyComponents Energy::compute_all(
     SmearingType smearing,
     const std::vector<double>& kpt_weights,
     int Nd_d, double dV,
-    const MPIComm& dmcomm,
     const double* rho_core,
     double Ef) {
 
@@ -95,24 +86,27 @@ EnergyComponents Energy::compute_all(
             local_sum += (rho[i] + rho_core[i]) * exc[i];
         }
         local_sum *= dV;
-        if (!dmcomm.is_null() && dmcomm.size() > 1) {
-            E.Exc = dmcomm.allreduce_sum(local_sum);
-        } else {
-            E.Exc = local_sum;
-        }
+        E.Exc = local_sum;
     } else {
-        E.Exc = xc_energy(rho, exc, Nd_d, dV, dmcomm);
+        E.Exc = xc_energy(rho, exc, Nd_d, dV);
     }
 
-    // Double counting: E2 = integral rho * Vxc dV
+    // Double counting: E2 = integral sum_s rho_s * Vxc_s dV
+    // For non-spin: E2 = integral rho * Vxc dV
+    // For spin: E2 = integral (rho_up * Vxc_up + rho_dn * Vxc_dn) dV
     double E2 = 0.0;
-    for (int i = 0; i < Nd_d; ++i) {
-        E2 += rho[i] * Vxc[i];
+    if (Nspin == 2) {
+        const double* rho_up = density.rho(0).data();
+        const double* rho_dn = density.rho(1).data();
+        for (int i = 0; i < Nd_d; ++i) {
+            E2 += rho_up[i] * Vxc[i] + rho_dn[i] * Vxc[Nd_d + i];
+        }
+    } else {
+        for (int i = 0; i < Nd_d; ++i) {
+            E2 += rho[i] * Vxc[i];
+        }
     }
     E2 *= dV;
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        E2 = dmcomm.allreduce_sum(E2);
-    }
 
     // Electrostatic energy: E3 = integral rho * phi dV
     double E3 = 0.0;
@@ -120,9 +114,6 @@ EnergyComponents Energy::compute_all(
         E3 += rho[i] * phi[i];
     }
     E3 *= dV;
-    if (!dmcomm.is_null() && dmcomm.size() > 1) {
-        E3 = dmcomm.allreduce_sum(E3);
-    }
 
     // Hartree energy = 0.5 * integral (rho + b) * phi dV
     E.Ehart = 0.0;
@@ -131,9 +122,6 @@ EnergyComponents Energy::compute_all(
             E.Ehart += (rho[i] + rho_b[i]) * phi[i];
         }
         E.Ehart *= 0.5 * dV;
-        if (!dmcomm.is_null() && dmcomm.size() > 1) {
-            E.Ehart = dmcomm.allreduce_sum(E.Ehart);
-        }
     }
 
     // Entropy
@@ -145,6 +133,10 @@ EnergyComponents Energy::compute_all(
     // Eband already contains kinetic + Veff contribution
     // Veff = Vxc + phi + ... so we need to subtract double counting
     E.Etotal = E.Eband - E2 + E.Exc - E3 + E.Ehart + E.Eself + E.Ec + E.Entropy;
+
+    // Debug: print all components in reference format
+    std::printf("DEBUG_ENERGY: Eband=%.12f E_rhoVxc=%.12f E_rhoPhi=%.12f Ehart=%.12f Exc=%.12f Esc=%.12f Entropy=%.12e Etot=%.12f\n",
+                E.Eband, E2, E3, E.Ehart, E.Exc, E.Eself + E.Ec, E.Entropy, E.Etotal);
 
     return E;
 }

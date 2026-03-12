@@ -1,0 +1,45 @@
+{
+  "lattice": {
+    "vectors": [[21, 0, 0], [0, 18, 0], [0, 0, 18]],
+    "cell_type": "orthogonal"
+  },
+  "grid": {
+    "Nx": 105, "Ny": 90, "Nz": 90,
+    "fd_order": 12,
+    "boundary_conditions": ["dirichlet", "dirichlet", "dirichlet"]
+  },
+  "atoms": [
+    {
+      "element": "O",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "fractional": false,
+      "coordinates": [[9, 9, 9], [12, 9, 9]],
+      "spin": [1.0, 1.0]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "spin": "collinear",
+    "temperature": 315.775131,
+    "smearing": "fermi-dirac",
+    "Nstates": 10
+  },
+  "kpoints": {
+    "grid": [1, 1, 1],
+    "shift": [0, 0, 0]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-6,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.55
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": true,
+    "calc_stress": false,
+    "calc_pressure": false
+  }
+}

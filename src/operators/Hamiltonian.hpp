@@ -6,7 +6,6 @@
 #include "core/FDGrid.hpp"
 #include "operators/FDStencil.hpp"
 #include "operators/NonlocalProjector.hpp"
-#include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 
 namespace sparc {
@@ -24,8 +23,7 @@ public:
                const Domain& domain,
                const FDGrid& grid,
                const HaloExchange& halo,
-               const NonlocalProjector* vnl,  // may be null
-               const MPIComm& dmcomm);
+               const NonlocalProjector* vnl);  // may be null
 
     // Apply H*psi = y
     // psi: (Nd_d, ncol) column-major
@@ -47,11 +45,14 @@ private:
     const FDGrid* grid_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;
-    const MPIComm* dmcomm_ = nullptr;
 
     // Apply -0.5*Lap*psi + Veff*psi + c*psi (orthogonal cell)
     void lap_plus_diag_orth(const double* x_ex, const double* Veff,
                             double* y, int ncol, double c) const;
+
+    // Apply -0.5*Lap*psi + Veff*psi + c*psi (non-orthogonal cell, with mixed derivatives)
+    void lap_plus_diag_nonorth(const double* x_ex, const double* Veff,
+                               double* y, int ncol, double c) const;
 };
 
 } // namespace sparc
