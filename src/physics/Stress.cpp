@@ -51,6 +51,8 @@ std::array<double, 6> Stress::compute(
     const FDGrid& grid,
     const double* phi,
     const double* rho,
+    const double* rho_up,
+    const double* rho_dn,
     const double* Vloc,
     const double* b,
     const double* b_ref,
@@ -60,6 +62,7 @@ std::array<double, 6> Stress::compute(
     double Exc,
     double Esc,
     XCType xc_type,
+    int Nspin,
     const double* rho_core,
     const std::vector<double>& kpt_weights,
     const MPIComm& bandcomm,
@@ -82,11 +85,11 @@ std::array<double, 6> Stress::compute(
     if (grid.bcz() == BCType::Periodic) cell_measure_ *= L.z;
 
     // 1. XC stress
-    compute_xc_stress(rho, exc, Vxc, Dxcdgrho, Exc, xc_type, rho_core, gradient, halo, domain, grid);
+    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid);
 
     // 1b. NLCC XC stress correction
     if (rho_core) {
-        compute_xc_nlcc_stress(crystal, influence, stencil, domain, grid, Vxc);
+        compute_xc_nlcc_stress(crystal, influence, stencil, domain, grid, Vxc, Nspin);
     }
 
     // 2. Electrostatic (local) stress
@@ -114,11 +117,14 @@ double Stress::pressure() const {
 // ---------------------------------------------------------------------------
 void Stress::compute_xc_stress(
     const double* rho,
+    const double* rho_up,
+    const double* rho_dn,
     const double* exc,
     const double* Vxc,
     const double* Dxcdgrho,
     double Exc,
     XCType xc_type,
+    int Nspin,
     const double* rho_core,
     const Gradient& gradient,
     const HaloExchange& halo,
@@ -130,9 +136,16 @@ void Stress::compute_xc_stress(
     bool is_orth = grid.lattice().is_orthogonal();
 
     // Compute Exc_corr = ∫ ρ·Vxc dV
+    // For spin-polarized: ∫ (rho_up·Vxc_up + rho_dn·Vxc_dn) dV
     double Exc_corr = 0.0;
-    for (int i = 0; i < Nd_d; ++i) {
-        Exc_corr += rho[i] * Vxc[i];
+    if (Nspin == 2 && rho_up && rho_dn) {
+        for (int i = 0; i < Nd_d; ++i) {
+            Exc_corr += rho_up[i] * Vxc[i] + rho_dn[i] * Vxc[Nd_d + i];
+        }
+    } else {
+        for (int i = 0; i < Nd_d; ++i) {
+            Exc_corr += rho[i] * Vxc[i];
+        }
     }
     Exc_corr *= dV;
 
@@ -147,32 +160,56 @@ void Stress::compute_xc_stress(
         int FDn = gradient.stencil().FDn();
         int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
         int Nd_ex = (nx+2*FDn) * (ny+2*FDn) * (nz+2*FDn);
-
-        // Add core density if NLCC
-        std::vector<double> rho_xc(Nd_d);
         constexpr double xc_rhotol = 1e-14;
+
+        // For spin-polarized: Nspdentd=3, need gradients of [rho_total, rho_up, rho_dn]
+        // Dxcdgrho layout: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
+        // For non-spin: Nspdentd=1, single gradient of rho_total
+        // Dxcdgrho layout: [v2x+v2c (Nd_d)]
+        int Nspdentd = (Nspin == 2) ? 3 : 1;
+        int len_tot = Nspdentd * Nd_d;
+
+        // Build stacked density array [rho_total (+ rho_up + rho_dn for spin)]
+        std::vector<double> rho_xc(len_tot);
+        // Component 0: total density
         for (int i = 0; i < Nd_d; ++i) {
             rho_xc[i] = rho[i] + (rho_core ? rho_core[i] : 0.0);
             if (rho_xc[i] < xc_rhotol) rho_xc[i] = xc_rhotol;
         }
-
-        // Compute ∇ρ in non-Cart coordinates
-        std::vector<double> rho_ex(Nd_ex);
-        halo.execute(rho_xc.data(), rho_ex.data(), 1);
-        std::vector<double> Drho_x(Nd_d), Drho_y(Nd_d), Drho_z(Nd_d);
-        gradient.apply(rho_ex.data(), Drho_x.data(), 0);
-        gradient.apply(rho_ex.data(), Drho_y.data(), 1);
-        gradient.apply(rho_ex.data(), Drho_z.data(), 2);
-
-        // Transform to Cartesian for non-orth cells (matching reference line 549)
-        if (!is_orth) {
-            nonCart2Cart_grad_arrays(grid.lattice().lat_uvec_inv(),
-                                    Drho_x.data(), Drho_y.data(), Drho_z.data(), Nd_d);
+        if (Nspin == 2 && rho_up && rho_dn) {
+            // Component 1: spin-up density
+            for (int i = 0; i < Nd_d; ++i) {
+                double ru = rho_up[i] + (rho_core ? 0.5 * rho_core[i] : 0.0);
+                if (ru < xc_rhotol * 0.5) ru = xc_rhotol * 0.5;
+                rho_xc[Nd_d + i] = ru;
+            }
+            // Component 2: spin-down density
+            for (int i = 0; i < Nd_d; ++i) {
+                double rd = rho_dn[i] + (rho_core ? 0.5 * rho_core[i] : 0.0);
+                if (rd < xc_rhotol * 0.5) rd = xc_rhotol * 0.5;
+                rho_xc[2*Nd_d + i] = rd;
+            }
         }
 
-        // GGA stress correction: -∫ Dxcdgrho · ∂ρ/∂x_α · ∂ρ/∂x_β dV
+        // Compute ∇ρ for all Nspdentd components
+        std::vector<double> Drho_x(len_tot), Drho_y(len_tot), Drho_z(len_tot);
+        for (int c = 0; c < Nspdentd; ++c) {
+            std::vector<double> rho_ex(Nd_ex);
+            halo.execute(rho_xc.data() + c * Nd_d, rho_ex.data(), 1);
+            gradient.apply(rho_ex.data(), Drho_x.data() + c * Nd_d, 0);
+            gradient.apply(rho_ex.data(), Drho_y.data() + c * Nd_d, 1);
+            gradient.apply(rho_ex.data(), Drho_z.data() + c * Nd_d, 2);
+        }
+
+        // Transform to Cartesian for non-orth cells
+        if (!is_orth) {
+            nonCart2Cart_grad_arrays(grid.lattice().lat_uvec_inv(),
+                                    Drho_x.data(), Drho_y.data(), Drho_z.data(), len_tot);
+        }
+
+        // GGA stress correction: -∫ Σ_c Dxcdgrho_c · ∂ρ_c/∂x_α · ∂ρ_c/∂x_β dV
         std::array<double, 6> stress_gga = {};
-        for (int i = 0; i < Nd_d; ++i) {
+        for (int i = 0; i < len_tot; ++i) {
             double v2 = Dxcdgrho[i];
             stress_gga[0] += Drho_x[i] * Drho_x[i] * v2;
             stress_gga[1] += Drho_x[i] * Drho_y[i] * v2;
@@ -203,13 +240,15 @@ void Stress::compute_xc_nlcc_stress(
     const FDStencil& stencil,
     const Domain& domain,
     const FDGrid& grid,
-    const double* Vxc) {
+    const double* Vxc,
+    int Nspin) {
 
     int FDn = stencil.FDn();
     int order = 2 * FDn;
     double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
     double dV = grid.dV();
     int DMnx = domain.Nx_d(), DMny = domain.Ny_d();
+    int Nd_d = domain.Nd_d();
     int xs = domain.vertices().xs, ys = domain.vertices().ys, zs = domain.vertices().zs;
 
     const double* D1_x = stencil.D1_coeff_x();
@@ -350,7 +389,8 @@ void Stress::compute_xc_nlcc_stress(
                         double x2 = (j_DM + ys) * dy - pos.y;
                         double x3 = (k_DM + zs) * dz - pos.z;
 
-                        double Vxc_val = Vxc[idx_DM];
+                        double Vxc_val = (Nspin == 2) ?
+                            0.5 * (Vxc[idx_DM] + Vxc[Nd_d + idx_DM]) : Vxc[idx_DM];
                         double gx = drhocJ_x[idx_ex];
                         double gy = drhocJ_y[idx_ex];
                         double gz = drhocJ_z[idx_ex];

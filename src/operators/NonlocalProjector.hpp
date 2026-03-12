@@ -58,9 +58,6 @@ private:
     const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;
     const Domain* domain_ = nullptr;
 
-public:
-    // Spherical harmonics (public for use by Forces/Stress)
-    static double spherical_harmonic(int l, int m, double x, double y, double z, double r);
 };
 
 } // namespace sparc

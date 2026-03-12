@@ -62,8 +62,8 @@
 ## TODO
 
 ### Single-Core Functional Gaps (bugs/incompleteness)
-- [ ] **Spin-polarized GGA correlation** — `pbec_spin()` in XCFunctional.cpp is a placeholder; collinear spin + PBE gives wrong Ec
-- [ ] **Spherical harmonics l >= 3** — NonlocalProjector returns 0.0 for f-orbitals; needed for rare earths/actinides
+- [x] **Spin-polarized GGA correlation** — `pbec_spin()` fully implemented; Fe2 spin PBE converges correctly
+- [x] **Spherical harmonics l = 0..3** — moved to `core/math_utils.hpp`; covers s, p, d, f orbitals
 - [ ] **Per-type pseudocharge cutoff** — currently using global rc_max; reference uses adaptive `Calculate_PseudochargeCutoff` per atom type
 - [x] **Non-orthogonal forces/stress coordinate transform** — `nonCart2Cart_grad` + `nonCart2Cart_coord` in Stress.cpp; MgO GGA_PBE matches ref to 0.01 GPa
 

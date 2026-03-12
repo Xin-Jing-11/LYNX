@@ -4,7 +4,7 @@
     "cell_type": "orthogonal"
   },
   "grid": {
-    "Nx": 22, "Ny": 22, "Nz": 22,
+    "Nx": 37, "Ny": 37, "Nz": 37,
     "fd_order": 12,
     "boundary_conditions": ["periodic", "periodic", "periodic"]
   },

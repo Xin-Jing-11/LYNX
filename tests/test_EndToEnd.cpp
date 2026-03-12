@@ -206,9 +206,13 @@ static DFTResult run_single_point(const std::string& json_file) {
     if (config.calc_stress || config.calc_pressure) {
         std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
         Stress stress_calc;
+        int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 : 1;
+        const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
+        const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
         result.stress = stress_calc.compute(wfn, crystal, influence, nloc_influence, vnl,
                                             stencil, gradient, halo, domain, grid,
                                             scf.phi(), scf.density().rho_total().data(),
+                                            rho_up_ptr, rho_dn_ptr,
                                             Vloc.data(),
                                             elec.pseudocharge().data(),
                                             elec.pseudocharge_ref().data(),
@@ -217,6 +221,7 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             scf.energy().Exc,
                                             elec.Eself() + elec.Ec(),
                                             config.xc,
+                                            Nspin_calc,
                                             has_nlcc ? rho_core.data() : nullptr,
                                             kpt_weights, bandcomm, kptcomm, spincomm);
         result.pressure = stress_calc.pressure();

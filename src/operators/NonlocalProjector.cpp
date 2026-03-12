@@ -1,55 +1,11 @@
 #include "operators/NonlocalProjector.hpp"
 #include "core/constants.hpp"
+#include "core/math_utils.hpp"
 #include <cmath>
 #include <vector>
 #include <algorithm>
 
 namespace sparc {
-
-// Real spherical harmonics Y_lm(x, y, z, r)
-// Fully normalized: matching reference SPARC convention (tools.c RealSphericalHarmonic)
-double NonlocalProjector::spherical_harmonic(int l, int m, double x, double y, double z, double r) {
-    // l = 0: Y00 = 0.5*sqrt(1/pi) — constant, no direction needed
-    if (l == 0) return 0.282094791773878;
-
-    // For l > 0, direction is undefined at r=0; return 0 (projectors vanish at origin)
-    if (r < 1e-14) return 0.0;
-
-    double invr = 1.0 / r;
-    double xn = x * invr, yn = y * invr, zn = z * invr;
-
-    // l = 1: coefficients = sqrt(3/(4*pi))
-    if (l == 1) {
-        constexpr double C1 = 0.488602511902920;
-        if (m == -1) return C1 * yn;
-        if (m ==  0) return C1 * zn;
-        if (m ==  1) return C1 * xn;
-    }
-
-    // l = 2
-    if (l == 2) {
-        double x2 = xn * xn, y2 = yn * yn, z2 = zn * zn;
-        if (m == -2) return 1.092548430592079 * xn * yn;           // 0.5*sqrt(15/pi)
-        if (m == -1) return 1.092548430592079 * yn * zn;           // 0.5*sqrt(15/pi)
-        if (m ==  0) return 0.315391565252520 * (3.0 * z2 - 1.0); // 0.25*sqrt(5/pi)
-        if (m ==  1) return 1.092548430592079 * xn * zn;           // 0.5*sqrt(15/pi)
-        if (m ==  2) return 0.546274215296040 * (x2 - y2);         // 0.25*sqrt(15/pi)
-    }
-
-    // l = 3
-    if (l == 3) {
-        double x2 = xn * xn, y2 = yn * yn, z2 = zn * zn;
-        if (m == -3) return 0.590043589926644 * yn * (3.0 * x2 - y2);  // 0.25*sqrt(35/(2*pi))
-        if (m == -2) return 2.890611442640554 * xn * yn * zn;          // 0.5*sqrt(105/pi)
-        if (m == -1) return 0.457045799464466 * yn * (5.0 * z2 - 1.0); // 0.25*sqrt(21/(2*pi))
-        if (m ==  0) return 0.373176332590115 * zn * (5.0 * z2 - 3.0); // 0.25*sqrt(7/pi)
-        if (m ==  1) return 0.457045799464466 * xn * (5.0 * z2 - 1.0); // 0.25*sqrt(21/(2*pi))
-        if (m ==  2) return 1.445305721320277 * zn * (x2 - y2);        // 0.25*sqrt(105/pi)
-        if (m ==  3) return 0.590043589926644 * xn * (x2 - 3.0 * y2);  // 0.25*sqrt(35/(2*pi))
-    }
-
-    return 0.0;  // Higher l not implemented yet
-}
 
 void NonlocalProjector::setup(const Crystal& crystal,
                                const std::vector<AtomNlocInfluence>& nloc_influence,

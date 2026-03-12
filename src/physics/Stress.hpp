@@ -42,16 +42,19 @@ public:
         const Domain& domain,
         const FDGrid& grid,
         const double* phi,           // electrostatic potential
-        const double* rho,           // electron density
+        const double* rho,           // total electron density
+        const double* rho_up,        // spin-up density (nullptr for non-spin)
+        const double* rho_dn,        // spin-down density (nullptr for non-spin)
         const double* Vloc,          // correction potential Vc
         const double* b,             // pseudocharge density
         const double* b_ref,         // reference pseudocharge density
         const double* exc,           // XC energy density
-        const double* Vxc,           // XC potential
-        const double* Dxcdgrho,      // GGA: stored v2x+v2c from SCF (nullptr for LDA)
+        const double* Vxc,           // XC potential (Nspin*Nd_d for spin)
+        const double* Dxcdgrho,      // GGA: v2x+v2c (1*Nd_d non-spin, 3*Nd_d spin)
         double Exc,                  // total XC energy
         double Esc,                  // self + correction energy (Eself + Ec)
         XCType xc_type,
+        int Nspin,                   // 1 or 2
         const double* rho_core,      // NLCC core density (nullptr if no NLCC)
         const std::vector<double>& kpt_weights,
         const MPIComm& bandcomm,
@@ -77,11 +80,14 @@ private:
     // XC stress: diagonal = (Exc - Exc_corr), GGA correction = -∫ Dxcdgrho * ∂ρ/∂x_α * ∂ρ/∂x_β dV
     void compute_xc_stress(
         const double* rho,
+        const double* rho_up,
+        const double* rho_dn,
         const double* exc,
         const double* Vxc,
         const double* Dxcdgrho,
         double Exc,
         XCType xc_type,
+        int Nspin,
         const double* rho_core,
         const Gradient& gradient,
         const HaloExchange& halo,
@@ -111,7 +117,8 @@ private:
         const FDStencil& stencil,
         const Domain& domain,
         const FDGrid& grid,
-        const double* Vxc);
+        const double* Vxc,
+        int Nspin);
 
     // Nonlocal+kinetic stress combined (matching reference)
     void compute_nonlocal_kinetic(
