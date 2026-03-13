@@ -29,9 +29,11 @@ public:
     Energy() = default;
 
     // Compute band energy: Eband = sum_{n,k,s} w_k * f_nks * epsilon_nks
+    // kpt_start: global index offset for kpt_weights lookup
     static double band_energy(const Wavefunction& wfn,
                                const std::vector<double>& kpt_weights,
-                               int Nspin);
+                               int Nspin,
+                               int kpt_start = 0);
 
     // Compute XC energy: Exc = integral rho * exc dV
     static double xc_energy(const double* rho, const double* exc,
@@ -45,6 +47,7 @@ public:
     static double total_energy(const EnergyComponents& E);
 
     // Compute all energy components
+    // Nspin_global: global spin count (for correct spin_fac and E2)
     static EnergyComponents compute_all(
         const Wavefunction& wfn,
         const ElectronDensity& density,
@@ -59,8 +62,12 @@ public:
         SmearingType smearing,
         const std::vector<double>& kpt_weights,
         int Nd_d, double dV,
-        const double* rho_core = nullptr,  // NLCC core density
-        double Ef = 0.0);  // Fermi level (needed for Gaussian entropy)
+        const double* rho_core = nullptr,
+        double Ef = 0.0,
+        int kpt_start = 0,
+        const MPIComm* kptcomm = nullptr,
+        const MPIComm* spincomm = nullptr,
+        int Nspin_global = 0);
 };
 
 } // namespace sparc

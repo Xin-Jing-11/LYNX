@@ -60,8 +60,11 @@ public:
                const MPIComm& kptcomm,
                const MPIComm& spincomm,
                const SCFParams& params,
-               int Nspin = 1,
-               const KPoints* kpoints = nullptr);  // k-point info (null = gamma-only)
+               int Nspin_global = 1,
+               int Nspin_local = 1,
+               int spin_start = 0,
+               const KPoints* kpoints = nullptr,
+               int kpt_start = 0);
 
     // Run self-consistent field loop
     // Returns total energy
@@ -118,9 +121,12 @@ private:
     const double* Vloc_ = nullptr;
     const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
 
-    int Nspin_ = 1;  // number of spin channels
+    int Nspin_global_ = 1;  // global number of spin channels (1 or 2)
+    int Nspin_local_ = 1;   // spin channels on this process (1 or Nspin_global)
+    int spin_start_ = 0;    // global spin index of first local spin channel
     const KPoints* kpoints_ = nullptr;  // k-point info (null = gamma-only)
     bool is_kpt_ = false;               // true if using k-points (complex wavefunctions)
+    int kpt_start_ = 0;                 // global index of first local k-point
 
     // Compute effective potential: Veff = Vxc + phi + Vloc
     // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns

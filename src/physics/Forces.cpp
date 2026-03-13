@@ -35,7 +35,8 @@ std::vector<double> Forces::compute(
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
-    const KPoints* kpoints) {
+    const KPoints* kpoints,
+    int kpt_start) {
 
     int n_atom = crystal.n_atom_total();
     f_local_.assign(3 * n_atom, 0.0);
@@ -49,7 +50,7 @@ std::vector<double> Forces::compute(
 
     // Nonlocal force from KB projectors
     compute_nonlocal(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints);
+                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start);
 
     // Sum local + nonlocal
     for (int i = 0; i < 3 * n_atom; ++i) {
@@ -366,10 +367,11 @@ void Forces::compute_nonlocal(
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
-    const KPoints* kpoints) {
+    const KPoints* kpoints,
+    int kpt_start) {
 
     int n_atom = crystal.n_atom_total();
-    int Nspin = wfn.Nspin();
+    int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
     int Nband = wfn.Nband();
     int Nd_d = domain.Nd_d();
@@ -378,6 +380,11 @@ void Forces::compute_nonlocal(
     int FDn = gradient.stencil().FDn();
     bool is_kpt = wfn.is_complex();
 
+    // Determine global Nspin from spincomm (spin_bridge)
+    int Nspin = Nspin_local;
+    if (!spincomm.is_null() && spincomm.size() > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, &Nspin, 1, MPI_INT, MPI_SUM, spincomm.comm());
+    }
     double occfac = (Nspin == 1) ? 2.0 : 1.0;
     double spn_fac = occfac * 2.0;
     f_nloc_.assign(3 * n_atom, 0.0);
@@ -422,15 +429,16 @@ void Forces::compute_nonlocal(
     // Access precomputed Chi from NonlocalProjector
     const auto& Chi = vnl.Chi();
 
-    for (int s = 0; s < Nspin; ++s) {
+    for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
-            double wk = kpt_weights[k];
+            int k_glob = kpt_start + k;
+            double wk = kpt_weights[k_glob];
             const NDArray<double>& occ_sk = wfn.occupations(s, k);
 
             if (is_kpt) {
                 // ===== Complex k-point path =====
                 const NDArray<Complex>& psi_sk = wfn.psi_kpt(s, k);
-                Vec3 kpt_cart = kpoints->kpts_cart()[k];
+                Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
 
                 for (int n = 0; n < Nband; ++n) {
                     double g_n = occ_sk(n);

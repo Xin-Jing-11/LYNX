@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <mpi.h>
 
 namespace sparc {
 
@@ -140,35 +141,81 @@ double Occupation::compute(Wavefunction& wfn,
                             SmearingType smearing,
                             const std::vector<double>& kpt_weights,
                             const MPIComm& kptcomm,
-                            const MPIComm& spincomm) {
-    int Nspin = wfn.Nspin();
-    int Nkpts = wfn.Nkpts();
+                            const MPIComm& spincomm,
+                            int kpt_start) {
+    int Nspin_local = wfn.Nspin();
+    int Nkpts_local = wfn.Nkpts();
     int Nband = wfn.Nband();
 
-    // Spin multiplier: 2 for non-spin-polarized, 1 for collinear
-    double spin_fac = (Nspin == 1) ? 2.0 : 1.0;
+    // Determine global Nspin from spincomm
+    int Nspin_global = Nspin_local;
+    if (!spincomm.is_null() && spincomm.size() > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, &Nspin_global, 1, MPI_INT, MPI_SUM, spincomm.comm());
+    }
+    double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
 
-    // Gather all eigenvalues and their weights for Fermi level search
-    std::vector<double> all_eigs;
-    std::vector<double> all_weights;
-
-    for (int s = 0; s < Nspin; ++s) {
-        for (int k = 0; k < Nkpts; ++k) {
+    // Gather LOCAL eigenvalues and weights
+    int local_count = Nspin_local * Nkpts_local * Nband;
+    std::vector<double> local_eigs(local_count);
+    std::vector<double> local_weights(local_count);
+    int idx = 0;
+    for (int s = 0; s < Nspin_local; ++s) {
+        for (int k = 0; k < Nkpts_local; ++k) {
             const auto& eig = wfn.eigenvalues(s, k);
-            double wk = kpt_weights[k] * spin_fac;
+            int k_glob = kpt_start + k;
+            double wk = kpt_weights[k_glob] * spin_fac;
             for (int n = 0; n < Nband; ++n) {
-                all_eigs.push_back(eig(n));
-                all_weights.push_back(wk);
+                local_eigs[idx] = eig(n);
+                local_weights[idx] = wk;
+                idx++;
             }
         }
     }
 
-    // Find Fermi level
+    // Allgather eigenvalues across kptcomm and spincomm for global Fermi level
+    std::vector<double> all_eigs = local_eigs;
+    std::vector<double> all_weights = local_weights;
+
+    // Gather across kptcomm (different k-points)
+    if (!kptcomm.is_null() && kptcomm.size() > 1) {
+        int kpt_np = kptcomm.size();
+        std::vector<int> recv_counts(kpt_np), displs(kpt_np);
+        MPI_Allgather(&local_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, kptcomm.comm());
+        displs[0] = 0;
+        for (int i = 1; i < kpt_np; ++i) displs[i] = displs[i-1] + recv_counts[i-1];
+        int total = displs[kpt_np-1] + recv_counts[kpt_np-1];
+        all_eigs.resize(total);
+        all_weights.resize(total);
+        MPI_Allgatherv(local_eigs.data(), local_count, MPI_DOUBLE,
+                       all_eigs.data(), recv_counts.data(), displs.data(), MPI_DOUBLE, kptcomm.comm());
+        MPI_Allgatherv(local_weights.data(), local_count, MPI_DOUBLE,
+                       all_weights.data(), recv_counts.data(), displs.data(), MPI_DOUBLE, kptcomm.comm());
+    }
+
+    // Gather across spincomm (different spin channels)
+    if (!spincomm.is_null() && spincomm.size() > 1) {
+        int spin_np = spincomm.size();
+        int cur_count = static_cast<int>(all_eigs.size());
+        std::vector<int> recv_counts(spin_np), displs(spin_np);
+        MPI_Allgather(&cur_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, spincomm.comm());
+        displs[0] = 0;
+        for (int i = 1; i < spin_np; ++i) displs[i] = displs[i-1] + recv_counts[i-1];
+        int total = displs[spin_np-1] + recv_counts[spin_np-1];
+        std::vector<double> tmp_eigs(total), tmp_weights(total);
+        MPI_Allgatherv(all_eigs.data(), cur_count, MPI_DOUBLE,
+                       tmp_eigs.data(), recv_counts.data(), displs.data(), MPI_DOUBLE, spincomm.comm());
+        MPI_Allgatherv(all_weights.data(), cur_count, MPI_DOUBLE,
+                       tmp_weights.data(), recv_counts.data(), displs.data(), MPI_DOUBLE, spincomm.comm());
+        all_eigs = std::move(tmp_eigs);
+        all_weights = std::move(tmp_weights);
+    }
+
+    // Find global Fermi level
     double Ef = find_fermi_level(all_eigs, all_weights, Nelectron, beta, smearing);
 
-    // Set occupations
-    for (int s = 0; s < Nspin; ++s) {
-        for (int k = 0; k < Nkpts; ++k) {
+    // Set local occupations
+    for (int s = 0; s < Nspin_local; ++s) {
+        for (int k = 0; k < Nkpts_local; ++k) {
             auto& occ = wfn.occupations(s, k);
             const auto& eig = wfn.eigenvalues(s, k);
             for (int n = 0; n < Nband; ++n) {
@@ -184,17 +231,20 @@ double Occupation::entropy(const Wavefunction& wfn,
                             double beta,
                             SmearingType smearing,
                             const std::vector<double>& kpt_weights,
-                            double Ef) {
+                            double Ef,
+                            int kpt_start,
+                            int Nspin_global) {
     double S = 0.0;
-    int Nspin = wfn.Nspin();
+    int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
     int Nband = wfn.Nband();
-    double spin_fac = (Nspin == 1) ? 2.0 : 1.0;
+    if (Nspin_global <= 0) Nspin_global = Nspin_local;
+    double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
 
-    for (int s = 0; s < Nspin; ++s) {
+    for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
             const auto& occ = wfn.occupations(s, k);
-            double wk = kpt_weights[k] * spin_fac;
+            double wk = kpt_weights[kpt_start + k] * spin_fac;
 
             for (int n = 0; n < Nband; ++n) {
                 double f = occ(n);

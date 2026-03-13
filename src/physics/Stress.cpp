@@ -69,7 +69,8 @@ std::array<double, 6> Stress::compute(
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
-    const KPoints* kpoints) {
+    const KPoints* kpoints,
+    int kpt_start) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -100,7 +101,7 @@ std::array<double, 6> Stress::compute(
 
     // 3. Nonlocal + kinetic stress
     compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints);
+                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start);
 
     // Assemble total
     for (int i = 0; i < 6; ++i) {
@@ -694,11 +695,12 @@ void Stress::compute_nonlocal_kinetic(
     const MPIComm& bandcomm,
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
-    const KPoints* kpoints) {
+    const KPoints* kpoints,
+    int kpt_start) {
 
     using Complex = std::complex<double>;
 
-    int Nspin = wfn.Nspin();
+    int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
     int Nband = wfn.Nband();
     int Nd_d = domain.Nd_d();
@@ -706,7 +708,12 @@ void Stress::compute_nonlocal_kinetic(
     int ntypes = crystal.n_types();
     int n_atom = crystal.n_atom_total();
     int FDn = gradient.stencil().FDn();
-    double occfac = (Nspin == 1) ? 2.0 : 1.0;
+    // Determine global Nspin from spincomm (spin_bridge)
+    int Nspin_g = Nspin_local;
+    if (!spincomm.is_null() && spincomm.size() > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, &Nspin_g, 1, MPI_INT, MPI_SUM, spincomm.comm());
+    }
+    double occfac = (Nspin_g == 1) ? 2.0 : 1.0;
     double spn_fac = occfac * 2.0;
     bool is_kpt = wfn.is_complex();
 
@@ -757,15 +764,16 @@ void Stress::compute_nonlocal_kinetic(
     double energy_nl = 0.0;
     std::array<double, 6> sk = {}, snl = {};
 
-    for (int s = 0; s < Nspin; ++s) {
+    for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
-            double wk = kpt_weights[k];
+            int k_glob = kpt_start + k;
+            double wk = kpt_weights[k_glob];
             const auto& occ_sk = wfn.occupations(s, k);
 
             if (is_kpt) {
                 // ===== Complex k-point path =====
                 const auto& psi_sk = wfn.psi_kpt(s, k);
-                Vec3 kpt_cart = kpoints->kpts_cart()[k];
+                Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
 
                 for (int n = 0; n < Nband; ++n) {
                     double g_n = occ_sk(n);

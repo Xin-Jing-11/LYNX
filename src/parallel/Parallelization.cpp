@@ -25,6 +25,7 @@ Parallelization::Parallelization(MPI_Comm world, const ParallelParams& params,
     if (my_rank < params.npspin * size_spincomm) {
         spin_index_ = my_rank / size_spincomm;
         Nspin_local_ = block_size(Nspin, params.npspin, spin_index_);
+        spin_start_ = block_start(Nspin, params.npspin, spin_index_);
     } else {
         spin_index_ = -1;
         Nspin_local_ = 0;
@@ -43,6 +44,7 @@ Parallelization::Parallelization(MPI_Comm world, const ParallelParams& params,
         if (spin_rank < params.npkpt * size_kptcomm) {
             kpt_index_ = spin_rank / size_kptcomm;
             Nkpts_local_ = block_size(Nkpts, params.npkpt, kpt_index_);
+            kpt_start_ = block_start(Nkpts, params.npkpt, kpt_index_);
         } else {
             kpt_index_ = -1;
             Nkpts_local_ = 0;

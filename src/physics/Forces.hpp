@@ -49,7 +49,8 @@ public:
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr);
+        const KPoints* kpoints = nullptr,
+        int kpt_start = 0);
 
     const std::vector<double>& local_forces() const { return f_local_; }
     const std::vector<double>& nonlocal_forces() const { return f_nloc_; }
@@ -90,7 +91,8 @@ private:
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr);
+        const KPoints* kpoints = nullptr,
+        int kpt_start = 0);
 
     // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
     void compute_xc_nlcc(

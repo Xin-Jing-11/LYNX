@@ -26,7 +26,8 @@ public:
                           SmearingType smearing,
                           const std::vector<double>& kpt_weights,
                           const MPIComm& kptcomm,
-                          const MPIComm& spincomm);
+                          const MPIComm& spincomm,
+                          int kpt_start = 0);
 
     // Smearing functions
     static double fermi_dirac(double x, double beta);
@@ -37,11 +38,14 @@ public:
 
     // Entropy contribution: -kB*T * sum_n [f_n * ln(f_n) + (1-f_n)*ln(1-f_n)]
     // for Fermi-Dirac, or equivalent for Gaussian
+    // Nspin_global: global spin count for correct spin_fac (0 = use wfn.Nspin())
     static double entropy(const Wavefunction& wfn,
                           double beta,
                           SmearingType smearing,
                           const std::vector<double>& kpt_weights,
-                          double Ef = 0.0);
+                          double Ef = 0.0,
+                          int kpt_start = 0,
+                          int Nspin_global = 0);
 
 private:
     // Find Fermi energy via Brent's method

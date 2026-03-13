@@ -34,6 +34,8 @@ public:
     int Nband_local() const { return Nband_local_; }
     int band_start() const { return band_start_; }
     int band_end() const { return band_end_; }
+    int kpt_start() const { return kpt_start_; }
+    int spin_start() const { return spin_start_; }
 
     const Domain& domain() const { return domain_; }
 
@@ -49,6 +51,7 @@ private:
     int spin_index_ = -1, kpt_index_ = -1, band_index_ = -1;
     int Nspin_local_ = 0, Nkpts_local_ = 0, Nband_local_ = 0;
     int band_start_ = 0, band_end_ = 0;
+    int kpt_start_ = 0, spin_start_ = 0;
 
     Domain domain_;
 };

@@ -22,49 +22,56 @@ void ElectronDensity::compute(const Wavefunction& wfn,
                                const std::vector<double>& kpt_weights,
                                double dV,
                                const MPIComm& bandcomm,
-                               const MPIComm& kptcomm) {
+                               const MPIComm& kptcomm,
+                               int Nspin_global,
+                               int spin_start,
+                               const MPIComm* spincomm,
+                               int kpt_start) {
     int Nband = wfn.Nband();
-    int Nspin = wfn.Nspin();
+    int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
 
-    // Zero out densities
+    // If Nspin_global not specified, infer from wfn (backward compat)
+    if (Nspin_global <= 0) Nspin_global = Nspin_local;
+
+    // Zero out all spin densities (Nspin_ = Nspin_global from allocate)
     rho_total_.zero();
     for (int s = 0; s < Nspin_; ++s) {
         rho_[s].zero();
     }
 
     // Spin multiplier: 2 for non-spin-polarized, 1 for collinear
-    double spin_fac = (Nspin == 1) ? 2.0 : 1.0;
+    double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
 
-    for (int s = 0; s < Nspin; ++s) {
+    // Compute density for LOCAL spin channels only
+    for (int s = 0; s < Nspin_local; ++s) {
+        int s_glob = spin_start + s;  // global spin index
         for (int k = 0; k < Nkpts; ++k) {
             const auto& occ = wfn.occupations(s, k);
-            double wk = kpt_weights[k];
+            double wk = kpt_weights[kpt_start + k];
 
             if (wfn.is_complex()) {
-                // Complex wavefunctions (k-point): rho += w * f_n * |psi_n|^2
                 const auto& psi_c = wfn.psi_kpt(s, k);
                 for (int n = 0; n < Nband; ++n) {
                     double fn = occ(n);
                     if (fn < 1e-16) continue;
 
                     const Complex* col = psi_c.col(n);
-                    double* rho_s = rho_[s].data();
+                    double* rho_s = rho_[s_glob].data();
                     double w = spin_fac * wk * fn;
 
                     for (int i = 0; i < Nd_d_; ++i) {
-                        rho_s[i] += w * std::norm(col[i]);  // |z|^2 = re^2 + im^2
+                        rho_s[i] += w * std::norm(col[i]);
                     }
                 }
             } else {
-                // Real wavefunctions (Gamma-point)
                 const auto& psi = wfn.psi(s, k);
                 for (int n = 0; n < Nband; ++n) {
                     double fn = occ(n);
                     if (fn < 1e-16) continue;
 
                     const double* col = psi.col(n);
-                    double* rho_s = rho_[s].data();
+                    double* rho_s = rho_[s_glob].data();
                     double w = spin_fac * wk * fn;
 
                     for (int i = 0; i < Nd_d_; ++i) {
@@ -75,21 +82,37 @@ void ElectronDensity::compute(const Wavefunction& wfn,
         }
     }
 
-    // Allreduce over band communicator (partial band sums)
+    // Allreduce over band communicator (partial band sums — only local spin channels)
     if (!bandcomm.is_null() && bandcomm.size() > 1) {
-        for (int s = 0; s < Nspin_; ++s) {
-            bandcomm.allreduce_sum(rho_[s].data(), Nd_d_);
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start + s;
+            bandcomm.allreduce_sum(rho_[s_glob].data(), Nd_d_);
         }
     }
 
-    // Allreduce over kpt communicator
+    // Allreduce over kpt communicator (kpt_bridge)
     if (!kptcomm.is_null() && kptcomm.size() > 1) {
-        for (int s = 0; s < Nspin_; ++s) {
-            kptcomm.allreduce_sum(rho_[s].data(), Nd_d_);
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start + s;
+            kptcomm.allreduce_sum(rho_[s_glob].data(), Nd_d_);
         }
     }
 
-    // Compute total density
+    // Exchange spin densities across spin communicator (spin_bridge)
+    // Each process computed rho_[spin_start], need to get the other spin channel
+    if (spincomm && !spincomm->is_null() && spincomm->size() > 1 && Nspin_global == 2) {
+        // Process with spin_start=0 has rho_[0], needs rho_[1] from partner
+        // Process with spin_start=1 has rho_[1], needs rho_[0] from partner
+        int my_spin = spin_start;
+        int other_spin = 1 - my_spin;
+        int partner = (spincomm->rank() == 0) ? 1 : 0;
+
+        MPI_Sendrecv(rho_[my_spin].data(), Nd_d_, MPI_DOUBLE, partner, 0,
+                     rho_[other_spin].data(), Nd_d_, MPI_DOUBLE, partner, 0,
+                     spincomm->comm(), MPI_STATUS_IGNORE);
+    }
+
+    // Compute total density (sum over ALL spins — now available on all processes)
     rho_total_.zero();
     for (int s = 0; s < Nspin_; ++s) {
         double* rt = rho_total_.data();

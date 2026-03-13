@@ -16,11 +16,18 @@ public:
 
     // Compute density from wavefunctions and occupations
     // kpt_weights: weight of each k-point (usually 1/Nkpts for uniform grid)
+    // Nspin_global: global spin count (for correct spin_fac)
+    // spin_start: global index of first local spin channel
+    // spincomm: communicator for exchanging spin densities across processes
     void compute(const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights,
                  double dV,
                  const MPIComm& bandcomm,
-                 const MPIComm& kptcomm);
+                 const MPIComm& kptcomm,
+                 int Nspin_global = 0,
+                 int spin_start = 0,
+                 const MPIComm* spincomm = nullptr,
+                 int kpt_start = 0);
 
     // Total density (sum over spins)
     NDArray<double>& rho_total() { return rho_total_; }

@@ -99,18 +99,41 @@ int main(int argc, char** argv) {
                 std::printf("  ... (%d more)\n", Nkpts - 10);
         }
 
+        // Auto-determine spin parallelization if not set
+        // Only auto-enable if Nspin==2, nproc>=2, and user didn't explicitly set it
+        if (config.parallel.npspin <= 1 && Nspin == 2 && nproc >= 2) {
+            config.parallel.npspin = 2;
+        }
+
+        // Auto-determine k-point parallelization if not set
+        // Use remaining procs (after spin) for k-points
+        int nproc_after_spin = nproc / config.parallel.npspin;
+        if (config.parallel.npkpt <= 1 && Nkpts > 1 && nproc_after_spin > 1) {
+            config.parallel.npkpt = std::min(nproc_after_spin, Nkpts);
+        }
+
         sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
 
         const auto& domain = parallel.domain();
         const auto& bandcomm = parallel.bandcomm();
         const auto& kptcomm = parallel.kptcomm();
+        const auto& kpt_bridge = parallel.kpt_bridge();
         const auto& spincomm = parallel.spincomm();
+        const auto& spin_bridge = parallel.spin_bridge();
+        int Nkpts_local = parallel.Nkpts_local();
+        int Nspin_local = parallel.Nspin_local();
+        int kpt_start = parallel.kpt_start();
+        int spin_start = parallel.spin_start();
 
         if (rank == 0) {
             auto& v = domain.vertices();
             std::printf("\nParallelization: %d procs, domain [%d:%d]x[%d:%d]x[%d:%d] = %d pts\n",
                         nproc, v.xs, v.xe, v.ys, v.ye, v.zs, v.ze, domain.Nd_d());
+            std::printf("  npspin=%d, npkpt=%d, npband=%d\n",
+                        config.parallel.npspin, config.parallel.npkpt, config.parallel.npband);
+            std::printf("  This rank: spin_start=%d Nspin_local=%d kpt_start=%d Nkpts_local=%d\n",
+                        spin_start, Nspin_local, kpt_start, Nkpts_local);
         }
 
         // ===== Load pseudopotentials and create Crystal =====
@@ -261,12 +284,16 @@ int main(int argc, char** argv) {
         scf_params.rho_trigger = config.rho_trigger;
 
         sparc::SCF scf;
+        // Pass kpt_bridge/spin_bridge (not kptcomm/spincomm) for cross-group reductions.
+        // kptcomm groups same-kpt processes (size=1 when npkpt=nproc),
+        // kpt_bridge connects across kpt groups (size=npkpt) for Allreduce/Allgather.
         scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-                  halo, &vnl, bandcomm, kptcomm, spincomm, scf_params, Nspin, &kpoints);
+                  halo, &vnl, bandcomm, kpt_bridge, spin_bridge, scf_params,
+                  Nspin, Nspin_local, spin_start, &kpoints, kpt_start);
 
         // ===== Allocate wavefunctions =====
         sparc::Wavefunction wfn;
-        wfn.allocate(Nd_d, Nstates, Nspin, Nkpts, is_kpt);
+        wfn.allocate(Nd_d, Nstates, Nspin_local, Nkpts_local, is_kpt);
 
         // ===== Initialize density =====
         // Use atomic superposition if available
@@ -396,7 +423,7 @@ int main(int argc, char** argv) {
                                     elec.pseudocharge_ref().data(),
                                     scf.Vxc(),
                                     has_nlcc ? rho_core.data() : nullptr,
-                                    kpt_weights, bandcomm, kptcomm, spincomm, &kpoints);
+                                    kpt_weights, bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start);
 
             if (rank == 0) {
                 std::printf("\nLocal forces (Ha/Bohr):\n");
@@ -448,7 +475,7 @@ int main(int argc, char** argv) {
                                         config.xc,
                                         Nspin_calc,
                                         has_nlcc ? rho_core.data() : nullptr,
-                                        kpt_weights, bandcomm, kptcomm, spincomm, &kpoints);
+                                        kpt_weights, bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start);
 
             if (rank == 0) {
                 std::printf("\nStress tensor (GPa):\n");
