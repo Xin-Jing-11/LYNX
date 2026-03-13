@@ -19,6 +19,7 @@ public:
     // Nspin_global: global spin count (for correct spin_fac)
     // spin_start: global index of first local spin channel
     // spincomm: communicator for exchanging spin densities across processes
+    // band_start: global index of first local band (for band parallelism)
     void compute(const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights,
                  double dV,
@@ -27,7 +28,8 @@ public:
                  int Nspin_global = 0,
                  int spin_start = 0,
                  const MPIComm* spincomm = nullptr,
-                 int kpt_start = 0);
+                 int kpt_start = 0,
+                 int band_start = 0);
 
     // Total density (sum over spins)
     NDArray<double>& rho_total() { return rho_total_; }

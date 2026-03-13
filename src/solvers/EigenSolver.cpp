@@ -1,11 +1,17 @@
 #include "solvers/EigenSolver.hpp"
 #include "solvers/LinearSolver.hpp"
+#include "parallel/Parallelization.hpp"
 #include <cmath>
 #include <cstring>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
+#include <mpi.h>
+
+#ifdef USE_SCALAPACK
+#include "solvers/ScaLAPACK.hpp"
+#endif
 
 // LAPACK/BLAS declarations
 extern "C" {
@@ -46,15 +52,352 @@ extern "C" {
 
 namespace sparc {
 
+EigenSolver::~EigenSolver() {
+#ifdef USE_SCALAPACK
+    cleanup_blacs();
+#endif
+}
+
 void EigenSolver::setup(const Hamiltonian& H,
                          const HaloExchange& halo,
                          const Domain& domain,
-                         const MPIComm& bandcomm) {
+                         const MPIComm& bandcomm,
+                         int Nband_global) {
     H_ = &H;
     halo_ = &halo;
     domain_ = &domain;
     bandcomm_ = &bandcomm;
+
+    npband_ = bandcomm.is_null() ? 1 : bandcomm.size();
+    band_rank_ = bandcomm.is_null() ? 0 : bandcomm.rank();
+    Nband_global_ = (Nband_global > 0) ? Nband_global : 0;
+
+#ifdef USE_SCALAPACK
+    if (npband_ > 1 && Nband_global_ > 0) {
+        setup_blacs();
+    }
+#endif
 }
+
+#ifdef USE_SCALAPACK
+void EigenSolver::setup_blacs() {
+    if (blacs_setup_) return;
+    // Currently using Allgather + redundant serial LAPACK approach
+    // (no ScaLAPACK distributed matrix operations needed).
+    // BLACS context setup deferred until true pdgemm/pdsyev needed.
+    blacs_setup_ = true;
+}
+
+void EigenSolver::cleanup_blacs() {
+    blacs_setup_ = false;
+}
+
+void EigenSolver::orthogonalize_scalapack(double* X, int Nd_d, int Nband_loc, double dV) {
+    // Cholesky QR with ScaLAPACK:
+    // 1. S = X^T * X * dV (distributed: each proc has Nd_d x Nband_loc block)
+    //    Use local dgemm then Allreduce into distributed matrix
+    // 2. pdpotrf: Cholesky S = R^T * R
+    // 3. pdtrsm: X <- X * R^{-1}
+
+    int N = Nband_global_;
+
+    // Strategy: Allgather X columns to get full X, then compute S and factorize redundantly.
+    // This is communication-optimal for moderate N (typical DFT band counts).
+
+    // Allgather all band columns to get full X (Nd_d x Nband_global)
+    std::vector<double> X_full(Nd_d * N);
+    {
+        std::vector<int> recvcounts(npband_), displs(npband_);
+        for (int p = 0; p < npband_; ++p) {
+            int nb_p = Parallelization::block_size(N, npband_, p);
+            int bs_p = Parallelization::block_start(N, npband_, p);
+            recvcounts[p] = Nd_d * nb_p;
+            displs[p] = Nd_d * bs_p;
+        }
+        MPI_Allgatherv(X, Nd_d * Nband_loc, MPI_DOUBLE,
+                        X_full.data(), recvcounts.data(), displs.data(),
+                        MPI_DOUBLE, bandcomm_->comm());
+    }
+
+    // Compute full S = X_full^T * X_full * dV (N x N)
+    std::vector<double> S_full(N * N, 0.0);
+    {
+        char transT = 'T', transN = 'N';
+        double alpha = dV, beta = 0.0;
+        dgemm_(&transT, &transN, &N, &N, &Nd_d,
+               &alpha, X_full.data(), &Nd_d, X_full.data(), &Nd_d,
+               &beta, S_full.data(), &N);
+    }
+
+    // Cholesky on full S (all procs do the same — redundant but simple and correct)
+    {
+        char uplo = 'U';
+        int info;
+        dpotrf_(&uplo, &N, S_full.data(), &N, &info);
+        if (info != 0)
+            throw std::runtime_error("Cholesky factorization failed in band-parallel orthogonalize");
+    }
+
+    // X_full <- X_full * R^{-1}
+    {
+        char side = 'R', uplo = 'U', transN = 'N', diag = 'N';
+        double one = 1.0;
+        dtrsm_(&side, &uplo, &transN, &diag, &Nd_d, &N, &one,
+               S_full.data(), &N, X_full.data(), &Nd_d);
+    }
+
+    // Extract my local columns back
+    int band_start = Parallelization::block_start(N, npband_, band_rank_);
+    std::memcpy(X, X_full.data() + band_start * Nd_d,
+                Nd_d * Nband_loc * sizeof(double));
+}
+
+void EigenSolver::project_hamiltonian_scalapack(const double* X, const double* Veff,
+                                                 double* eigvals, int Nd_d, int Nband_loc, double dV) {
+    // 1. HX = H * X (each proc applies H to its local bands)
+    std::vector<double> HX(Nd_d * Nband_loc);
+    int nd_ex = halo_->nd_ex();
+    std::vector<double> x_ex(nd_ex * Nband_loc);
+    halo_->execute(X, x_ex.data(), Nband_loc);
+    H_->apply(X, Veff, HX.data(), Nband_loc);
+
+    int N = Nband_global_;
+
+    // 2. Allgather X and HX to get full matrices
+    std::vector<double> X_full(Nd_d * N), HX_full(Nd_d * N);
+    {
+        std::vector<int> recvcounts(npband_), displs(npband_);
+        for (int p = 0; p < npband_; ++p) {
+            int nb_p = Parallelization::block_size(N, npband_, p);
+            int bs_p = Parallelization::block_start(N, npband_, p);
+            recvcounts[p] = Nd_d * nb_p;
+            displs[p] = Nd_d * bs_p;
+        }
+        MPI_Allgatherv(X, Nd_d * Nband_loc, MPI_DOUBLE,
+                        X_full.data(), recvcounts.data(), displs.data(),
+                        MPI_DOUBLE, bandcomm_->comm());
+        MPI_Allgatherv(HX.data(), Nd_d * Nband_loc, MPI_DOUBLE,
+                        HX_full.data(), recvcounts.data(), displs.data(),
+                        MPI_DOUBLE, bandcomm_->comm());
+    }
+
+    // 3. Hs = X^T * HX * dV (all procs compute redundantly)
+    std::vector<double> Hs(N * N, 0.0);
+    {
+        char transT = 'T', transN = 'N';
+        double alpha = dV, beta = 0.0;
+        dgemm_(&transT, &transN, &N, &N, &Nd_d,
+               &alpha, X_full.data(), &Nd_d, HX_full.data(), &Nd_d,
+               &beta, Hs.data(), &N);
+    }
+
+    // 4. Symmetrize
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            double avg = 0.5 * (Hs[i + j * N] + Hs[j + i * N]);
+            Hs[i + j * N] = avg;
+            Hs[j + i * N] = avg;
+        }
+    }
+
+    // 5. Diagonalize (redundant on all procs — use ScaLAPACK for very large N)
+    {
+        char jobz = 'V', uplo = 'U';
+        int lwork = -1, info;
+        double work_query;
+        dsyev_(&jobz, &uplo, &N, Hs.data(), &N, eigvals, &work_query, &lwork, &info);
+        lwork = static_cast<int>(work_query);
+        std::vector<double> work(lwork);
+        dsyev_(&jobz, &uplo, &N, Hs.data(), &N, eigvals, work.data(), &lwork, &info);
+        if (info != 0)
+            throw std::runtime_error("dsyev failed in band-parallel project_hamiltonian");
+    }
+
+    // Store eigenvectors for rotation step
+    Q_dist_ = std::move(Hs);
+}
+
+void EigenSolver::rotate_orbitals_scalapack(double* X, int Nd_d, int Nband_loc) {
+    int N = Nband_global_;
+
+    // Allgather X columns
+    std::vector<double> X_full(Nd_d * N);
+    {
+        std::vector<int> recvcounts(npband_), displs(npband_);
+        for (int p = 0; p < npband_; ++p) {
+            int nb_p = Parallelization::block_size(N, npband_, p);
+            int bs_p = Parallelization::block_start(N, npband_, p);
+            recvcounts[p] = Nd_d * nb_p;
+            displs[p] = Nd_d * bs_p;
+        }
+        MPI_Allgatherv(X, Nd_d * Nband_loc, MPI_DOUBLE,
+                        X_full.data(), recvcounts.data(), displs.data(),
+                        MPI_DOUBLE, bandcomm_->comm());
+    }
+
+    // X_new = X_full * Q (full rotation, then extract local columns)
+    // Q_dist_ has the eigenvectors from diag step (N x N column-major)
+    std::vector<double> X_new(Nd_d * N);
+    {
+        char transN = 'N';
+        double one = 1.0, zero = 0.0;
+        dgemm_(&transN, &transN, &Nd_d, &N, &N,
+               &one, X_full.data(), &Nd_d, Q_dist_.data(), &N,
+               &zero, X_new.data(), &Nd_d);
+    }
+
+    // Extract my local columns
+    int band_start = Parallelization::block_start(N, npband_, band_rank_);
+    std::memcpy(X, X_new.data() + band_start * Nd_d,
+                Nd_d * Nband_loc * sizeof(double));
+}
+
+void EigenSolver::orthogonalize_kpt_scalapack(Complex* X, int Nd_d, int Nband_loc, double dV) {
+    int N = Nband_global_;
+
+    // Allgather complex X columns
+    std::vector<Complex> X_full(Nd_d * N);
+    {
+        std::vector<int> recvcounts(npband_), displs(npband_);
+        for (int p = 0; p < npband_; ++p) {
+            int nb_p = Parallelization::block_size(N, npband_, p);
+            int bs_p = Parallelization::block_start(N, npband_, p);
+            recvcounts[p] = Nd_d * nb_p;
+            displs[p] = Nd_d * bs_p;
+        }
+        MPI_Allgatherv(X, Nd_d * Nband_loc, MPI_C_DOUBLE_COMPLEX,
+                        X_full.data(), recvcounts.data(), displs.data(),
+                        MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
+    }
+
+    // S = X^H * X * dV
+    std::vector<Complex> S(N * N, Complex(0.0));
+    {
+        char transC = 'C', transN = 'N';
+        Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+        zgemm_(&transC, &transN, &N, &N, &Nd_d,
+               &alpha_z, X_full.data(), &Nd_d, X_full.data(), &Nd_d,
+               &beta_z, S.data(), &N);
+    }
+
+    // Cholesky
+    {
+        char uplo = 'U';
+        int info;
+        zpotrf_(&uplo, &N, S.data(), &N, &info);
+        if (info != 0)
+            throw std::runtime_error("zpotrf failed in band-parallel orthogonalize_kpt");
+    }
+
+    // X <- X * R^{-1}
+    {
+        char side = 'R', uplo = 'U', transN = 'N', diag = 'N';
+        Complex one_z(1.0, 0.0);
+        ztrsm_(&side, &uplo, &transN, &diag, &Nd_d, &N, &one_z,
+               S.data(), &N, X_full.data(), &Nd_d);
+    }
+
+    // Extract local columns
+    int band_start = Parallelization::block_start(N, npband_, band_rank_);
+    std::memcpy(X, X_full.data() + band_start * Nd_d,
+                Nd_d * Nband_loc * sizeof(Complex));
+}
+
+void EigenSolver::project_hamiltonian_kpt_scalapack(const Complex* X, const double* Veff,
+                                                     double* eigvals, int Nd_d, int Nband_loc, double dV,
+                                                     const Vec3& kpt_cart, const Vec3& cell_lengths) {
+    int N = Nband_global_;
+
+    // Apply H to local bands
+    std::vector<Complex> HX(Nd_d * Nband_loc);
+    H_->apply_kpt(X, Veff, HX.data(), Nband_loc, kpt_cart, cell_lengths);
+
+    // Allgather X and HX
+    std::vector<Complex> X_full(Nd_d * N), HX_full(Nd_d * N);
+    {
+        std::vector<int> recvcounts(npband_), displs(npband_);
+        for (int p = 0; p < npband_; ++p) {
+            int nb_p = Parallelization::block_size(N, npband_, p);
+            int bs_p = Parallelization::block_start(N, npband_, p);
+            recvcounts[p] = Nd_d * nb_p;
+            displs[p] = Nd_d * bs_p;
+        }
+        MPI_Allgatherv(X, Nd_d * Nband_loc, MPI_C_DOUBLE_COMPLEX,
+                        X_full.data(), recvcounts.data(), displs.data(),
+                        MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
+        MPI_Allgatherv(HX.data(), Nd_d * Nband_loc, MPI_C_DOUBLE_COMPLEX,
+                        HX_full.data(), recvcounts.data(), displs.data(),
+                        MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
+    }
+
+    // Hs = X^H * HX * dV
+    std::vector<Complex> Hs(N * N, Complex(0.0));
+    {
+        char transC = 'C', transN = 'N';
+        Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+        zgemm_(&transC, &transN, &N, &N, &Nd_d,
+               &alpha_z, X_full.data(), &Nd_d, HX_full.data(), &Nd_d,
+               &beta_z, Hs.data(), &N);
+    }
+
+    // Hermitianize
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            Complex avg = 0.5 * (Hs[i + j * N] + std::conj(Hs[j + i * N]));
+            Hs[i + j * N] = avg;
+            Hs[j + i * N] = std::conj(avg);
+        }
+        Hs[i + i * N] = Complex(Hs[i + i * N].real(), 0.0);
+    }
+
+    // Diagonalize
+    {
+        char jobz = 'V', uplo = 'U';
+        int lwork = -1, info;
+        Complex work_query;
+        std::vector<double> rwork(std::max(1, 3 * N - 2));
+        zheev_(&jobz, &uplo, &N, Hs.data(), &N, eigvals, &work_query, &lwork, rwork.data(), &info);
+        lwork = static_cast<int>(work_query.real());
+        std::vector<Complex> work(lwork);
+        zheev_(&jobz, &uplo, &N, Hs.data(), &N, eigvals, work.data(), &lwork, rwork.data(), &info);
+        if (info != 0)
+            throw std::runtime_error("zheev failed in band-parallel project_hamiltonian_kpt");
+    }
+
+    Q_dist_z_ = std::move(Hs);
+}
+
+void EigenSolver::rotate_orbitals_kpt_scalapack(Complex* X, int Nd_d, int Nband_loc) {
+    int N = Nband_global_;
+
+    std::vector<Complex> X_full(Nd_d * N);
+    {
+        std::vector<int> recvcounts(npband_), displs(npband_);
+        for (int p = 0; p < npband_; ++p) {
+            int nb_p = Parallelization::block_size(N, npband_, p);
+            int bs_p = Parallelization::block_start(N, npband_, p);
+            recvcounts[p] = Nd_d * nb_p;
+            displs[p] = Nd_d * bs_p;
+        }
+        MPI_Allgatherv(X, Nd_d * Nband_loc, MPI_C_DOUBLE_COMPLEX,
+                        X_full.data(), recvcounts.data(), displs.data(),
+                        MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
+    }
+
+    std::vector<Complex> X_new(Nd_d * N);
+    {
+        char transN = 'N';
+        Complex one_z(1.0, 0.0), zero_z(0.0, 0.0);
+        zgemm_(&transN, &transN, &Nd_d, &N, &N,
+               &one_z, X_full.data(), &Nd_d, Q_dist_z_.data(), &N,
+               &zero_z, X_new.data(), &Nd_d);
+    }
+
+    int band_start = Parallelization::block_start(N, npband_, band_rank_);
+    std::memcpy(X, X_new.data() + band_start * Nd_d,
+                Nd_d * Nband_loc * sizeof(Complex));
+}
+#endif // USE_SCALAPACK
 
 void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Veff,
                                     int Nd_d, int Nband,
@@ -306,46 +649,73 @@ void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
     if (ld == 0) ld = Nd_d;
     double dV = domain_->global_grid().dV();
 
+    // Nband here is local band count. For serial case, Nband = Nband_global.
+    int Nband_loc = Nband;
+
     // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
     std::vector<double> psi_packed;
     double* psi_work = psi;
     if (ld != Nd_d) {
-        psi_packed.resize(Nd_d * Nband);
-        for (int j = 0; j < Nband; ++j)
+        psi_packed.resize(Nd_d * Nband_loc);
+        for (int j = 0; j < Nband_loc; ++j)
             std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(double));
         psi_work = psi_packed.data();
     }
 
-    // Step 1: Chebyshev filter
-    std::vector<double> Y(Nd_d * Nband);
-    chebyshev_filter(psi_work, Y.data(), Veff, Nd_d, Nband,
+    // Step 1: Chebyshev filter (embarrassingly parallel — each proc filters its local bands)
+    std::vector<double> Y(Nd_d * Nband_loc);
+    chebyshev_filter(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
                      lambda_cutoff, eigval_min, eigval_max, cheb_degree);
 
-    // Step 2: Orthogonalize filtered vectors
-    orthogonalize(Y.data(), Nd_d, Nband, dV);
+#ifdef USE_SCALAPACK
+    if (npband_ > 1) {
+        // Band-parallel path: distributed subspace operations
+        // Step 2: Orthogonalize (Allgather + Cholesky QR)
+        orthogonalize_scalapack(Y.data(), Nd_d, Nband_loc, dV);
 
-    // Step 3: Project Hamiltonian onto subspace
-    std::vector<double> Hs(Nband * Nband);
-    project_hamiltonian(Y.data(), Veff, Hs.data(), Nd_d, Nband, dV);
+        // Step 3+4: Project Hamiltonian + diagonalize (returns ALL eigenvalues)
+        int N = Nband_global_;
+        std::vector<double> eigs_all(N);
+        project_hamiltonian_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV);
 
-    // Step 4: Diagonalize subspace Hamiltonian
-    std::vector<double> eigs(Nband);
-    diag_subspace(Hs.data(), eigs.data(), Nband);
+        // Step 5: Rotate orbitals (Allgather + dgemm + extract local)
+        rotate_orbitals_scalapack(Y.data(), Nd_d, Nband_loc);
 
-    // Step 5: Rotate orbitals
-    rotate_orbitals(Y.data(), Hs.data(), Nd_d, Nband);
+        // Copy ALL eigenvalues (caller needs them all for Fermi level)
+        // eigvals buffer must be large enough for Nband_global
+        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+    } else
+#endif
+    {
+        // Serial path: standard LAPACK
+        // Step 2: Orthogonalize filtered vectors
+        orthogonalize(Y.data(), Nd_d, Nband_loc, dV);
+
+        // Step 3: Project Hamiltonian onto subspace
+        std::vector<double> Hs(Nband_loc * Nband_loc);
+        project_hamiltonian(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV);
+
+        // Step 4: Diagonalize subspace Hamiltonian
+        std::vector<double> eigs(Nband_loc);
+        diag_subspace(Hs.data(), eigs.data(), Nband_loc);
+
+        // Step 5: Rotate orbitals
+        rotate_orbitals(Y.data(), Hs.data(), Nd_d, Nband_loc);
+
+        std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
+    }
 
     // Unpack from packed layout (stride=Nd_d) back to NDArray layout (stride=ld)
     if (ld != Nd_d) {
-        for (int j = 0; j < Nband; ++j)
+        for (int j = 0; j < Nband_loc; ++j)
             std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(double));
     } else {
-        std::memcpy(psi, Y.data(), Nd_d * Nband * sizeof(double));
+        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(double));
     }
-    std::memcpy(eigvals, eigs.data(), Nband * sizeof(double));
 
-    // Update lambda_cutoff for next call
-    lambda_cutoff_ = eigvals[Nband - 1] + 0.1;
+    // Update lambda_cutoff: use last global eigenvalue
+    int N_eig = (npband_ > 1) ? Nband_global_ : Nband_loc;
+    lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
 }
 
 // ===========================================================================
@@ -483,48 +853,65 @@ void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
                              int cheb_degree, int ld) {
     if (ld == 0) ld = Nd_d;
     double dV = domain_->global_grid().dV();
+    int Nband_loc = Nband;
 
     // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
     std::vector<Complex> psi_packed;
     Complex* psi_work = psi;
     if (ld != Nd_d) {
-        psi_packed.resize(Nd_d * Nband);
-        for (int j = 0; j < Nband; ++j)
+        psi_packed.resize(Nd_d * Nband_loc);
+        for (int j = 0; j < Nband_loc; ++j)
             std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(Complex));
         psi_work = psi_packed.data();
     }
 
-    // Step 1: Chebyshev filter
-    std::vector<Complex> Y(Nd_d * Nband);
-    chebyshev_filter_kpt(psi_work, Y.data(), Veff, Nd_d, Nband,
+    // Step 1: Chebyshev filter (each proc filters its local bands)
+    std::vector<Complex> Y(Nd_d * Nband_loc);
+    chebyshev_filter_kpt(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
                          lambda_cutoff, eigval_min, eigval_max,
                          kpt_cart, cell_lengths, cheb_degree);
 
-    // Step 2: Orthogonalize
-    orthogonalize_kpt(Y.data(), Nd_d, Nband, dV);
+#ifdef USE_SCALAPACK
+    if (npband_ > 1) {
+        // Band-parallel path
+        orthogonalize_kpt_scalapack(Y.data(), Nd_d, Nband_loc, dV);
 
-    // Step 3: Project Hamiltonian
-    std::vector<Complex> Hs(Nband * Nband);
-    project_hamiltonian_kpt(Y.data(), Veff, Hs.data(), Nd_d, Nband, dV,
-                            kpt_cart, cell_lengths);
+        int N = Nband_global_;
+        std::vector<double> eigs_all(N);
+        project_hamiltonian_kpt_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV,
+                                          kpt_cart, cell_lengths);
 
-    // Step 4: Diagonalize
-    std::vector<double> eigs(Nband);
-    diag_subspace_kpt(Hs.data(), eigs.data(), Nband);
+        rotate_orbitals_kpt_scalapack(Y.data(), Nd_d, Nband_loc);
 
-    // Step 5: Rotate
-    rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d, Nband);
+        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+    } else
+#endif
+    {
+        // Serial path
+        orthogonalize_kpt(Y.data(), Nd_d, Nband_loc, dV);
 
-    // Unpack from packed layout (stride=Nd_d) back to NDArray layout (stride=ld)
+        std::vector<Complex> Hs(Nband_loc * Nband_loc);
+        project_hamiltonian_kpt(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV,
+                                kpt_cart, cell_lengths);
+
+        std::vector<double> eigs(Nband_loc);
+        diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
+
+        rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d, Nband_loc);
+
+        std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
+    }
+
+    // Unpack
     if (ld != Nd_d) {
-        for (int j = 0; j < Nband; ++j)
+        for (int j = 0; j < Nband_loc; ++j)
             std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(Complex));
     } else {
-        std::memcpy(psi, Y.data(), Nd_d * Nband * sizeof(Complex));
+        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(Complex));
     }
-    std::memcpy(eigvals, eigs.data(), Nband * sizeof(double));
 
-    lambda_cutoff_ = eigvals[Nband - 1] + 0.1;
+    int N_eig = (npband_ > 1) ? Nband_global_ : Nband_loc;
+    lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
 }
 
 void EigenSolver::lanczos_bounds_kpt(const double* Veff, int Nd_d,

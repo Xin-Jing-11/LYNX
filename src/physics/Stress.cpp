@@ -70,7 +70,8 @@ std::array<double, 6> Stress::compute(
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
     const KPoints* kpoints,
-    int kpt_start) {
+    int kpt_start,
+    int band_start) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -101,7 +102,7 @@ std::array<double, 6> Stress::compute(
 
     // 3. Nonlocal + kinetic stress
     compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start);
+                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
 
     // Assemble total
     for (int i = 0; i < 6; ++i) {
@@ -696,13 +697,14 @@ void Stress::compute_nonlocal_kinetic(
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
     const KPoints* kpoints,
-    int kpt_start) {
+    int kpt_start,
+    int band_start) {
 
     using Complex = std::complex<double>;
 
     int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
-    int Nband = wfn.Nband();
+    int Nband = wfn.Nband();  // local band count
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
     int ntypes = crystal.n_types();
@@ -776,7 +778,7 @@ void Stress::compute_nonlocal_kinetic(
                 Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
 
                 for (int n = 0; n < Nband; ++n) {
-                    double g_n = occ_sk(n);
+                    double g_n = occ_sk(band_start + n);
                     const Complex* psi_n = psi_sk.col(n);
 
                     // Compute complex ∇ψ in all 3 directions, transform to Cartesian
@@ -916,7 +918,7 @@ void Stress::compute_nonlocal_kinetic(
                 const auto& psi_sk = wfn.psi(s, k);
 
                 for (int n = 0; n < Nband; ++n) {
-                    double g_n = occ_sk(n);
+                    double g_n = occ_sk(band_start + n);
                     const double* psi_n = psi_sk.col(n);
 
                     std::vector<double> dpsi_cart[3];

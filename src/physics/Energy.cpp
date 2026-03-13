@@ -12,13 +12,14 @@ double Energy::band_energy(const Wavefunction& wfn,
                              int kpt_start) {
     double Eband = 0.0;
     double spin_fac = (Nspin == 1) ? 2.0 : 1.0;
+    int Nband = wfn.Nband_global();  // use global band count (eigenvalue/occupation size)
 
     for (int s = 0; s < wfn.Nspin(); ++s) {
         for (int k = 0; k < wfn.Nkpts(); ++k) {
             const auto& eig = wfn.eigenvalues(s, k);
             const auto& occ = wfn.occupations(s, k);
             double wk = kpt_weights[kpt_start + k] * spin_fac;
-            for (int n = 0; n < wfn.Nband(); ++n) {
+            for (int n = 0; n < Nband; ++n) {
                 Eband += wk * occ(n) * eig(n);
             }
         }
@@ -73,7 +74,8 @@ EnergyComponents Energy::compute_all(
     int kpt_start,
     const MPIComm* kptcomm,
     const MPIComm* spincomm,
-    int Nspin_global) {
+    int Nspin_global,
+    const MPIComm* bandcomm) {
 
     EnergyComponents E;
     E.Eself = Eself;
@@ -135,7 +137,12 @@ EnergyComponents Energy::compute_all(
     // Entropy (local contribution)
     E.Entropy = Occupation::entropy(wfn, beta, smearing, kpt_weights, Ef, kpt_start, Nspin);
 
-    // Allreduce Eband and Entropy across kptcomm and spincomm
+    // Allreduce Eband and Entropy across bandcomm, kptcomm, and spincomm
+    // Note: Eband and Entropy are computed from eigenvalues/occupations which are global
+    // (all procs have all eigenvalues), but band_energy iterates over them redundantly
+    // on each band proc. So with band parallelism, do NOT allreduce over bandcomm
+    // since each proc already computed the full Eband from global eigenvalues.
+    // The bandcomm allreduce is only needed for density, forces, stress.
     if (kptcomm && !kptcomm->is_null() && kptcomm->size() > 1) {
         MPI_Allreduce(MPI_IN_PLACE, &E.Eband, 1, MPI_DOUBLE, MPI_SUM, kptcomm->comm());
         MPI_Allreduce(MPI_IN_PLACE, &E.Entropy, 1, MPI_DOUBLE, MPI_SUM, kptcomm->comm());

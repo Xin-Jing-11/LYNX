@@ -36,7 +36,8 @@ std::vector<double> Forces::compute(
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
     const KPoints* kpoints,
-    int kpt_start) {
+    int kpt_start,
+    int band_start) {
 
     int n_atom = crystal.n_atom_total();
     f_local_.assign(3 * n_atom, 0.0);
@@ -50,7 +51,7 @@ std::vector<double> Forces::compute(
 
     // Nonlocal force from KB projectors
     compute_nonlocal(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start);
+                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
 
     // Sum local + nonlocal
     for (int i = 0; i < 3 * n_atom; ++i) {
@@ -368,12 +369,13 @@ void Forces::compute_nonlocal(
     const MPIComm& kptcomm,
     const MPIComm& spincomm,
     const KPoints* kpoints,
-    int kpt_start) {
+    int kpt_start,
+    int band_start) {
 
     int n_atom = crystal.n_atom_total();
     int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
-    int Nband = wfn.Nband();
+    int Nband = wfn.Nband();  // local band count
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
     int ntypes = crystal.n_types();
@@ -441,7 +443,7 @@ void Forces::compute_nonlocal(
                 Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
 
                 for (int n = 0; n < Nband; ++n) {
-                    double g_n = occ_sk(n);
+                    double g_n = occ_sk(band_start + n);
                     if (std::abs(g_n) < 1e-15) continue;
 
                     const Complex* psi_n = psi_sk.col(n);
@@ -531,7 +533,7 @@ void Forces::compute_nonlocal(
                 const NDArray<double>& psi_sk = wfn.psi(s, k);
 
                 for (int n = 0; n < Nband; ++n) {
-                    double g_n = occ_sk(n);
+                    double g_n = occ_sk(band_start + n);
                     if (std::abs(g_n) < 1e-15) continue;
 
                     const double* psi_n = psi_sk.col(n);

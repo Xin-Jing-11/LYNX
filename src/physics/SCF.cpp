@@ -25,7 +25,9 @@ void SCF::setup(const FDGrid& grid,
                  int Nspin_local,
                  int spin_start,
                  const KPoints* kpoints,
-                 int kpt_start) {
+                 int kpt_start,
+                 int Nband_global,
+                 int band_start) {
     grid_ = &grid;
     domain_ = &domain;
     stencil_ = &stencil;
@@ -44,6 +46,8 @@ void SCF::setup(const FDGrid& grid,
     kpoints_ = kpoints;
     is_kpt_ = kpoints && !kpoints->is_gamma_only();
     kpt_start_ = kpt_start;
+    Nband_global_ = Nband_global;
+    band_start_ = band_start;
 }
 
 void SCF::init_density(int Nd_d, int Nelectron) {
@@ -205,9 +209,10 @@ double SCF::run(Wavefunction& wfn,
                  XCType xc_type,
                  const double* rho_core) {
     int Nd_d = domain_->Nd_d();
-    int Nband = wfn.Nband();
-    int Nspin_local = wfn.Nspin();   // spins on this process
-    int Nspin = Nspin_global_;       // global spin count (1 or 2)
+    int Nband_loc = wfn.Nband();         // local bands on this process (psi columns)
+    int Nband = wfn.Nband_global();      // global band count (eigenvalue/occupation size)
+    int Nspin_local = wfn.Nspin();       // spins on this process
+    int Nspin = Nspin_global_;           // global spin count (1 or 2)
     int Nkpts = wfn.Nkpts();
     int rank_world = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
@@ -284,9 +289,9 @@ double SCF::run(Wavefunction& wfn,
                 params_.mixing_history, params_.mixing_param,
                 laplacian_, halo_, grid_);
 
-    // Setup eigensolver
+    // Setup eigensolver (pass Nband_global for band-parallel ScaLAPACK path)
     EigenSolver eigsolver;
-    eigsolver.setup(*hamiltonian_, *halo_, *domain_, *bandcomm_);
+    eigsolver.setup(*hamiltonian_, *halo_, *domain_, *bandcomm_, Nband);
 
     // Estimate spectral bounds — per-spin (local spin channels only)
     std::vector<double> eigval_min(Nspin_local, 0.0), eigval_max(Nspin_local, 0.0);
@@ -352,7 +357,8 @@ double SCF::run(Wavefunction& wfn,
     // For gamma-point, each (spin,kpt) pair gets same seed (reference fills all at once)
     // For serial: seed = 0 * 100 + 1 = 1
     int spincomm_rank = spincomm_->is_null() ? 0 : spincomm_->rank();
-    unsigned rand_seed = spincomm_rank * 100 + 1;
+    int bandcomm_rank = bandcomm_->is_null() ? 0 : bandcomm_->rank();
+    unsigned rand_seed = spincomm_rank * 100 + bandcomm_rank * 10 + 1;
     for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
             if (is_kpt_) {
@@ -400,14 +406,16 @@ double SCF::run(Wavefunction& wfn,
                             const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
                         }
 
-                        eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband,
+                        // solve_kpt takes Nband_loc (local columns) but writes
+                        // Nband eigenvalues (all global eigenvalues)
+                        eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband_loc,
                                             lambda_cutoff, eigval_min[s], eigval_max[s],
                                             kpt, cell_lengths,
                                             params_.cheb_degree,
                                             wfn.psi_kpt(s, k).ld());
                     } else {
                         double* psi = wfn.psi(s, k).data();
-                        eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband,
+                        eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
                                         lambda_cutoff, eigval_min[s], eigval_max[s],
                                         params_.cheb_degree,
                                         wfn.psi(s, k).ld());
@@ -460,7 +468,7 @@ double SCF::run(Wavefunction& wfn,
         ElectronDensity rho_new;
         rho_new.allocate(Nd_d, Nspin);
         rho_new.compute(wfn, kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
-                        Nspin, spin_start_, spincomm_, kpt_start_);
+                        Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
 
         // Debug: dump new density for first 3 iterations
         if (rank_world == 0 && scf_iter < 3) {
@@ -520,6 +528,7 @@ double SCF::run(Wavefunction& wfn,
             std::printf("\nFinal eigenvalues (Ha) and occupations:\n");
             for (int s = 0; s < Nspin_local; ++s) {
                 if (Nspin > 1) std::printf("  Spin %d:\n", spin_start_ + s);
+                // Print all global eigenvalues (Nband_global)
                 for (int n = 0; n < Nband; ++n) {
                     std::printf("  %3d  %20.12e  %16.12f\n",
                                 n+1, wfn.eigenvalues(s, 0)(n), wfn.occupations(s, 0)(n));

@@ -26,8 +26,10 @@ void ElectronDensity::compute(const Wavefunction& wfn,
                                int Nspin_global,
                                int spin_start,
                                const MPIComm* spincomm,
-                               int kpt_start) {
-    int Nband = wfn.Nband();
+                               int kpt_start,
+                               int band_start) {
+    int Nband_loc = wfn.Nband();           // local bands (psi columns)
+    int Nband_glob = wfn.Nband_global();   // global bands (occupation array size)
     int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
 
@@ -43,7 +45,9 @@ void ElectronDensity::compute(const Wavefunction& wfn,
     // Spin multiplier: 2 for non-spin-polarized, 1 for collinear
     double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
 
-    // Compute density for LOCAL spin channels only
+    // Compute density for LOCAL spin channels only.
+    // Iterate over Nband_loc (local psi columns). Occupation is indexed by
+    // global band index: occ(band_start + n) for local band n.
     for (int s = 0; s < Nspin_local; ++s) {
         int s_glob = spin_start + s;  // global spin index
         for (int k = 0; k < Nkpts; ++k) {
@@ -52,8 +56,8 @@ void ElectronDensity::compute(const Wavefunction& wfn,
 
             if (wfn.is_complex()) {
                 const auto& psi_c = wfn.psi_kpt(s, k);
-                for (int n = 0; n < Nband; ++n) {
-                    double fn = occ(n);
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);  // global band index
                     if (fn < 1e-16) continue;
 
                     const Complex* col = psi_c.col(n);
@@ -66,8 +70,8 @@ void ElectronDensity::compute(const Wavefunction& wfn,
                 }
             } else {
                 const auto& psi = wfn.psi(s, k);
-                for (int n = 0; n < Nband; ++n) {
-                    double fn = occ(n);
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);  // global band index
                     if (fn < 1e-16) continue;
 
                     const double* col = psi.col(n);

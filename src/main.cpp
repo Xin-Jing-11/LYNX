@@ -112,6 +112,13 @@ int main(int argc, char** argv) {
             config.parallel.npkpt = std::min(nproc_after_spin, Nkpts);
         }
 
+        // Auto-determine band parallelization if not set
+        // Use remaining procs (after spin and kpt) for bands
+        int nproc_after_kpt = nproc_after_spin / std::max(1, config.parallel.npkpt);
+        if (config.parallel.npband <= 1 && nproc_after_kpt > 1) {
+            config.parallel.npband = nproc_after_kpt;
+        }
+
         sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
 
@@ -125,6 +132,8 @@ int main(int argc, char** argv) {
         int Nspin_local = parallel.Nspin_local();
         int kpt_start = parallel.kpt_start();
         int spin_start = parallel.spin_start();
+        int Nband_local = parallel.Nband_local();
+        int band_start = parallel.band_start();
 
         if (rank == 0) {
             auto& v = domain.vertices();
@@ -132,8 +141,8 @@ int main(int argc, char** argv) {
                         nproc, v.xs, v.xe, v.ys, v.ye, v.zs, v.ze, domain.Nd_d());
             std::printf("  npspin=%d, npkpt=%d, npband=%d\n",
                         config.parallel.npspin, config.parallel.npkpt, config.parallel.npband);
-            std::printf("  This rank: spin_start=%d Nspin_local=%d kpt_start=%d Nkpts_local=%d\n",
-                        spin_start, Nspin_local, kpt_start, Nkpts_local);
+            std::printf("  This rank: spin_start=%d Nspin_local=%d kpt_start=%d Nkpts_local=%d band_start=%d Nband_local=%d\n",
+                        spin_start, Nspin_local, kpt_start, Nkpts_local, band_start, Nband_local);
         }
 
         // ===== Load pseudopotentials and create Crystal =====
@@ -284,16 +293,24 @@ int main(int argc, char** argv) {
         scf_params.rho_trigger = config.rho_trigger;
 
         sparc::SCF scf;
-        // Pass kpt_bridge/spin_bridge (not kptcomm/spincomm) for cross-group reductions.
-        // kptcomm groups same-kpt processes (size=1 when npkpt=nproc),
-        // kpt_bridge connects across kpt groups (size=npkpt) for Allreduce/Allgather.
+        // For band parallelism (npband > 1):
+        //   bandcomm groups processes with the same band_index (size 1 without domain decomp)
+        //   kptcomm groups processes handling the same kpt (size = npband)
+        //   We pass kptcomm as the "bandcomm" to SCF, so that Allreduces over bands
+        //   happen across the npband processes sharing the same (spin, kpt).
+        //   kpt_bridge connects across different k-points for cross-kpt reductions.
+        // For serial (npband=1): bandcomm is size 1, kpt_bridge for cross-kpt.
+        const auto& scf_bandcomm = (config.parallel.npband > 1) ? kptcomm : bandcomm;
         scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-                  halo, &vnl, bandcomm, kpt_bridge, spin_bridge, scf_params,
-                  Nspin, Nspin_local, spin_start, &kpoints, kpt_start);
+                  halo, &vnl, scf_bandcomm, kpt_bridge, spin_bridge, scf_params,
+                  Nspin, Nspin_local, spin_start, &kpoints, kpt_start,
+                  Nstates, band_start);
 
         // ===== Allocate wavefunctions =====
+        // For band parallelism: psi has Nband_local columns, but eigenvalues/occupations
+        // have Nstates (Nband_global) entries.
         sparc::Wavefunction wfn;
-        wfn.allocate(Nd_d, Nstates, Nspin_local, Nkpts_local, is_kpt);
+        wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local, is_kpt);
 
         // ===== Initialize density =====
         // Use atomic superposition if available
@@ -423,7 +440,7 @@ int main(int argc, char** argv) {
                                     elec.pseudocharge_ref().data(),
                                     scf.Vxc(),
                                     has_nlcc ? rho_core.data() : nullptr,
-                                    kpt_weights, bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start);
+                                    kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start, band_start);
 
             if (rank == 0) {
                 std::printf("\nLocal forces (Ha/Bohr):\n");
@@ -475,7 +492,7 @@ int main(int argc, char** argv) {
                                         config.xc,
                                         Nspin_calc,
                                         has_nlcc ? rho_core.data() : nullptr,
-                                        kpt_weights, bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start);
+                                        kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start, band_start);
 
             if (rank == 0) {
                 std::printf("\nStress tensor (GPa):\n");

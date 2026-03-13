@@ -48,6 +48,7 @@ public:
 
     // Compute all energy components
     // Nspin_global: global spin count (for correct spin_fac and E2)
+    // bandcomm: for band-parallel allreduce of Eband (optional, nullptr for serial)
     static EnergyComponents compute_all(
         const Wavefunction& wfn,
         const ElectronDensity& density,
@@ -67,7 +68,8 @@ public:
         int kpt_start = 0,
         const MPIComm* kptcomm = nullptr,
         const MPIComm* spincomm = nullptr,
-        int Nspin_global = 0);
+        int Nspin_global = 0,
+        const MPIComm* bandcomm = nullptr);
 };
 
 } // namespace sparc

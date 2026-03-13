@@ -14,16 +14,25 @@ using Complex = std::complex<double>;
 
 // Chebyshev-filtered subspace iteration eigensolver.
 // Supports both real (Gamma-point) and complex (k-point) wavefunctions.
+// When bandcomm has size > 1 and ScaLAPACK is available, uses distributed
+// subspace operations for band parallelism.
 class EigenSolver {
 public:
     EigenSolver() = default;
+    ~EigenSolver();
 
+    // Setup with Nband_global for band-parallel mode.
+    // bandcomm groups processes that share bands for the same (spin,kpt).
+    // Nband_global: total number of bands across all band-parallel processes.
     void setup(const Hamiltonian& H,
                const HaloExchange& halo,
                const Domain& domain,
-               const MPIComm& bandcomm);
+               const MPIComm& bandcomm,
+               int Nband_global = 0);
 
     // --- Real (Gamma-point) interface ---
+    // Nband here is the LOCAL band count (Nband_local).
+    // In band-parallel mode, each process holds Nband_local columns of psi.
 
     void solve(double* psi, double* eigvals, const double* Veff,
                int Nd_d, int Nband,
@@ -50,6 +59,9 @@ public:
     double lambda_cutoff() const { return lambda_cutoff_; }
     void set_lambda_cutoff(double lc) { lambda_cutoff_ = lc; }
 
+    int Nband_global() const { return Nband_global_; }
+    bool is_band_parallel() const { return npband_ > 1; }
+
 private:
     const Hamiltonian* H_ = nullptr;
     const HaloExchange* halo_ = nullptr;
@@ -57,7 +69,46 @@ private:
     const MPIComm* bandcomm_ = nullptr;
     double lambda_cutoff_ = 0.0;
 
-    // --- Real private methods ---
+    // Band parallelism state
+    int Nband_global_ = 0;   // total bands across all band procs
+    int npband_ = 1;         // number of band-parallel processes
+    int band_rank_ = 0;      // rank within bandcomm
+
+#ifdef USE_SCALAPACK
+    // BLACS context for distributed subspace matrices
+    int blacs_ctxt_ = -1;
+    int blacs_nprow_ = 0, blacs_npcol_ = 0;
+    int blacs_myrow_ = -1, blacs_mycol_ = -1;
+    int scalapack_nb_ = 64;  // block size for block-cyclic distribution
+    bool blacs_setup_ = false;
+
+    void setup_blacs();
+    void cleanup_blacs();
+
+    // ScaLAPACK-based distributed subspace operations (real)
+    void orthogonalize_scalapack(double* X, int Nd_d, int Nband_loc, double dV);
+    void project_hamiltonian_scalapack(const double* X, const double* Veff,
+                                       double* eigvals, int Nd_d, int Nband_loc, double dV);
+    void rotate_orbitals_scalapack(double* X, int Nd_d, int Nband_loc);
+
+    // ScaLAPACK-based distributed subspace operations (complex)
+    void orthogonalize_kpt_scalapack(Complex* X, int Nd_d, int Nband_loc, double dV);
+    void project_hamiltonian_kpt_scalapack(const Complex* X, const double* Veff,
+                                           double* eigvals, int Nd_d, int Nband_loc, double dV,
+                                           const Vec3& kpt_cart, const Vec3& cell_lengths);
+    void rotate_orbitals_kpt_scalapack(Complex* X, int Nd_d, int Nband_loc);
+
+    // Distributed subspace matrix storage (allocated in project_hamiltonian)
+    std::vector<double> Hs_dist_;      // local portion of distributed Hs
+    std::vector<double> Q_dist_;       // local portion of eigenvectors
+    std::vector<Complex> Hs_dist_z_;   // complex versions
+    std::vector<Complex> Q_dist_z_;
+    int desc_Hs_[9] = {};             // ScaLAPACK descriptor for Hs
+    int desc_Q_[9] = {};              // ScaLAPACK descriptor for Q (eigvecs)
+    int local_rows_Hs_ = 0, local_cols_Hs_ = 0;
+#endif
+
+    // --- Real private methods (serial LAPACK) ---
     void chebyshev_filter(const double* X, double* Y, const double* Veff,
                           int Nd_d, int Nband,
                           double lambda_cutoff, double eigval_min, double eigval_max,
@@ -68,7 +119,7 @@ private:
     void diag_subspace(double* Hs, double* eigvals, int N);
     void rotate_orbitals(double* X, const double* Q, int Nd_d, int Nband);
 
-    // --- Complex private methods ---
+    // --- Complex private methods (serial LAPACK) ---
     void chebyshev_filter_kpt(const Complex* X, Complex* Y, const double* Veff,
                               int Nd_d, int Nband,
                               double lambda_cutoff, double eigval_min, double eigval_max,

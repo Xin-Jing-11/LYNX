@@ -64,7 +64,9 @@ public:
                int Nspin_local = 1,
                int spin_start = 0,
                const KPoints* kpoints = nullptr,
-               int kpt_start = 0);
+               int kpt_start = 0,
+               int Nband_global = 0,
+               int band_start = 0);
 
     // Run self-consistent field loop
     // Returns total energy
@@ -127,6 +129,8 @@ private:
     const KPoints* kpoints_ = nullptr;  // k-point info (null = gamma-only)
     bool is_kpt_ = false;               // true if using k-points (complex wavefunctions)
     int kpt_start_ = 0;                 // global index of first local k-point
+    int Nband_global_ = 0;  // total bands across all band-parallel procs (0 = use Nband)
+    int band_start_ = 0;    // global index of first local band
 
     // Compute effective potential: Veff = Vxc + phi + Vloc
     // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns

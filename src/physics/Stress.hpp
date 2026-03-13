@@ -62,7 +62,8 @@ public:
         const MPIComm& kptcomm,
         const MPIComm& spincomm,
         const KPoints* kpoints = nullptr,
-        int kpt_start = 0);
+        int kpt_start = 0,
+        int band_start = 0);
 
     double pressure() const;
 
@@ -138,7 +139,8 @@ private:
         const MPIComm& kptcomm,
         const MPIComm& spincomm,
         const KPoints* kpoints = nullptr,
-        int kpt_start = 0);
+        int kpt_start = 0,
+        int band_start = 0);
 };
 
 } // namespace sparc

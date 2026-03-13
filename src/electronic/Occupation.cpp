@@ -145,7 +145,8 @@ double Occupation::compute(Wavefunction& wfn,
                             int kpt_start) {
     int Nspin_local = wfn.Nspin();
     int Nkpts_local = wfn.Nkpts();
-    int Nband = wfn.Nband();
+    // Use Nband_global for eigenvalue/occupation arrays (they always hold all bands)
+    int Nband = wfn.Nband_global();
 
     // Determine global Nspin from spincomm
     int Nspin_global = Nspin_local;
@@ -155,6 +156,7 @@ double Occupation::compute(Wavefunction& wfn,
     double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
 
     // Gather LOCAL eigenvalues and weights
+    // eigenvalues array is always Nband_global in size (all eigenvalues on every proc)
     int local_count = Nspin_local * Nkpts_local * Nband;
     std::vector<double> local_eigs(local_count);
     std::vector<double> local_weights(local_count);
@@ -213,7 +215,7 @@ double Occupation::compute(Wavefunction& wfn,
     // Find global Fermi level
     double Ef = find_fermi_level(all_eigs, all_weights, Nelectron, beta, smearing);
 
-    // Set local occupations
+    // Set occupations for ALL bands (Nband_global)
     for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts_local; ++k) {
             auto& occ = wfn.occupations(s, k);
@@ -237,7 +239,7 @@ double Occupation::entropy(const Wavefunction& wfn,
     double S = 0.0;
     int Nspin_local = wfn.Nspin();
     int Nkpts = wfn.Nkpts();
-    int Nband = wfn.Nband();
+    int Nband = wfn.Nband_global();  // use global band count for eigenvalue/occupation iteration
     if (Nspin_global <= 0) Nspin_global = Nspin_local;
     double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
 

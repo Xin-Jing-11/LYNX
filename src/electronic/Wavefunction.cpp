@@ -5,8 +5,15 @@
 namespace sparc {
 
 void Wavefunction::allocate(int Nd_d, int Nband, int Nspin, int Nkpts, bool is_complex) {
+    // Non-band-parallel: Nband_local == Nband_global
+    allocate(Nd_d, Nband, Nband, Nspin, Nkpts, is_complex);
+}
+
+void Wavefunction::allocate(int Nd_d, int Nband_local, int Nband_global,
+                             int Nspin, int Nkpts, bool is_complex) {
     Nd_d_ = Nd_d;
-    Nband_ = Nband;
+    Nband_ = Nband_local;
+    Nband_global_ = Nband_global;
     Nspin_ = Nspin;
     Nkpts_ = Nkpts;
     is_complex_ = is_complex;
@@ -23,16 +30,16 @@ void Wavefunction::allocate(int Nd_d, int Nband, int Nspin, int Nkpts, bool is_c
     if (is_complex) {
         psi_kpt_.reserve(total);
         for (int i = 0; i < total; ++i) {
-            psi_kpt_.emplace_back(Nd_d, Nband);
-            eig_.emplace_back(Nband);
-            occ_.emplace_back(Nband);
+            psi_kpt_.emplace_back(Nd_d, Nband_local);
+            eig_.emplace_back(Nband_global);
+            occ_.emplace_back(Nband_global);
         }
     } else {
         psi_.reserve(total);
         for (int i = 0; i < total; ++i) {
-            psi_.emplace_back(Nd_d, Nband);
-            eig_.emplace_back(Nband);
-            occ_.emplace_back(Nband);
+            psi_.emplace_back(Nd_d, Nband_local);
+            eig_.emplace_back(Nband_global);
+            occ_.emplace_back(Nband_global);
         }
     }
 }
