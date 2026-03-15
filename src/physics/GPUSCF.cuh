@@ -159,6 +159,7 @@ private:
 
     // SOC data (uploaded once during setup)
     bool has_soc_ = false;
+    const NonlocalProjector* vnl_ptr_ = nullptr;  // for CPU SOC comparison
     struct GPUSOCData {
         double* d_Chi_soc_flat = nullptr;
         int*    d_gpos_offsets_soc = nullptr;

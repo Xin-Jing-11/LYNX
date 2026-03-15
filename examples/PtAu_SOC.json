@@ -8,7 +8,7 @@
     "cell_type": "nonorthogonal"
   },
   "grid": {
-    "Nx": 10, "Ny": 10, "Nz": 17,
+    "Nx": 20, "Ny": 20, "Nz": 35,
     "fd_order": 12,
     "boundary_conditions": ["periodic", "periodic", "periodic"]
   },
@@ -36,6 +36,7 @@
   "scf": {
     "max_iter": 100,
     "scf_tol": 1e-5,
+    "cheb_degree": 53,
     "mixing_param": 0.3,
     "mixing_history": 7
   },

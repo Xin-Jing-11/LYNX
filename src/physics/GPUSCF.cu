@@ -1071,6 +1071,13 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
         printf("  [H dbg] after V_ud: ||Hpsi||=%.6e\n", nrm);
     }
 
+    // Save Hpsi before SOC for comparison
+    double nrm_pre_soc = 0;
+    if (call_count < 3 && s->has_soc_) {
+        cudaDeviceSynchronize();
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor*ncol, (double*)d_Hpsi, 1, &nrm_pre_soc);
+    }
+
     // SOC terms (Term 1 + Term 2)
     if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
         gpu::soc_apply_z_gpu(
@@ -1089,14 +1096,107 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc);
     }
 
-    if (call_count == 0) {
+    if (call_count < 3) {
         cudaDeviceSynchronize();
-        double hp_re, hp_im;
+        //printf("  [H dbg] call_count=%d ncol=%d\n", call_count, ncol);
         double nrm_soc = 0, nrmx_full = 0;
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_Hpsi, 1, &nrm_soc);
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_psi, 1, &nrmx_full);
-        printf("  [H dbg] after SOC: ||Hpsi||=%.6e ||psi||=%.6e ratio=%.2f\n",
-               nrm_soc, nrmx_full, nrm_soc / std::max(nrmx_full, 1e-30));
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor*ncol, (double*)d_Hpsi, 1, &nrm_soc);
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor*ncol, (double*)d_psi, 1, &nrmx_full);
+        double soc_contribution = std::sqrt(std::max(0.0, nrm_soc*nrm_soc - nrm_pre_soc*nrm_pre_soc));
+        printf("  [H dbg] after SOC: ||Hpsi||=%.6e ||pre_soc||=%.6e ||SOC_only||=%.6e ||psi||=%.6e ratio=%.2f ncol=%d\n",
+               nrm_soc, nrm_pre_soc, soc_contribution, nrmx_full,
+               nrm_soc / std::max(nrmx_full, 1e-30), ncol);
+
+        // CPU SOC comparison (only first band, ncol=1)
+        if (ncol == 1 && s->has_soc_ && s->vnl_ptr_ && s->vnl_ptr_->has_soc()) {
+            using Complex = std::complex<double>;
+            int Nd_spinor = 2 * Nd_d;
+            std::vector<Complex> h_psi_cpu(Nd_spinor);
+            std::vector<Complex> h_Hpsi_cpu(Nd_spinor, Complex(0));
+            CUDA_CHECK(cudaMemcpy(h_psi_cpu.data(), d_psi, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
+
+            // Run CPU SOC only
+            s->vnl_ptr_->apply_soc_kpt(h_psi_cpu.data(), h_Hpsi_cpu.data(), 1, Nd_d, s->dV_);
+
+            double cpu_soc_nrm = 0;
+            for (int i = 0; i < Nd_spinor; i++)
+                cpu_soc_nrm += std::norm(h_Hpsi_cpu[i]);
+            cpu_soc_nrm = std::sqrt(cpu_soc_nrm);
+            printf("  [H dbg] CPU SOC-only ||SOC_cpu||=%.6e  GPU ||SOC_gpu||=%.6e  ratio=%.3f\n",
+                   cpu_soc_nrm, soc_contribution, soc_contribution / std::max(cpu_soc_nrm, 1e-30));
+        }
+
+        // === Hermiticity test: <x|H|y> should equal conj(<y|H|x>) ===
+        // Use band 0 as x, band 1 as y (both 2*Nd_d complex spinors)
+        if (ncol >= 2) {
+            auto& ctxh = gpu::GPUContext::instance();
+            // H|x> is already computed (d_Hpsi band 0)
+            // Need H|y> — apply H to band 1
+            cuDoubleComplex* d_y = const_cast<cuDoubleComplex*>(d_psi) + Nd_d_spinor;
+            cuDoubleComplex* d_Hy;
+            CUDA_CHECK(cudaMallocAsync(&d_Hy, Nd_d_spinor * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMemset(d_Hy, 0, Nd_d_spinor * sizeof(cuDoubleComplex)));
+
+            // Apply H to y (band 1) — reuse same Veff, single band
+            // Need temporary storage to avoid clobbering d_Hpsi
+            for (int spinor = 0; spinor < 2; spinor++) {
+                gpu::hamiltonian_apply_local_z_gpu(
+                    d_y + spinor * Nd_d,
+                    (spinor == 0) ? (d_Veff) : (d_Veff + Nd_d),
+                    d_Hy + spinor * Nd_d,
+                    d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
+                    s->is_orth_, true, true, true, s->diag_coeff_ham_,
+                    s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
+                    s->kxLx_, s->kyLy_, s->kzLz_);
+                if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
+                    gpu::nonlocal_projector_apply_z_gpu(
+                        d_y + spinor * Nd_d, d_Hy + spinor * Nd_d,
+                        s->gpu_vnl_.d_Chi_flat, s->gpu_vnl_.d_gpos_flat,
+                        s->gpu_vnl_.d_gpos_offsets, s->gpu_vnl_.d_chi_offsets,
+                        s->gpu_vnl_.d_ndc_arr, s->gpu_vnl_.d_nproj_arr,
+                        s->gpu_vnl_.d_IP_displ, s->gpu_vnl_.d_Gamma,
+                        static_cast<cuDoubleComplex*>(s->d_alpha_z_),
+                        s->d_bloch_fac_, Nd_d, 1, s->dV_,
+                        s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
+                        s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+                }
+            }
+            gpu::spinor_offdiag_veff_gpu(d_Hy, d_y,
+                d_Veff + 2*Nd_d, d_Veff + 3*Nd_d, Nd_d, 1);
+            if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
+                gpu::soc_apply_z_gpu(d_y, d_Hy,
+                    s->gpu_soc_.d_Chi_soc_flat, s->gpu_vnl_.d_gpos_flat,
+                    s->gpu_soc_.d_gpos_offsets_soc, s->gpu_soc_.d_chi_soc_offsets,
+                    s->gpu_soc_.d_ndc_arr_soc, s->gpu_soc_.d_nproj_soc_arr,
+                    s->gpu_soc_.d_IP_displ_soc, s->gpu_soc_.d_Gamma_soc,
+                    s->gpu_soc_.d_proj_l, s->gpu_soc_.d_proj_m,
+                    s->d_bloch_fac_,
+                    static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_up),
+                    static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_dn),
+                    Nd_d, 1, s->dV_,
+                    s->gpu_soc_.n_influence_soc, s->gpu_soc_.total_soc_nproj,
+                    s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc);
+            }
+            cudaDeviceSynchronize();
+
+            // <x|Hy> = x^H * Hy
+            cuDoubleComplex xHy;
+            cublasZdotc(ctxh.cublas, Nd_d_spinor,
+                        d_psi, 1,   // x = band 0
+                        d_Hy, 1,    // Hy
+                        &xHy);
+            // <y|Hx> = y^H * Hx
+            cuDoubleComplex yHx;
+            cublasZdotc(ctxh.cublas, Nd_d_spinor,
+                        d_y, 1,     // y = band 1
+                        d_Hpsi, 1,  // Hx = band 0 of Hpsi
+                        &yHx);
+
+            printf("  [Hermit] <x|H|y>=(%.6e,%.6e)  <y|H|x>=(%.6e,%.6e)  diff=(%.3e,%.3e)\n",
+                   xHy.x, xHy.y, yHx.x, yHx.y,
+                   xHy.x - yHx.x, xHy.y + yHx.y);  // for Hermitian: xHy = conj(yHx), so diff.re=0, xHy.im+yHx.im=0
+            cudaFreeAsync(d_Hy, 0);
+        }
         call_count++;
     }
 }
@@ -1649,6 +1749,7 @@ double GPUSCFRunner::run(
 
     // SOC detection: requires k-point mode and SOC pseudopotentials
     has_soc_ = is_soc && is_kpt_ && vnl && vnl->has_soc();
+    vnl_ptr_ = vnl;
 
     int Nband = wfn.Nband();
 
@@ -1961,18 +2062,18 @@ double GPUSCFRunner::run(
             std::vector<double> h_Veff_spinor(4 * Nd_);
             CUDA_CHECK(cudaMemcpy(h_Veff_spinor.data(), d_Veff_spinor,
                                    4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-            Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+            Vec3 kpt0_est = kpoints_->kpts_cart()[kpt_start_];
             Vec3 cell_lengths = grid.lattice().lengths();
             eigsolver.lanczos_bounds_spinor_kpt(h_Veff_spinor.data(), Nd_,
-                                                 kpt0, cell_lengths,
+                                                 kpt0_est, cell_lengths,
                                                  eigval_min_s[0], eigval_max_s[0]);
         } else {
             std::vector<double> h_Veff(Nd_);
             CUDA_CHECK(cudaMemcpy(h_Veff.data(), d_Veff, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             if (is_kpt_) {
-                Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+                Vec3 kpt0_est = kpoints_->kpts_cart()[kpt_start_];
                 Vec3 cell_lengths = grid.lattice().lengths();
-                eigsolver.lanczos_bounds_kpt(h_Veff.data(), Nd_, kpt0, cell_lengths,
+                eigsolver.lanczos_bounds_kpt(h_Veff.data(), Nd_, kpt0_est, cell_lengths,
                                               eigval_min_s[0], eigval_max_s[0]);
             } else {
                 eigsolver.lanczos_bounds(h_Veff.data(), Nd_, eigval_min_s[0], eigval_max_s[0]);
@@ -1992,13 +2093,13 @@ double GPUSCFRunner::run(
         int Nd_spinor = 2 * Nd_;
         // Set up callback state and Bloch phases for first k-point
         s_instance_ = this;
-        Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+        Vec3 kpt0_est = kpoints_->kpts_cart()[kpt_start_];
         Vec3 cell_len = grid.lattice().lengths();
-        kxLx_ = kpt0.x * cell_len.x;
-        kyLy_ = kpt0.y * cell_len.y;
-        kzLz_ = kpt0.z * cell_len.z;
-        setup_bloch_factors(nloc_influence, crystal, kpt0);
-        // Randomize spinor psi on GPU (it's already uploaded, just re-upload first k-point)
+        kxLx_ = kpt0_est.x * cell_len.x;
+        kyLy_ = kpt0_est.y * cell_len.y;
+        kzLz_ = kpt0_est.z * cell_len.z;
+        setup_bloch_factors(nloc_influence, crystal, kpt0_est);
+        // Randomize spinor psi on GPU
         wfn.randomize_kpt(0, 0, 42);
         {
             size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
@@ -2008,21 +2109,10 @@ double GPUSCFRunner::run(
         }
         cuDoubleComplex* d_test = d_psi_spinor;
         cuDoubleComplex* d_Htest = d_Hpsi_spinor;
-        // Apply H once per k-point to get spectral radius estimate
+        // Power iteration to estimate eigmax
         double eigmax_est = eigval_max_s[0];
-        for (int k = 0; k < std::min(Nkpts, 2); k++) {
-            Vec3 kpt_k = kpoints_->kpts_cart()[kpt_start_ + k];
-            kxLx_ = kpt_k.x * cell_len.x;
-            kyLy_ = kpt_k.y * cell_len.y;
-            kzLz_ = kpt_k.z * cell_len.z;
-            setup_bloch_factors(nloc_influence, crystal, kpt_k);
-            wfn.randomize_kpt(0, k, 42 + k);
-            {
-                size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
-                std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
-                std::memcpy(h_psi_z.data(), wfn.psi_kpt(0, k).data(), psi_bytes);
-                CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(), psi_bytes, cudaMemcpyHostToDevice));
-            }
+        // 20 power iterations on first band
+        for (int iter = 0; iter < 20; iter++) {
             hamiltonian_apply_spinor_z_cb(d_test, d_Veff_spinor, d_Htest, d_x_ex_spinor, 1);
             cudaDeviceSynchronize();
             double nrmH = 0, nrmX = 0;
@@ -2030,12 +2120,19 @@ double GPUSCFRunner::run(
             cublasDnrm2(ctx.cublas, 2 * Nd_spinor, (double*)d_test, 1, &nrmX);
             double ratio = (nrmX > 1e-30) ? nrmH / nrmX : eigmax_est;
             if (ratio > eigmax_est) eigmax_est = ratio;
+            // Normalize and iterate: x = H*x / ||H*x||
+            double scale = 1.0 / std::max(nrmH, 1e-30);
+            cublasZdscal(ctx.cublas, Nd_spinor, &scale, d_Htest, 1);
+            CUDA_CHECK(cudaMemcpy(d_test, d_Htest,
+                        (size_t)Nd_spinor * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
         }
-        if (eigmax_est > eigval_max_s[0]) {
-            printf("SOC eigmax: Lanczos=%.2f < GPU estimate=%.2f, using %.2f\n",
-                   eigval_max_s[0], eigmax_est, eigmax_est * 1.2);
-            eigval_max_s[0] = std::max(eigmax_est * 2.0, 1000.0);  // generous margin for SOC
-        }
+        // Use the power-iteration estimate with generous margin.
+        // The true eigmax may be much larger than the power-iteration gives
+        // after only 20 steps. Use 2x as minimum safety.
+        double eigmax_safe = std::max(eigmax_est * 1.5, eigval_max_s[0] * 3.0);
+        printf("SOC eigmax: Lanczos=%.2f, power-iter(20)=%.2f, using=%.2f\n",
+               eigval_max_s[0], eigmax_est, eigmax_safe);
+        eigval_max_s[0] = eigmax_safe;
     }
     double lambda_cutoff = 0.5 * (eigval_min_s[0] + eigval_max_s[0]);
     printf("Lanczos: eigmin=%.6e, eigmax=%.6e, lambda_cutoff=%.6e\n",
