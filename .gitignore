@@ -12,3 +12,6 @@ __pycache__/
 dist/
 python/lynx/_core*.so
 .pytest_cache/
+
+# Backup files
+*.bak

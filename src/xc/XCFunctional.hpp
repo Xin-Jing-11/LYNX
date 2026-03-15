@@ -9,8 +9,7 @@
 
 namespace lynx {
 
-// Exchange-correlation functional evaluation.
-// Ported from LYNX reference: exchangeCorrelation.c
+// Exchange-correlation functional evaluation using libxc.
 // Supports LDA (Slater + PW92/PZ81) and GGA (PBE/PBEsol/RPBE).
 class XCFunctional {
 public:
@@ -24,13 +23,15 @@ public:
     // rho: (Nd_d,) electron density
     // Vxc: (Nd_d,) output XC potential
     // exc: (Nd_d,) output XC energy density (per particle)
+    // Dxcdgrho: (Nd_d,) output d(rho*exc)/d(|grad rho|^2) for GGA (2*vsigma)
     void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
                   double* Dxcdgrho = nullptr) const;
 
     // Evaluate for spin-polarized (collinear)
-    // rho: [DMnd*3] layout: rho[0..DMnd-1] = total, rho[DMnd..2*DMnd-1] = up,
-    //       rho[2*DMnd..3*DMnd-1] = down  (matching reference LYNX convention)
-    // Vxc: [DMnd*2] layout: Vxc[0..DMnd-1] = up, Vxc[DMnd..2*DMnd-1] = down
+    // rho: [Nd_d*3] layout: rho[0..Nd_d-1] = total, rho[Nd_d..2*Nd_d-1] = up,
+    //       rho[2*Nd_d..3*Nd_d-1] = down
+    // Vxc: [Nd_d*2] layout: Vxc[0..Nd_d-1] = up, Vxc[Nd_d..2*Nd_d-1] = down
+    // Dxcdgrho: [Nd_d*3] layout: [v2c | v2x_up | v2x_down]
     void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
                        double* Dxcdgrho = nullptr) const;
 
@@ -46,51 +47,8 @@ private:
     const Gradient* gradient_ = nullptr;
     const HaloExchange* halo_ = nullptr;
 
-    // --- LDA functionals (matching reference LYNX exactly) ---
-
-    // Slater exchange: ex(i) = -C2 * rho^(1/3), vx(i) = -C3 * rho^(1/3)
-    static void slater(int DMnd, const double* rho, double* ex, double* vx);
-
-    // PW92 correlation: J.P. Perdew and Y. Wang, PRB 45, 13244 (1992)
-    static void pw(int DMnd, const double* rho, double* ec, double* vc);
-
-    // PZ81 correlation: J.P. Perdew and A. Zunger, PRB 23, 5048 (1981)
-    static void pz(int DMnd, const double* rho, double* ec, double* vc);
-
-    // Spin-polarized versions
-    static void slater_spin(int DMnd, const double* rho, double* ex, double* vx);
-    static void pw_spin(int DMnd, const double* rho, double* ec, double* vc);
-
-public:
-    // --- GGA functionals (matching reference LYNX exactly) ---
-    // Public for use by Stress (v2xc recomputation)
-
-    // PBE exchange: iflag=1(PBE), 2(PBEsol), 3(RPBE), 4(ZY-revPBE)
-    // ex: energy density per particle
-    // vx: d(rho*ex)/drho part of potential
-    // v2x: d(rho*ex)/d(|grad rho|^2) — the gradient-dependent part
-    static void pbex(int DMnd, const double* rho, const double* sigma,
-                     int iflag, double* ex, double* vx, double* v2x);
-
-    // PBE correlation
-    static void pbec(int DMnd, const double* rho, const double* sigma,
-                     int iflag, double* ec, double* vc, double* v2c);
-
-private:
-
-    // Spin-polarized GGA
-    static void pbex_spin(int DMnd, const double* rho, const double* sigma,
-                          int iflag, double* ex, double* vx, double* v2x);
-    static void pbec_spin(int DMnd, const double* rho, const double* sigma,
-                          int iflag, double* ec, double* vc, double* v2c);
-
-    // Assemble GGA potential including divergence correction
-    void apply_gga(const double* rho, double* Vxc, double* exc,
-                   const double* Drho_x, const double* Drho_y, const double* Drho_z,
-                   const double* v2xc, int Nd_d) const;
-
-    // Get iflag for current XC type
-    int get_pbe_iflag() const;
+    // Get libxc functional IDs for current XC type
+    void get_func_ids(int& xc_id, int& cc_id) const;
 };
 
 } // namespace lynx

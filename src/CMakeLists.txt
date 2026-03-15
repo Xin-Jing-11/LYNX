@@ -51,6 +51,9 @@ endif()
 if(MATH_DEFINES)
     target_compile_definitions(lynx_core PUBLIC ${MATH_DEFINES})
 endif()
+# libxc
+target_link_libraries(lynx_core PUBLIC xc)
+target_include_directories(lynx_core SYSTEM PUBLIC ${LIBXC_INCLUDE_DIRS})
 
 add_executable(lynx main.cpp)
 target_link_libraries(lynx PRIVATE lynx_core)

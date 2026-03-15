@@ -50,6 +50,13 @@ add_test(NAME CompareRef
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_compare_tests>)
 set_tests_properties(CompareRef PROPERTIES TIMEOUT 120)
 
+# libxc comparison tests
+add_executable(lynx_libxc_tests test_LibxcCompare.cpp)
+target_link_libraries(lynx_libxc_tests PRIVATE lynx_core GTest::gtest)
+add_test(NAME LibxcCompare
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_libxc_tests>)
+set_tests_properties(LibxcCompare PROPERTIES TIMEOUT 120)
+
 # GPU kernel tests
 if(USE_CUDA)
     add_executable(lynx_gpu_tests test_GPUKernels.cu)

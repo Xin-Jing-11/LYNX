@@ -4,3 +4,6 @@
 [submodule "psps/ONCVPSP-LDA-PDv0.4"]
 	path = psps/ONCVPSP-LDA-PDv0.4
 	url = https://github.com/PseudoDojo/ONCVPSP-LDA-PDv0.4.git
+[submodule "external/libxc"]
+	path = external/libxc
+	url = https://gitlab.com/libxc/libxc.git

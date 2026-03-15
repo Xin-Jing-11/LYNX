@@ -97,6 +97,18 @@ if(BUILD_TESTS)
     enable_testing()
 endif()
 
+# libxc (required — built from submodule)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(ENABLE_FORTRAN OFF CACHE BOOL "" FORCE)
+set(ENABLE_CUDA OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(CMAKE_INSTALL_LIBDIR "lib" CACHE STRING "" FORCE)
+add_subdirectory(external/libxc EXCLUDE_FROM_ALL)
+set(LIBXC_INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/libxc/src
+    ${CMAKE_CURRENT_BINARY_DIR}/external/libxc
+    CACHE INTERNAL "")
+
 add_subdirectory(src)
 if(BUILD_TESTS)
     add_subdirectory(tests)
