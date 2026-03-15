@@ -192,6 +192,10 @@ SystemConfig InputParser::parse(const std::string& json_file) {
         if (out.contains("print_eigen")) config.print_eigen = out["print_eigen"].get<bool>();
         if (out.contains("calc_stress")) config.calc_stress = out["calc_stress"].get<bool>();
         if (out.contains("calc_pressure")) config.calc_pressure = out["calc_pressure"].get<bool>();
+        if (out.contains("density_restart_file"))
+            config.density_restart_file = out["density_restart_file"].get<std::string>();
+        if (out.contains("density_output_file"))
+            config.density_output_file = out["density_output_file"].get<std::string>();
     }
 
     // MD / Relax

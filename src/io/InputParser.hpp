@@ -63,6 +63,10 @@ struct SystemConfig {
     bool calc_stress = false;
     bool calc_pressure = false;
 
+    // Density I/O (checkpoint/restart)
+    std::string density_restart_file;   // read initial density from this file
+    std::string density_output_file;    // write converged density to this file
+
     // MD / Relax
     bool md_flag = false;
     bool relax_flag = false;

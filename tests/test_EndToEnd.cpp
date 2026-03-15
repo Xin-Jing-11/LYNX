@@ -165,6 +165,9 @@ static DFTResult run_single_point(const std::string& json_file) {
     SCF scf;
     scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
               halo, &vnl, bandcomm, kptcomm, spincomm, scf_params);
+#ifdef USE_CUDA
+    scf.set_gpu_data(crystal, nloc_influence, influence, elec);
+#endif
 
     Wavefunction wfn;
     wfn.allocate(Nd_d, Nstates, Nspin, Nkpts);

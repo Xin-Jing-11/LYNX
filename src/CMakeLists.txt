@@ -17,6 +17,7 @@ add_library(sparc_core
     operators/NonlocalProjector.cpp
     io/InputParser.cpp
     io/OutputWriter.cpp
+    io/DensityIO.cpp
     electronic/Wavefunction.cpp
     electronic/ElectronDensity.cpp
     electronic/Occupation.cpp
@@ -57,8 +58,14 @@ if(USE_CUDA)
         operators/Gradient.cu
         operators/Hamiltonian.cu
         operators/NonlocalProjector.cu
+        operators/ComplexOperators.cu
+        solvers/EigenSolver.cu
+        solvers/LinearSolver.cu
+        xc/XCFunctional.cu
+        physics/GPUSCF.cu
+        physics/GPUForceStress.cu
     )
-    target_link_libraries(sparc_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver)
+    target_link_libraries(sparc_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand)
     target_compile_definitions(sparc_core PUBLIC USE_CUDA)
     set_target_properties(sparc_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()

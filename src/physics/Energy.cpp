@@ -159,14 +159,6 @@ EnergyComponents Energy::compute_all(
     // Veff = Vxc + phi + ... so we need to subtract double counting
     E.Etotal = E.Eband - E2 + E.Exc - E3 + E.Ehart + E.Eself + E.Ec + E.Entropy;
 
-    // Debug: print all components in reference format
-    {
-        int r = 0; MPI_Comm_rank(MPI_COMM_WORLD, &r);
-        if (r == 0)
-            std::printf("DEBUG_ENERGY: Eband=%.12f E_rhoVxc=%.12f E_rhoPhi=%.12f Ehart=%.12f Exc=%.12f Esc=%.12f Entropy=%.12e Etot=%.12f\n",
-                        E.Eband, E2, E3, E.Ehart, E.Exc, E.Eself + E.Ec, E.Entropy, E.Etotal);
-    }
-
     return E;
 }
 

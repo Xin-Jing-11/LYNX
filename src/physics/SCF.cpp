@@ -221,6 +221,16 @@ double SCF::run(Wavefunction& wfn,
     Vloc_ = Vloc;
     rho_core_ = rho_core;
 
+#ifdef USE_CUDA
+    // GPU dispatch: gamma-point or k-point, any Nspin, orthogonal cells
+    if (gpu_enabled_ && crystal_ && nloc_influence_) {
+        if (rank_world == 0)
+            std::printf("GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=%d, kpt=%d)\n",
+                        Nspin_global_, is_kpt_ ? 1 : 0);
+        return run_gpu(wfn, Nelectron, Natom, rho_b, Eself, Ec, xc_type, rho_core);
+    }
+#endif
+
     // Compute default tolerances (reference: initialization.c:2655-2681)
     if (params_.poisson_tol < 0.0)
         params_.poisson_tol = params_.tol * 0.01;
@@ -631,5 +641,83 @@ double SCF::run(Wavefunction& wfn,
 
     return energy_.Etotal;
 }
+
+#ifdef USE_CUDA
+double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
+                     const double* rho_b, double Eself, double Ec,
+                     XCType xc_type, const double* rho_core) {
+    int Nd_d = domain_->Nd_d();
+    int Nspin = Nspin_global_;
+    bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol ||
+                   xc_type == XCType::GGA_RPBE);
+
+    // Allocate work arrays (needed for download_results)
+    int dxc_ncol = is_gga ? ((Nspin == 2) ? 3 : 1) : 0;
+    Veff_ = NDArray<double>(Nd_d * Nspin);
+    Vxc_ = NDArray<double>(Nd_d * Nspin);
+    exc_ = NDArray<double>(Nd_d);
+    phi_ = NDArray<double>(Nd_d);
+    if (dxc_ncol > 0) Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
+
+    // Initialize density: use atomic superposition for better GPU SCF convergence
+    if (density_.Nd_d() == 0) {
+        density_.allocate(Nd_d, Nspin);
+    }
+    if (elec_ && influence_) {
+        const_cast<Electrostatics*>(elec_)->compute_atomic_density(
+            *crystal_, *influence_, *domain_, *grid_,
+            density_.rho_total().data(), Nelectron);
+        if (Nspin == 1) {
+            std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
+        } else {
+            // Equal split for initial spin density
+            for (int i = 0; i < Nd_d; i++) {
+                density_.rho(0).data()[i] = 0.5 * density_.rho_total().data()[i];
+                density_.rho(1).data()[i] = 0.5 * density_.rho_total().data()[i];
+            }
+        }
+    } else {
+        init_density(Nd_d, Nelectron);
+    }
+
+    // K-point weights
+    std::vector<double> kpt_weights;
+    if (kpoints_) {
+        kpt_weights = kpoints_->normalized_weights();
+    } else {
+        kpt_weights = {1.0};
+    }
+
+    // Create and run GPU SCF
+    gpu_runner_ = std::make_unique<GPUSCFRunner>();
+    double Etotal = gpu_runner_->run(
+        wfn, params_, *grid_, *domain_, *stencil_,
+        *hamiltonian_, *halo_, vnl_,
+        *crystal_, *nloc_influence_, *bandcomm_,
+        Nelectron, Natom,
+        density_.rho_total().data(), rho_b,
+        Eself, Ec, xc_type, rho_core, is_gga,
+        Nspin, is_kpt_, kpoints_, kpt_weights,
+        Nspin_local_, spin_start_, kpt_start_,
+        density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(0).data() : nullptr,
+        density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(1).data() : nullptr);
+
+    // Download results for forces/stress
+    gpu_runner_->download_results(
+        phi_.data(), Vxc_.data(), exc_.data(), Veff_.data(),
+        dxc_ncol > 0 ? Dxcdgrho_.data() : nullptr,
+        density_.rho_total().data(), wfn);
+    // Keep spin densities in sync
+    if (Nspin == 1) {
+        std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
+    }
+
+    energy_ = gpu_runner_->energy();
+    converged_ = gpu_runner_->converged();
+    Ef_ = gpu_runner_->fermi_energy();
+
+    return Etotal;
+}
+#endif
 
 } // namespace sparc

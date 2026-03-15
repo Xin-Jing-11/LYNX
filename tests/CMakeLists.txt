@@ -17,6 +17,7 @@ add_executable(sparc_tests
     test_Forces.cpp
     test_Stress.cpp
     test_KPoints.cpp
+    test_DensityIO.cpp
     test_EndToEnd.cpp
 )
 target_link_libraries(sparc_tests PRIVATE sparc_core GTest::gtest_main)
@@ -56,4 +57,22 @@ if(USE_CUDA)
     set_target_properties(sparc_gpu_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     add_test(NAME GPUKernels COMMAND $<TARGET_FILE:sparc_gpu_tests>)
     set_tests_properties(GPUKernels PROPERTIES TIMEOUT 120)
+
+    add_executable(sparc_gpu_context_tests test_GPUContext.cu)
+    target_link_libraries(sparc_gpu_context_tests PRIVATE sparc_core)
+    set_target_properties(sparc_gpu_context_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    add_test(NAME GPUContext COMMAND $<TARGET_FILE:sparc_gpu_context_tests>)
+    set_tests_properties(GPUContext PROPERTIES TIMEOUT 60)
+
+    add_executable(sparc_gpu_algo_tests test_GPUAlgorithms.cu)
+    target_link_libraries(sparc_gpu_algo_tests PRIVATE sparc_core)
+    set_target_properties(sparc_gpu_algo_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    add_test(NAME GPUAlgorithms COMMAND $<TARGET_FILE:sparc_gpu_algo_tests>)
+    set_tests_properties(GPUAlgorithms PROPERTIES TIMEOUT 120)
+
+    add_executable(sparc_gpu_scf_tests test_GPUSCF.cu)
+    target_link_libraries(sparc_gpu_scf_tests PRIVATE sparc_core GTest::gtest)
+    set_target_properties(sparc_gpu_scf_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    add_test(NAME GPUSCF COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:sparc_gpu_scf_tests>)
+    set_tests_properties(GPUSCF PROPERTIES TIMEOUT 600)
 endif()

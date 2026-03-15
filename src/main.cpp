@@ -7,6 +7,7 @@
 
 #include "io/InputParser.hpp"
 #include "io/OutputWriter.hpp"
+#include "io/DensityIO.hpp"
 #include "core/Lattice.hpp"
 #include "core/FDGrid.hpp"
 #include "core/Domain.hpp"
@@ -305,6 +306,9 @@ int main(int argc, char** argv) {
                   halo, &vnl, scf_bandcomm, kpt_bridge, spin_bridge, scf_params,
                   Nspin, Nspin_local, spin_start, &kpoints, kpt_start,
                   Nstates, band_start);
+#ifdef USE_CUDA
+        scf.set_gpu_data(crystal, nloc_influence, influence, elec);
+#endif
 
         // ===== Allocate wavefunctions =====
         // For band parallelism: psi has Nband_local columns, but eigenvalues/occupations
@@ -313,58 +317,63 @@ int main(int argc, char** argv) {
         wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local, is_kpt);
 
         // ===== Initialize density =====
-        // Use atomic superposition if available
+        // Try restart file first, fall back to atomic superposition
         {
-            std::vector<double> rho_at(Nd_d, 0.0);
-            elec.compute_atomic_density(crystal, influence, domain, grid,
-                                        rho_at.data(), Nelectron);
-
-            // Check if atomic density is reasonable (no extreme spikes)
-            double rho_max = 0;
-            for (int i = 0; i < Nd_d; ++i)
-                rho_max = std::max(rho_max, rho_at[i]);
-
-            // Compute initial magnetization from per-atom spin values
-            // Reference: electronicGroundState.c:Calculate_elecDens
-            // atom_spin[J] * rho_at_J(r) for each atom with nonzero spin
-            std::vector<double> mag_init;
-            if (Nspin == 2) {
-                mag_init.resize(Nd_d, 0.0);
-                // Simple approach: distribute initial magnetization proportional to
-                // atomic density. Total mag = sum(atom_spin_J * Zval_J / total_Zval) * rho_at(r)
-                double total_spin = 0.0;
-                int atom_idx = 0;
-                for (size_t it = 0; it < config.atom_types.size(); ++it) {
-                    const auto& at_in = config.atom_types[it];
-                    for (size_t ia = 0; ia < at_in.coords.size(); ++ia) {
-                        double atom_spin = 0.0;
-                        if (ia < at_in.spin.size()) atom_spin = at_in.spin[ia];
-                        total_spin += atom_spin;
-                        atom_idx++;
+            bool density_loaded = false;
+            if (!config.density_restart_file.empty()) {
+                // Pre-allocate density so read() can fill it
+                sparc::ElectronDensity restart_rho;
+                restart_rho.allocate(Nd_d, Nspin);
+                if (sparc::DensityIO::read(config.density_restart_file, restart_rho, grid, lattice)) {
+                    scf.set_initial_density(restart_rho.rho_total().data(), Nd_d,
+                                            Nspin == 2 ? restart_rho.mag().data() : nullptr);
+                    density_loaded = true;
+                    if (rank == 0) {
+                        double Ne = restart_rho.integrate(grid.dV());
+                        std::printf("Density restart: loaded from %s (Ne=%.6f)\n",
+                                    config.density_restart_file.c_str(), Ne);
                     }
-                }
-                // Scale magnetization: mag = (total_spin / Nelectron) * rho_at
-                if (std::abs(total_spin) > 1e-12) {
-                    double scale = total_spin / static_cast<double>(Nelectron);
-                    for (int i = 0; i < Nd_d; ++i) {
-                        mag_init[i] = scale * rho_at[i];
-                    }
+                } else if (rank == 0) {
+                    std::printf("WARNING: Failed to read density from %s, using atomic density\n",
+                                config.density_restart_file.c_str());
                 }
             }
 
-            scf.set_initial_density(rho_at.data(), Nd_d,
-                                    Nspin == 2 ? mag_init.data() : nullptr);
-            if (rank == 0) {
-                double rsum = 0, rsum2 = 0;
-                for (int i = 0; i < Nd_d; ++i) { rsum += rho_at[i]; rsum2 += rho_at[i]*rho_at[i]; }
-                std::printf("Atomic density: max=%.4f, int*dV=%.6f (expected %d)\n",
-                            rho_max, rsum * grid.dV(), Nelectron);
-                std::printf("DEBUG_RHO0: sum=%.10f norm2=%.10f rho[0]=%.10e rho[100]=%.10e rho[1000]=%.10e\n",
-                            rsum, std::sqrt(rsum2), rho_at[0], rho_at[100], rho_at[1000]);
+            if (!density_loaded) {
+                std::vector<double> rho_at(Nd_d, 0.0);
+                elec.compute_atomic_density(crystal, influence, domain, grid,
+                                            rho_at.data(), Nelectron);
+
+                double rho_max = 0;
+                for (int i = 0; i < Nd_d; ++i)
+                    rho_max = std::max(rho_max, rho_at[i]);
+
+                std::vector<double> mag_init;
                 if (Nspin == 2) {
-                    double msum = 0;
-                    for (int i = 0; i < Nd_d; ++i) msum += mag_init[i];
-                    std::printf("Initial magnetization: int*dV=%.6f\n", msum * grid.dV());
+                    mag_init.resize(Nd_d, 0.0);
+                    double total_spin = 0.0;
+                    for (size_t it = 0; it < config.atom_types.size(); ++it) {
+                        const auto& at_in = config.atom_types[it];
+                        for (size_t ia = 0; ia < at_in.coords.size(); ++ia) {
+                            double atom_spin = 0.0;
+                            if (ia < at_in.spin.size()) atom_spin = at_in.spin[ia];
+                            total_spin += atom_spin;
+                        }
+                    }
+                    if (std::abs(total_spin) > 1e-12) {
+                        double scale = total_spin / static_cast<double>(Nelectron);
+                        for (int i = 0; i < Nd_d; ++i)
+                            mag_init[i] = scale * rho_at[i];
+                    }
+                }
+
+                scf.set_initial_density(rho_at.data(), Nd_d,
+                                        Nspin == 2 ? mag_init.data() : nullptr);
+                if (rank == 0) {
+                    double rsum = 0;
+                    for (int i = 0; i < Nd_d; ++i) rsum += rho_at[i];
+                    std::printf("Atomic density: max=%.4f, int*dV=%.6f (expected %d)\n",
+                                rho_max, rsum * grid.dV(), Nelectron);
                 }
             }
         }
@@ -426,6 +435,16 @@ int main(int argc, char** argv) {
             std::printf("  Etotal  = %18.10f Ha\n", E.Etotal);
             std::printf("  Eatom   = %18.10f Ha/atom\n", E.Etotal / Natom);
             std::printf("  Ef      = %18.10f Ha\n", scf.fermi_energy());
+        }
+
+        // Write converged density to file if requested
+        if (!config.density_output_file.empty() && rank == 0) {
+            if (sparc::DensityIO::write(config.density_output_file, scf.density(), grid, lattice)) {
+                std::printf("Density written to %s\n", config.density_output_file.c_str());
+            } else {
+                std::fprintf(stderr, "WARNING: Failed to write density to %s\n",
+                             config.density_output_file.c_str());
+            }
         }
 
         // ===== Forces =====

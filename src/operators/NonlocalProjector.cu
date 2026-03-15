@@ -261,11 +261,11 @@ void nonlocal_projector_apply_gpu(
 
     // Upload small metadata to device
     int *d_gpos_off, *d_chi_off, *d_ndc, *d_nproj, *d_ip;
-    CUDA_CHECK(cudaMalloc(&d_gpos_off, (n_atoms + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_chi_off, (n_atoms + 1) * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_ndc, n_atoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_nproj, n_atoms * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_ip, n_atoms * sizeof(int)));
+    CUDA_CHECK(cudaMallocAsync(&d_gpos_off, (n_atoms + 1) * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_chi_off, (n_atoms + 1) * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_ndc, n_atoms * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_nproj, n_atoms * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_ip, n_atoms * sizeof(int), 0));
 
     CUDA_CHECK(cudaMemcpy(d_gpos_off, h_gpos_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_chi_off, h_chi_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
@@ -280,8 +280,8 @@ void nonlocal_projector_apply_gpu(
         Nd, ncol, dV, n_atoms, total_nproj,
         max_ndc, max_nproj);
 
-    cudaFree(d_gpos_off); cudaFree(d_chi_off);
-    cudaFree(d_ndc); cudaFree(d_nproj); cudaFree(d_ip);
+    cudaFreeAsync(d_gpos_off, 0); cudaFreeAsync(d_chi_off, 0);
+    cudaFreeAsync(d_ndc, 0); cudaFreeAsync(d_nproj, 0); cudaFreeAsync(d_ip, 0);
 }
 
 } // namespace gpu

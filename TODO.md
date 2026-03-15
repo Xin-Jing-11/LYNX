@@ -79,31 +79,22 @@
 - [ ] vdW-DF (van der Waals density functional)
 - [ ] DFT-D3 dispersion correction
 
-### Geometry Optimization
-- [ ] LBFGS (Limited-memory BFGS)
-- [ ] FIRE (Fast Inertial Relaxation Engine)
-- [ ] NLCG (Nonlinear Conjugate Gradient)
-- [ ] Cell relaxation (volume/shape optimization)
-- [ ] Atom constraints (fix atoms / selective dynamics)
-
-### Molecular Dynamics
-- [ ] NVE (microcanonical ensemble)
-- [ ] NVT with Nose-Hoover thermostat
-- [ ] Velocity Verlet / Leapfrog integrators
-- [ ] MD restart files
-- [ ] Trajectory output
-
 ### Advanced Electronic Structure
 - [ ] Spin-orbit coupling (SOC)
 - [ ] Non-collinear magnetism
 - [ ] Charged systems (net charge handling)
 
 ### GPU Integration
-- [ ] CPU/GPU dispatch in operator classes (#ifdef USE_CUDA)
-- [ ] GPU EigenSolver (CheFSI on GPU)
-- [ ] GPU LinearSolver / PoissonSolver
-- [ ] GPU SCF integration (full GPU pipeline)
-- [ ] GPU-aware MPI for multi-GPU
+- [x] GPU EigenSolver (CheFSI on GPU)
+- [x] GPU LinearSolver / PoissonSolver (AAR + Jacobi precond)
+- [x] GPU XC (LDA_PW, LDA_PZ, GGA_PBE)
+- [x] GPU Pulay+Kerker mixer
+- [x] GPU SCF integration (full GPU pipeline, fully GPU-resident)
+- [x] CPU/GPU dispatch (#ifdef USE_CUDA in SCF::run → GPUSCFRunner)
+- [x] GPU k-point support (complex CheFSI, Bloch phases, complex operators)
+- [x] GPU spin-polarized support (spin-resolved XC, per-spin eigensolver loop)
+- [x] GPU forces/stress kernels (nonlocal force, kinetic stress, nonlocal stress)
+- [ ] GPU-aware MPI / NCCL for multi-GPU
 
 ### Other
 - [ ] ScaLAPACK distributed eigensolver integration

@@ -24,6 +24,12 @@
 
 #include <vector>
 #include <functional>
+#include <memory>
+
+#ifdef USE_CUDA
+#include "physics/GPUSCF.cuh"
+#include "physics/Electrostatics.hpp"
+#endif
 
 namespace sparc {
 
@@ -122,6 +128,34 @@ private:
     XCType xc_type_ = XCType::GGA_PBE;
     const double* Vloc_ = nullptr;
     const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
+
+#ifdef USE_CUDA
+    std::unique_ptr<GPUSCFRunner> gpu_runner_;
+
+    // GPU-specific data (set via set_gpu_data before run)
+    const Crystal* crystal_ = nullptr;
+    const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;
+    const std::vector<AtomInfluence>* influence_ = nullptr;
+    const Electrostatics* elec_ = nullptr;
+    bool gpu_enabled_ = false;
+
+    double run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
+                   const double* rho_b, double Eself, double Ec,
+                   XCType xc_type, const double* rho_core);
+public:
+    // Call before run() to enable GPU path
+    void set_gpu_data(const Crystal& crystal,
+                      const std::vector<AtomNlocInfluence>& nloc_influence,
+                      const std::vector<AtomInfluence>& influence,
+                      const Electrostatics& elec) {
+        crystal_ = &crystal;
+        nloc_influence_ = &nloc_influence;
+        influence_ = &influence;
+        elec_ = &elec;
+        gpu_enabled_ = true;
+    }
+private:
+#endif
 
     int Nspin_global_ = 1;  // global number of spin channels (1 or 2)
     int Nspin_local_ = 1;   // spin channels on this process (1 or Nspin_global)
