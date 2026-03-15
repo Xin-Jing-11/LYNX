@@ -61,7 +61,8 @@ public:
                int spin_start = 0,
                int kpt_start = 0,
                const double* rho_up_init = nullptr,  // spin-up density (Nd, for Nspin=2)
-               const double* rho_dn_init = nullptr);  // spin-down density (Nd, for Nspin=2)
+               const double* rho_dn_init = nullptr,   // spin-down density (Nd, for Nspin=2)
+               bool is_soc = false);                   // SOC mode (spinor wavefunctions)
 
     // Download final GPU state back to CPU arrays for forces/stress
     void download_results(double* phi, double* Vxc, double* exc,
@@ -139,6 +140,8 @@ private:
     // XC type and NLCC flag
     bool has_nlcc_ = false;
     bool is_gga_ = false;
+    bool is_orth_ = true;
+    bool has_mixed_deriv_ = false;  // non-orth mixed derivative terms
 
     // Spin/k-point parameters
     int Nspin_ = 1;
@@ -154,11 +157,42 @@ private:
     double* d_bloch_fac_ = nullptr;  // [n_influence * 2] cos/sin per influence atom
     void*   d_alpha_z_ = nullptr;    // cuDoubleComplex alpha for complex nonlocal
 
+    // SOC data (uploaded once during setup)
+    bool has_soc_ = false;
+    struct GPUSOCData {
+        double* d_Chi_soc_flat = nullptr;
+        int*    d_gpos_offsets_soc = nullptr;
+        int*    d_chi_soc_offsets = nullptr;
+        int*    d_ndc_arr_soc = nullptr;
+        int*    d_nproj_soc_arr = nullptr;
+        int*    d_IP_displ_soc = nullptr;
+        double* d_Gamma_soc = nullptr;
+        int*    d_proj_l = nullptr;
+        int*    d_proj_m = nullptr;
+        void*   d_alpha_soc_up = nullptr;  // cuDoubleComplex
+        void*   d_alpha_soc_dn = nullptr;  // cuDoubleComplex
+        int n_influence_soc = 0;
+        int total_soc_nproj = 0;
+        int max_ndc_soc = 0;
+        int max_nproj_soc = 0;
+
+        void setup_soc(const NonlocalProjector& vnl,
+                       const Crystal& crystal,
+                       const std::vector<AtomNlocInfluence>& nloc_influence,
+                       int Nband);
+        void free_soc();
+    };
+    GPUSOCData gpu_soc_;
+
     // --- Static callback trampoline ---
     static GPUSCFRunner* s_instance_;
 
     static void hamiltonian_apply_cb(const double* d_psi, const double* d_Veff,
                                      double* d_Hpsi, double* d_x_ex, int ncol);
+    // Spinor Hamiltonian callback for SOC (operates on 2*Nd_d-length spinor vectors)
+    static void hamiltonian_apply_spinor_z_cb(const cuDoubleComplex* d_psi, const double* d_Veff,
+                                               cuDoubleComplex* d_Hpsi, cuDoubleComplex* d_x_ex, int ncol);
+
     static void hamiltonian_apply_z_cb(const cuDoubleComplex* d_psi, const double* d_Veff,
                                        cuDoubleComplex* d_Hpsi, cuDoubleComplex* d_x_ex, int ncol);
     static void poisson_op_cb(const double* d_x, double* d_Ax);

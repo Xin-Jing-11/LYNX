@@ -842,7 +842,7 @@ int main(int argc, char** argv) {
     // ============================================================
     // Phase 1: CPU setup
     // ============================================================
-    std::string json_file = "/home/xx/Desktop/SPARC/examples/BaTiO3.json";
+    std::string json_file = "/home/xx/Desktop/LYNX/examples/BaTiO3.json";
     auto config = InputParser::parse(json_file);
     InputParser::validate(config);
 

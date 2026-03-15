@@ -335,18 +335,18 @@ double SCF::run(Wavefunction& wfn,
     Vloc_ = Vloc;
     rho_core_ = rho_core;
 
+    // Detect SOC mode (before GPU dispatch)
+    is_soc_ = (wfn.Nspinor() == 2);
+
 #ifdef USE_CUDA
-    // GPU dispatch: gamma-point or k-point, any Nspin, orthogonal cells
+    // GPU dispatch: gamma-point or k-point, any Nspin, orthogonal or non-orthogonal
     if (gpu_enabled_ && crystal_ && nloc_influence_) {
         if (rank_world == 0)
-            std::printf("GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=%d, kpt=%d)\n",
-                        Nspin_global_, is_kpt_ ? 1 : 0);
+            std::printf("GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=%d, kpt=%d, soc=%d)\n",
+                        Nspin_global_, is_kpt_ ? 1 : 0, is_soc_ ? 1 : 0);
         return run_gpu(wfn, Nelectron, Natom, rho_b, Eself, Ec, xc_type, rho_core);
     }
 #endif
-
-    // Detect SOC mode
-    is_soc_ = (wfn.Nspinor() == 2);
 
     // Compute default tolerances (reference: initialization.c:2655-2681)
     if (params_.poisson_tol < 0.0)
@@ -891,6 +891,9 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         kpt_weights = {1.0};
     }
 
+    // Detect SOC mode
+    bool is_soc = (wfn.Nspinor() == 2);
+
     // Create and run GPU SCF
     gpu_runner_ = std::make_unique<GPUSCFRunner>();
     double Etotal = gpu_runner_->run(
@@ -903,7 +906,8 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         Nspin, is_kpt_, kpoints_, kpt_weights,
         Nspin_local_, spin_start_, kpt_start_,
         density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(0).data() : nullptr,
-        density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(1).data() : nullptr);
+        density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(1).data() : nullptr,
+        is_soc);
 
     // Download results for forces/stress
     gpu_runner_->download_results(

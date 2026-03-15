@@ -55,6 +55,13 @@ public:
     // Access Chi for diagnostics
     const std::vector<std::vector<NDArray<double>>>& Chi() const { return Chi_; }
 
+    // Per-projector metadata for SOC: l, m values for each projector column
+    struct SOCProjInfo {
+        int l;
+        int m;
+        int p;  // projector index within channel l
+    };
+
     // --- SOC support ---
     // Setup SOC projectors (Chi_soc arrays) from fully-relativistic pseudopotentials
     void setup_soc(const Crystal& crystal,
@@ -69,6 +76,9 @@ public:
                        int Nd_d, double dV) const;
 
     bool has_soc() const { return has_soc_; }
+    const std::vector<std::vector<NDArray<double>>>& Chi_soc() const { return Chi_soc_; }
+    const std::vector<double>& Gamma_soc_all() const { return Gamma_soc_all_; }
+    const std::vector<std::vector<SOCProjInfo>>& soc_proj_info() const { return soc_proj_info_; }
 
 private:
     bool is_setup_ = false;
@@ -103,13 +113,7 @@ private:
     // Gamma_soc_all_: SOC energy coefficients (flattened)
     std::vector<double> Gamma_soc_all_;
 
-    // Per-projector metadata for SOC: l, m values for each projector column
-    // Stored per atom type (same for all atoms of that type)
-    struct SOCProjInfo {
-        int l;
-        int m;
-        int p;  // projector index within channel l
-    };
+private:
     std::vector<std::vector<SOCProjInfo>> soc_proj_info_;  // [ityp][col]
 
 };

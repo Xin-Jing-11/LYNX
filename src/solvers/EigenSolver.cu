@@ -259,6 +259,7 @@ void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV) {
     auto& ctx = GPUContext::instance();
 
     // S = X^T * X * dV
+    size_t _scratch_cp = ctx.scratch_pool.checkpoint();
     compute_ata_gpu(d_X, d_S, Nd, N, dV);
 
     // Cholesky factorization: S = R^T * R (upper triangular)
@@ -277,7 +278,7 @@ void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV) {
                 CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
                 Nd, N, &one, d_S, N, d_X, Nd);
 
-    ctx.scratch_pool.reset();
+    ctx.scratch_pool.restore(_scratch_cp);
 }
 
 // Project Hamiltonian + diagonalize on GPU:
@@ -293,6 +294,8 @@ void project_and_diag_gpu(
     void (*apply_H)(const double*, const double*, double*, double*, int))
 {
     auto& ctx = GPUContext::instance();
+
+    size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
     // HX = H * X
     apply_H(d_X, d_Veff, d_HX, d_x_ex, N);
@@ -315,7 +318,7 @@ void project_and_diag_gpu(
                       N, d_Hs, N, d_eigvals, d_work, lwork,
                       ctx.buf.cusolver_devinfo);
 
-    ctx.scratch_pool.reset();
+    ctx.scratch_pool.restore(_scratch_cp);
     // d_Hs now contains eigenvectors (columns), d_eigvals has eigenvalues
 }
 
@@ -557,6 +560,7 @@ void orthogonalize_z_gpu(cuDoubleComplex* d_X, cuDoubleComplex* d_S,
                           int Nd, int N, double dV) {
     auto& ctx = GPUContext::instance();
 
+    size_t _scratch_cp = ctx.scratch_pool.checkpoint();
     // S = X^H * X * dV
     compute_ata_z_gpu(d_X, d_S, Nd, N, dV);
 
@@ -575,7 +579,7 @@ void orthogonalize_z_gpu(cuDoubleComplex* d_X, cuDoubleComplex* d_S,
                 CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
                 Nd, N, &one, d_S, N, d_X, Nd);
 
-    ctx.scratch_pool.reset();
+    ctx.scratch_pool.restore(_scratch_cp);
 }
 
 // Project Hamiltonian + diagonalize on GPU (complex):
@@ -591,6 +595,8 @@ void project_and_diag_z_gpu(
     void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int))
 {
     auto& ctx = GPUContext::instance();
+
+    size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
     // HX = H * X
     apply_H_z(d_X, d_Veff, d_HX, d_x_ex, N);
@@ -613,7 +619,7 @@ void project_and_diag_z_gpu(
                       N, d_Hs, N, d_eigvals, d_work, lwork,
                       ctx.buf.cusolver_devinfo);
 
-    ctx.scratch_pool.reset();
+    ctx.scratch_pool.restore(_scratch_cp);
     // d_Hs now contains complex eigenvectors (columns), d_eigvals has real eigenvalues
 }
 

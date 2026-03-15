@@ -174,7 +174,98 @@ void lda_pw_spin_gpu(const double* d_rho_up, const double* d_rho_dn,
 void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
                        double* d_exc, double* d_vxc, double* d_v2xc, int N);
 
+// SOC operators
+void spinor_offdiag_veff_gpu(
+    cuDoubleComplex* d_Hpsi, const cuDoubleComplex* d_psi,
+    const double* d_V_ud_re, const double* d_V_ud_im,
+    int Nd_d, int ncol);
+
+void soc_apply_z_gpu(
+    const cuDoubleComplex* d_psi, cuDoubleComplex* d_Hpsi,
+    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets, const int* d_chi_soc_offsets,
+    const int* d_ndc_arr, const int* d_nproj_soc_arr,
+    const int* d_IP_displ_soc,
+    const double* d_Gamma_soc,
+    const int* d_proj_l, const int* d_proj_m,
+    const double* d_bloch_fac,
+    cuDoubleComplex* d_alpha_up, cuDoubleComplex* d_alpha_dn,
+    int Nd_d, int ncol, double dV,
+    int n_influence, int total_soc_nproj,
+    int max_ndc_soc, int max_nproj_soc);
+
+void spinor_density_gpu(
+    const cuDoubleComplex* d_psi, const double* d_occ,
+    double* d_rho, double* d_mag_x, double* d_mag_y, double* d_mag_z,
+    int Nd_d, int Nband, double weight);
+
 } // namespace gpu
+
+// ============================================================
+// SOC helper kernels (Veff spinor construction)
+// ============================================================
+
+// Convert noncollinear (rho, mx, my, mz) to collinear (rho_up, rho_dn) for XC
+// |m| = sqrt(mx^2 + my^2 + mz^2)
+// rho_up = 0.5*(rho + |m|), rho_dn = 0.5*(rho - |m|)
+__global__ void mag_to_collinear_kernel(
+    const double* __restrict__ rho,
+    const double* __restrict__ mag_x,
+    const double* __restrict__ mag_y,
+    const double* __restrict__ mag_z,
+    double* __restrict__ rho_up,
+    double* __restrict__ rho_dn,
+    int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double mx = mag_x[i], my = mag_y[i], mz = mag_z[i];
+        double mnorm = sqrt(mx*mx + my*my + mz*mz);
+        double r = rho[i];
+        rho_up[i] = fmax(0.5 * (r + mnorm), 1e-14);
+        rho_dn[i] = fmax(0.5 * (r - mnorm), 1e-14);
+    }
+}
+
+// Construct 4-component Veff_spinor from XC output and magnetization
+// V_uu = 0.5*(Vxc_up+Vxc_dn) + 0.5*(Vxc_up-Vxc_dn)*mz/|m| + phi
+// V_dd = 0.5*(Vxc_up+Vxc_dn) - 0.5*(Vxc_up-Vxc_dn)*mz/|m| + phi
+// V_ud_re = 0.5*(Vxc_up-Vxc_dn) * mx/|m|
+// V_ud_im = -0.5*(Vxc_up-Vxc_dn) * my/|m|
+__global__ void veff_spinor_from_xc_kernel(
+    const double* __restrict__ Vxc_up,
+    const double* __restrict__ Vxc_dn,
+    const double* __restrict__ phi,
+    const double* __restrict__ mag_x,
+    const double* __restrict__ mag_y,
+    const double* __restrict__ mag_z,
+    double* __restrict__ Veff_spinor,  // [V_uu(Nd) | V_dd(Nd) | V_ud_re(Nd) | V_ud_im(Nd)]
+    int Nd)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < Nd) {
+        double vup = Vxc_up[i], vdn = Vxc_dn[i];
+        double vavg = 0.5 * (vup + vdn);
+        double vdiff = 0.5 * (vup - vdn);
+        double p = phi[i];
+        double mx = mag_x[i], my = mag_y[i], mz = mag_z[i];
+        double mnorm = sqrt(mx*mx + my*my + mz*mz);
+
+        if (mnorm > 1e-16) {
+            double inv_m = 1.0 / mnorm;
+            Veff_spinor[i]          = vavg + vdiff * mz * inv_m + p;  // V_uu
+            Veff_spinor[Nd + i]     = vavg - vdiff * mz * inv_m + p;  // V_dd
+            Veff_spinor[2*Nd + i]   = vdiff * mx * inv_m;              // V_ud_re
+            Veff_spinor[3*Nd + i]   = -vdiff * my * inv_m;             // V_ud_im
+        } else {
+            // Zero magnetization: diagonal only
+            Veff_spinor[i]          = vavg + p;     // V_uu
+            Veff_spinor[Nd + i]     = vavg + p;     // V_dd
+            Veff_spinor[2*Nd + i]   = 0.0;          // V_ud_re
+            Veff_spinor[3*Nd + i]   = 0.0;          // V_ud_im
+        }
+    }
+}
 
 // ============================================================
 // GPU kernels for SCF utility operations
@@ -603,6 +694,210 @@ void GPUSCFRunner::GPUNonlocalData::free() {
 }
 
 // ============================================================
+// GPUSOCData::setup_soc — flatten CPU SOC projector data for GPU
+// ============================================================
+void GPUSCFRunner::GPUSOCData::setup_soc(
+    const NonlocalProjector& vnl,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    int Nband)
+{
+    if (!vnl.has_soc()) return;
+
+    int ntypes = crystal.n_types();
+
+    // Build global SOC IP_displ for physical atoms
+    int n_phys = crystal.n_atom_total();
+    std::vector<int> IP_displ_global(n_phys + 1, 0);
+    {
+        int idx = 0;
+        for (int it = 0; it < ntypes; it++) {
+            const auto& psd = crystal.types()[it].psd();
+            int nproj_soc = 0;
+            if (psd.has_soc()) {
+                for (int l = 1; l <= psd.lmax(); ++l)
+                    nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+            }
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ia++) {
+                IP_displ_global[idx + 1] = IP_displ_global[idx] + nproj_soc;
+                idx++;
+            }
+        }
+    }
+    total_soc_nproj = IP_displ_global[n_phys];
+    if (total_soc_nproj == 0) return;
+
+    // Count influence atoms with SOC data
+    n_influence_soc = 0;
+    for (int it = 0; it < ntypes; it++)
+        n_influence_soc += nloc_influence[it].n_atom;
+
+    // Flatten per-atom SOC data
+    std::vector<int> h_ndc_arr, h_nproj_soc_arr, h_IP_displ_arr;
+    std::vector<int> h_gpos_offsets(1, 0), h_chi_soc_offsets(1, 0);
+    std::vector<int> h_gpos_flat;
+    std::vector<double> h_Chi_soc_flat;
+
+    max_ndc_soc = 0;
+    max_nproj_soc = 0;
+
+    const auto& Chi_soc = vnl.Chi_soc();
+
+    for (int it = 0; it < ntypes; it++) {
+        const auto& inf = nloc_influence[it];
+        const auto& psd = crystal.types()[it].psd();
+
+        int nproj_soc = 0;
+        if (psd.has_soc()) {
+            for (int l = 1; l <= psd.lmax(); ++l)
+                nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+        }
+
+        for (int iat = 0; iat < inf.n_atom; iat++) {
+            int ndc = inf.ndc[iat];
+            int global_atom = inf.atom_index[iat];
+
+            h_ndc_arr.push_back(ndc);
+            h_nproj_soc_arr.push_back(nproj_soc);
+            h_IP_displ_arr.push_back(IP_displ_global[global_atom]);
+
+            h_gpos_offsets.push_back(h_gpos_offsets.back() + ndc);
+            h_chi_soc_offsets.push_back(h_chi_soc_offsets.back() + ndc * nproj_soc);
+
+            // Copy grid positions
+            for (int ig = 0; ig < ndc; ig++)
+                h_gpos_flat.push_back(inf.grid_pos[iat][ig]);
+
+            // Copy Chi_soc data (ndc x nproj_soc, column-major)
+            if (ndc > 0 && nproj_soc > 0 && psd.has_soc()) {
+                const double* chi_data = Chi_soc[it][iat].data();
+                int chi_ld = Chi_soc[it][iat].ld();
+                for (int jp = 0; jp < nproj_soc; jp++)
+                    for (int ig = 0; ig < ndc; ig++)
+                        h_Chi_soc_flat.push_back(chi_data[ig + jp * chi_ld]);
+            } else {
+                // Pad with zeros for atoms without SOC
+                for (int jp = 0; jp < nproj_soc; jp++)
+                    for (int ig = 0; ig < ndc; ig++)
+                        h_Chi_soc_flat.push_back(0.0);
+            }
+
+            max_ndc_soc = std::max(max_ndc_soc, ndc);
+            max_nproj_soc = std::max(max_nproj_soc, nproj_soc);
+        }
+    }
+
+    // Build Gamma_soc indexed by physical atom projectors
+    std::vector<double> h_Gamma_soc(total_soc_nproj, 0.0);
+    {
+        int phys_idx = 0;
+        for (int it = 0; it < ntypes; it++) {
+            const auto& psd = crystal.types()[it].psd();
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ia++) {
+                if (psd.has_soc()) {
+                    int jp = 0;
+                    for (int l = 1; l <= psd.lmax(); ++l) {
+                        for (int p = 0; p < psd.ppl_soc()[l]; ++p) {
+                            double gamma = psd.Gamma_soc()[l][p];
+                            for (int m = -l; m <= l; ++m) {
+                                h_Gamma_soc[IP_displ_global[phys_idx] + jp] = gamma;
+                                jp++;
+                            }
+                        }
+                    }
+                }
+                phys_idx++;
+            }
+        }
+    }
+
+    // Build proj_l, proj_m arrays (global projector index -> l, m)
+    std::vector<int> h_proj_l(total_soc_nproj, 0);
+    std::vector<int> h_proj_m(total_soc_nproj, 0);
+    {
+        int phys_idx = 0;
+        for (int it = 0; it < ntypes; it++) {
+            const auto& psd = crystal.types()[it].psd();
+            const auto& spi = vnl.soc_proj_info()[it];
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ia++) {
+                int ip_off = IP_displ_global[phys_idx];
+                for (int jp = 0; jp < (int)spi.size(); jp++) {
+                    h_proj_l[ip_off + jp] = spi[jp].l;
+                    h_proj_m[ip_off + jp] = spi[jp].m;
+                }
+                phys_idx++;
+            }
+        }
+    }
+
+    // Upload everything to GPU
+    int total_gpos = h_gpos_offsets.back();
+    int total_chi_soc = h_chi_soc_offsets.back();
+
+    CUDA_CHECK(cudaMallocAsync(&d_Chi_soc_flat, std::max(1, total_chi_soc) * sizeof(double), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_gpos_offsets_soc, (n_influence_soc + 1) * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_chi_soc_offsets, (n_influence_soc + 1) * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_ndc_arr_soc, n_influence_soc * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_nproj_soc_arr, n_influence_soc * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_IP_displ_soc, n_influence_soc * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Gamma_soc, total_soc_nproj * sizeof(double), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_proj_l, total_soc_nproj * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_proj_m, total_soc_nproj * sizeof(int), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_soc_up,
+        (size_t)total_soc_nproj * Nband * sizeof(cuDoubleComplex), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_soc_dn,
+        (size_t)total_soc_nproj * Nband * sizeof(cuDoubleComplex), 0));
+
+    if (total_chi_soc > 0)
+        CUDA_CHECK(cudaMemcpy(d_Chi_soc_flat, h_Chi_soc_flat.data(), total_chi_soc * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_gpos_offsets_soc, h_gpos_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_chi_soc_offsets, h_chi_soc_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_ndc_arr_soc, h_ndc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_nproj_soc_arr, h_nproj_soc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_IP_displ_soc, h_IP_displ_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_Gamma_soc, h_Gamma_soc.data(), total_soc_nproj * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_proj_l, h_proj_l.data(), total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_proj_m, h_proj_m.data(), total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice));
+
+    printf("GPU SOC: %d influence atoms, %d SOC projectors, max_ndc=%d, max_nproj_soc=%d\n",
+           n_influence_soc, total_soc_nproj, max_ndc_soc, max_nproj_soc);
+    printf("GPU SOC: Chi_soc=%.1f KB, alpha_soc=%.1f KB (x2)\n",
+           total_chi_soc * 8.0 / 1024,
+           (double)total_soc_nproj * Nband * 16.0 / 1024);
+}
+
+// ============================================================
+// GPUSOCData::free_soc
+// ============================================================
+void GPUSCFRunner::GPUSOCData::free_soc() {
+    if (d_Chi_soc_flat)     cudaFreeAsync(d_Chi_soc_flat, 0);
+    if (d_gpos_offsets_soc) cudaFreeAsync(d_gpos_offsets_soc, 0);
+    if (d_chi_soc_offsets)  cudaFreeAsync(d_chi_soc_offsets, 0);
+    if (d_ndc_arr_soc)      cudaFreeAsync(d_ndc_arr_soc, 0);
+    if (d_nproj_soc_arr)    cudaFreeAsync(d_nproj_soc_arr, 0);
+    if (d_IP_displ_soc)     cudaFreeAsync(d_IP_displ_soc, 0);
+    if (d_Gamma_soc)        cudaFreeAsync(d_Gamma_soc, 0);
+    if (d_proj_l)           cudaFreeAsync(d_proj_l, 0);
+    if (d_proj_m)           cudaFreeAsync(d_proj_m, 0);
+    if (d_alpha_soc_up)     cudaFreeAsync(d_alpha_soc_up, 0);
+    if (d_alpha_soc_dn)     cudaFreeAsync(d_alpha_soc_dn, 0);
+    d_Chi_soc_flat = nullptr;
+    d_gpos_offsets_soc = nullptr;
+    d_chi_soc_offsets = nullptr;
+    d_ndc_arr_soc = nullptr;
+    d_nproj_soc_arr = nullptr;
+    d_IP_displ_soc = nullptr;
+    d_Gamma_soc = nullptr;
+    d_proj_l = nullptr;
+    d_proj_m = nullptr;
+    d_alpha_soc_up = nullptr;
+    d_alpha_soc_dn = nullptr;
+}
+
+// ============================================================
 // Static callback: Hamiltonian apply (H*psi on GPU)
 // ============================================================
 void GPUSCFRunner::hamiltonian_apply_cb(
@@ -615,9 +910,9 @@ void GPUSCFRunner::hamiltonian_apply_cb(
     gpu::hamiltonian_apply_local_gpu(
         d_psi, d_Veff, d_Hpsi, d_x_ex,
         s->nx_, s->ny_, s->nz_, s->FDn_, ncol, 0.0,
-        true, true, true, true,
+        s->is_orth_, true, true, true,
         s->diag_coeff_ham_,
-        false, false, false);
+        s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_);
 
     // GPU nonlocal part: Vnl*psi -> add to Hpsi
     if (s->gpu_vnl_.total_phys_nproj > 0) {
@@ -647,9 +942,9 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
     gpu::hamiltonian_apply_local_z_gpu(
         d_psi, d_Veff, d_Hpsi, d_x_ex,
         s->nx_, s->ny_, s->nz_, s->FDn_, ncol, 0.0,
-        true, true, true, true,
+        s->is_orth_, true, true, true,
         s->diag_coeff_ham_,
-        false, false, false,
+        s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
         s->kxLx_, s->kyLy_, s->kzLz_);
 
     // GPU nonlocal part with Bloch phases
@@ -665,6 +960,139 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
             s->Nd_, ncol, s->dV_,
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+    }
+}
+
+// ============================================================
+// Static callback: Spinor Hamiltonian (SOC) for 2-component spinors
+// psi/Hpsi layout: [spin-up(Nd_d) | spin-down(Nd_d)] per band
+// Veff layout: [V_uu(Nd_d) | V_dd(Nd_d) | Re(V_ud)(Nd_d) | Im(V_ud)(Nd_d)]
+// ============================================================
+void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
+    const cuDoubleComplex* d_psi, const double* d_Veff,
+    cuDoubleComplex* d_Hpsi, cuDoubleComplex* d_x_ex, int ncol)
+{
+    auto* s = s_instance_;
+    int Nd_d = s->Nd_;
+    int Nd_d_spinor = 2 * Nd_d;
+
+    const double* V_uu = d_Veff;
+    const double* V_dd = d_Veff + Nd_d;
+    const double* V_ud_re = d_Veff + 2 * Nd_d;
+    const double* V_ud_im = d_Veff + 3 * Nd_d;
+
+    static int call_count = 0;
+    // For each band: apply local H + standard Vnl per spinor component
+    for (int n = 0; n < ncol; ++n) {
+        const cuDoubleComplex* psi_n = d_psi + n * Nd_d_spinor;
+        cuDoubleComplex* Hpsi_n = d_Hpsi + n * Nd_d_spinor;
+        const cuDoubleComplex* psi_up = psi_n;
+        const cuDoubleComplex* psi_dn = psi_n + Nd_d;
+        cuDoubleComplex* Hpsi_up = Hpsi_n;
+        cuDoubleComplex* Hpsi_dn = Hpsi_n + Nd_d;
+
+        // Kinetic + V_uu for spin-up
+        gpu::hamiltonian_apply_local_z_gpu(
+            psi_up, V_uu, Hpsi_up, d_x_ex,
+            s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
+            s->is_orth_, true, true, true,
+            s->diag_coeff_ham_,
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
+            s->kxLx_, s->kyLy_, s->kzLz_);
+
+        if (call_count == 0 && n == 0) {
+            cudaDeviceSynchronize();
+            double hp_re, hp_im;
+            cudaMemcpy(&hp_re, (double*)Hpsi_up, sizeof(double), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&hp_im, (double*)Hpsi_up + 1, sizeof(double), cudaMemcpyDeviceToHost);
+            double psi_re, psi_im;
+            cudaMemcpy(&psi_re, (double*)psi_up, sizeof(double), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&psi_im, (double*)psi_up + 1, sizeof(double), cudaMemcpyDeviceToHost);
+            printf("  [H dbg] after up local: psi_up[0]=(%.3e,%.3e) Hpsi_up[0]=(%.3e,%.3e)\n",
+                   psi_re, psi_im, hp_re, hp_im);
+        }
+
+        // Kinetic + V_dd for spin-down
+        gpu::hamiltonian_apply_local_z_gpu(
+            psi_dn, V_dd, Hpsi_dn, d_x_ex,
+            s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
+            s->is_orth_, true, true, true,
+            s->diag_coeff_ham_,
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
+            s->kxLx_, s->kyLy_, s->kzLz_);
+
+        // Standard scalar-relativistic Vnl per spinor component
+        if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
+            gpu::nonlocal_projector_apply_z_gpu(
+                psi_up, Hpsi_up,
+                s->gpu_vnl_.d_Chi_flat, s->gpu_vnl_.d_gpos_flat,
+                s->gpu_vnl_.d_gpos_offsets, s->gpu_vnl_.d_chi_offsets,
+                s->gpu_vnl_.d_ndc_arr, s->gpu_vnl_.d_nproj_arr,
+                s->gpu_vnl_.d_IP_displ, s->gpu_vnl_.d_Gamma,
+                static_cast<cuDoubleComplex*>(s->d_alpha_z_),
+                s->d_bloch_fac_,
+                Nd_d, 1, s->dV_,
+                s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
+                s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+
+            gpu::nonlocal_projector_apply_z_gpu(
+                psi_dn, Hpsi_dn,
+                s->gpu_vnl_.d_Chi_flat, s->gpu_vnl_.d_gpos_flat,
+                s->gpu_vnl_.d_gpos_offsets, s->gpu_vnl_.d_chi_offsets,
+                s->gpu_vnl_.d_ndc_arr, s->gpu_vnl_.d_nproj_arr,
+                s->gpu_vnl_.d_IP_displ, s->gpu_vnl_.d_Gamma,
+                static_cast<cuDoubleComplex*>(s->d_alpha_z_),
+                s->d_bloch_fac_,
+                Nd_d, 1, s->dV_,
+                s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
+                s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+        }
+    }
+
+    if (call_count == 0) {
+        cudaDeviceSynchronize();
+        double hp_re, hp_im;
+        cudaMemcpy(&hp_re, (double*)d_Hpsi, sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&hp_im, (double*)d_Hpsi + 1, sizeof(double), cudaMemcpyDeviceToHost);
+        printf("  [H dbg] after Vnl: Hpsi[0]=(%.3e,%.3e)\n", hp_re, hp_im);
+    }
+
+    // Off-diagonal Veff: Hpsi_up += V_ud * psi_dn, Hpsi_dn += conj(V_ud) * psi_up
+    gpu::spinor_offdiag_veff_gpu(d_Hpsi, d_psi, V_ud_re, V_ud_im, Nd_d, ncol);
+
+    if (call_count == 0) {
+        cudaDeviceSynchronize();
+        double hp_re, hp_im;
+        cudaMemcpy(&hp_re, (double*)d_Hpsi, sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&hp_im, (double*)d_Hpsi + 1, sizeof(double), cudaMemcpyDeviceToHost);
+        printf("  [H dbg] after V_ud: Hpsi[0]=(%.3e,%.3e)\n", hp_re, hp_im);
+    }
+
+    // SOC terms (Term 1 + Term 2)
+    if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
+        gpu::soc_apply_z_gpu(
+            d_psi, d_Hpsi,
+            s->gpu_soc_.d_Chi_soc_flat, s->gpu_vnl_.d_gpos_flat,
+            s->gpu_soc_.d_gpos_offsets_soc, s->gpu_soc_.d_chi_soc_offsets,
+            s->gpu_soc_.d_ndc_arr_soc, s->gpu_soc_.d_nproj_soc_arr,
+            s->gpu_soc_.d_IP_displ_soc,
+            s->gpu_soc_.d_Gamma_soc,
+            s->gpu_soc_.d_proj_l, s->gpu_soc_.d_proj_m,
+            s->d_bloch_fac_,
+            static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_up),
+            static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_dn),
+            Nd_d, ncol, s->dV_,
+            s->gpu_soc_.n_influence_soc, s->gpu_soc_.total_soc_nproj,
+            s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc);
+    }
+
+    if (call_count == 0) {
+        cudaDeviceSynchronize();
+        double hp_re, hp_im;
+        cudaMemcpy(&hp_re, (double*)d_Hpsi, sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&hp_im, (double*)d_Hpsi + 1, sizeof(double), cudaMemcpyDeviceToHost);
+        printf("  [H dbg] after SOC: Hpsi[0]=(%.3e,%.3e)\n", hp_re, hp_im);
+        call_count++;
     }
 }
 
@@ -1189,7 +1617,8 @@ double GPUSCFRunner::run(
     int spin_start,
     int kpt_start,
     const double* rho_up_init,
-    const double* rho_dn_init)
+    const double* rho_dn_init,
+    bool is_soc)
 {
     // Store parameters as members
     nx_ = grid.Nx();
@@ -1199,6 +1628,8 @@ double GPUSCFRunner::run(
     Nd_ = domain.Nd_d();
     dV_ = grid.dV();
     is_gga_ = is_gga;
+    is_orth_ = grid.lattice().is_orthogonal();
+    has_mixed_deriv_ = !is_orth_;  // non-orth has xy/xz/yz mixed derivatives
     has_nlcc_ = (rho_core != nullptr);
     converged_ = false;
     mix_iter_ = 0;
@@ -1210,6 +1641,9 @@ double GPUSCFRunner::run(
     is_kpt_ = is_kpt;
     kpt_start_ = kpt_start;
     kpoints_ = kpoints;
+
+    // SOC detection: requires k-point mode and SOC pseudopotentials
+    has_soc_ = is_soc && is_kpt_ && vnl && vnl->has_soc();
 
     int Nband = wfn.Nband();
 
@@ -1240,9 +1674,10 @@ double GPUSCFRunner::run(
     // GPU memory allocation + data upload
     // ============================================================
     auto& ctx = gpu::GPUContext::instance();
-    int mix_ncol = (Nspin >= 2) ? 2 : 1;  // packed [total | mag] for spin
+    int mix_ncol = has_soc_ ? 4 : ((Nspin >= 2) ? 2 : 1);  // SOC: [rho|mx|my|mz]
+    int Nspin_buf = has_soc_ ? 2 : Nspin;  // SOC uses spin-polarized XC internally
     ctx.init_scf_buffers(Nd_, nx_, ny_, nz_, FDn_,
-                          Nband, Nband, Nspin,
+                          Nband, Nband, Nspin_buf,
                           7, 7, mix_ncol,
                           0, 0, 0,
                           is_gga_, false, is_kpt);
@@ -1250,6 +1685,10 @@ double GPUSCFRunner::run(
     // Upload nonlocal projector data to GPU (once)
     if (vnl) {
         gpu_vnl_.setup(*vnl, crystal, nloc_influence, Nband);
+        // Upload SOC projector data if needed
+        if (has_soc_) {
+            gpu_soc_.setup_soc(*vnl, crystal, nloc_influence, Nband);
+        }
     }
 
     // Upload NLCC core density to GPU
@@ -1263,13 +1702,15 @@ double GPUSCFRunner::run(
     CUDA_CHECK(cudaMemcpy(d_pseudocharge_, rho_b, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
 
     // Allocate mixer persistent buffer
-    int mix_N = Nd_ * ((Nspin >= 2) ? 2 : 1);
+    int mix_N = has_soc_ ? Nd_ * 4 : Nd_ * ((Nspin >= 2) ? 2 : 1);
     CUDA_CHECK(cudaMallocAsync(&d_mix_fkm1_, mix_N * sizeof(double), 0));
 
     // d_Y must be separate from d_Hpsi (used as d_HX inside eigensolver)
-    // For k-point, allocate complex-sized (2x) since Y is used as cuDoubleComplex*
+    // For SOC: spinor dimension is 2*Nd_d, complex
+    // For k-point: complex-sized (2x) since Y is used as cuDoubleComplex*
+    int Nd_eigensolver = has_soc_ ? 2 * Nd_ : Nd_;
     size_t y_elem_size = is_kpt ? sizeof(cuDoubleComplex) : sizeof(double);
-    CUDA_CHECK(cudaMallocAsync(&d_Y_, (size_t)Nd_ * Nband * y_elem_size, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Y_, (size_t)Nd_eigensolver * Nband * y_elem_size, 0));
 
     // Device pointers (aliases into ctx.buf)
     double* d_psi     = ctx.buf.psi;
@@ -1279,7 +1720,7 @@ double GPUSCFRunner::run(
     double* d_rho_new = ctx.buf.rho_total;
     double* d_phi     = ctx.buf.phi;
     double* d_exc     = ctx.buf.exc;
-    double* d_Vxc     = ctx.buf.Vc;
+    double* d_Vxc     = (Nspin >= 2 || has_soc_) ? ctx.buf.Vxc : ctx.buf.Vc;
     double* d_eigvals = ctx.buf.eigenvalues;
     double* d_occ     = ctx.buf.occupations;
     double* d_Xold    = ctx.buf.Xold;
@@ -1326,26 +1767,66 @@ double GPUSCFRunner::run(
             (size_t)gpu_vnl_.total_phys_nproj * Nband * sizeof(cuDoubleComplex), 0));
     }
 
-    // Allocate d_Y_s1_ if spin-polarized
-    if (Nspin >= 2 && !d_Y_s1_) {
+    // Allocate d_Y_s1_ if spin-polarized (non-SOC)
+    if (Nspin >= 2 && !has_soc_ && !d_Y_s1_) {
         CUDA_CHECK(cudaMallocAsync(&d_Y_s1_, (size_t)Nd_ * Nband * y_elem_size, 0));
         d_Y_arr[1] = d_Y_s1_;
     }
 
+    // SOC-specific: allocate spinor psi buffer (2*Nd_d complex per band)
+    // We reuse d_psi_z but need to ensure it can hold the spinor dimension
+    cuDoubleComplex* d_psi_spinor = nullptr;
+    cuDoubleComplex* d_Hpsi_spinor = nullptr;
+    cuDoubleComplex* d_Xold_spinor = nullptr;
+    cuDoubleComplex* d_Xnew_spinor = nullptr;
+    cuDoubleComplex* d_x_ex_spinor = nullptr;
+    cuDoubleComplex* d_Hs_spinor = nullptr;
+    cuDoubleComplex* d_Ms_spinor = nullptr;
+    double* d_Veff_spinor = nullptr;
+    double* d_mag_x = nullptr, *d_mag_y = nullptr, *d_mag_z = nullptr;
+    double* d_rho_soc = nullptr;
+
+    if (has_soc_) {
+        int Nd_spinor = 2 * Nd_;
+        // Allocate spinor-sized complex buffers
+        CUDA_CHECK(cudaMallocAsync(&d_psi_spinor, (size_t)Nd_spinor * Nband * sizeof(cuDoubleComplex), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_Hpsi_spinor, (size_t)Nd_spinor * Nband * sizeof(cuDoubleComplex), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_Xold_spinor, (size_t)Nd_spinor * Nband * sizeof(cuDoubleComplex), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_Xnew_spinor, (size_t)Nd_spinor * Nband * sizeof(cuDoubleComplex), 0));
+        int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_, nz_ex = nz_ + 2 * FDn_;
+        int Nd_ex = nx_ex * ny_ex * nz_ex;
+        CUDA_CHECK(cudaMallocAsync(&d_x_ex_spinor, (size_t)Nd_ex * sizeof(cuDoubleComplex), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_Hs_spinor, (size_t)Nband * Nband * sizeof(cuDoubleComplex), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_Ms_spinor, (size_t)Nband * Nband * sizeof(cuDoubleComplex), 0));
+
+        // 4-component Veff: [V_uu | V_dd | V_ud_re | V_ud_im]
+        CUDA_CHECK(cudaMallocAsync(&d_Veff_spinor, 4 * Nd_ * sizeof(double), 0));
+
+        // Noncollinear density arrays: rho, mag_x, mag_y, mag_z
+        CUDA_CHECK(cudaMallocAsync(&d_rho_soc, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mag_x, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mag_y, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mag_z, Nd_ * sizeof(double), 0));
+    }
+
     // Randomize wavefunctions on CPU, upload to GPU
-    for (int s = 0; s < Nspin_local_; s++) {
-        if (is_kpt_) {
-            // For k-point, randomize complex psi for first k-point, upload
-            wfn.randomize_kpt(s, 0, 42 + s);
-            // The complex psi will be uploaded per-kpt inside the SCF loop
-        } else {
-            wfn.randomize(s, 0, 1 + s);
-            std::vector<double> h_psi(Nd_ * Nband);
-            for (int j = 0; j < Nband; j++)
-                std::memcpy(h_psi.data() + j * Nd_, wfn.psi(s, 0).col(j), Nd_ * sizeof(double));
-            int s_glob = spin_start_ + s;
-            CUDA_CHECK(cudaMemcpy(d_psi_arr[s_glob], h_psi.data(),
-                                   (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+    if (has_soc_) {
+        // SOC: single spin channel (s=0), spinor randomization
+        wfn.randomize_kpt(0, 0, 42);
+        // The complex spinor psi will be uploaded per-kpt inside the SCF loop
+    } else {
+        for (int s = 0; s < Nspin_local_; s++) {
+            if (is_kpt_) {
+                wfn.randomize_kpt(s, 0, 42 + s);
+            } else {
+                wfn.randomize(s, 0, 1 + s);
+                std::vector<double> h_psi(Nd_ * Nband);
+                for (int j = 0; j < Nband; j++)
+                    std::memcpy(h_psi.data() + j * Nd_, wfn.psi(s, 0).col(j), Nd_ * sizeof(double));
+                int s_glob = spin_start_ + s;
+                CUDA_CHECK(cudaMemcpy(d_psi_arr[s_glob], h_psi.data(),
+                                       (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+            }
         }
     }
 
@@ -1426,6 +1907,38 @@ double GPUSCFRunner::run(
 
         CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), veff_size * sizeof(double), cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(d_phi, h_phi.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+
+        // SOC: build initial Veff_spinor from scalar Veff (uniform rho, zero magnetization)
+        // V_uu = V_dd = Vxc + phi, V_ud = 0
+        if (has_soc_) {
+            std::vector<double> h_Veff_spinor(4 * Nd_, 0.0);
+            for (int i = 0; i < Nd_; i++) {
+                double v = h_Vxc[i] + h_phi[i];  // Vxc is non-spin here (initial)
+                h_Veff_spinor[i]           = v;   // V_uu
+                h_Veff_spinor[Nd_ + i]     = v;   // V_dd
+                // V_ud_re and V_ud_im = 0 (already zero-initialized)
+            }
+            CUDA_CHECK(cudaMemcpy(d_Veff_spinor, h_Veff_spinor.data(),
+                                   4 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+
+            // Initialize noncollinear density: rho = total, mx = my = mz = 0
+            CUDA_CHECK(cudaMemcpy(d_rho_soc, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemset(d_mag_x, 0, Nd_ * sizeof(double)));
+            CUDA_CHECK(cudaMemset(d_mag_y, 0, Nd_ * sizeof(double)));
+            CUDA_CHECK(cudaMemset(d_mag_z, 0, Nd_ * sizeof(double)));
+
+            // Also set d_rho for spin XC: [rho_up | rho_dn] = [0.5*rho | 0.5*rho]
+            {
+                int bs = 256;
+                int gs = gpu::ceildiv(Nd_, bs);
+                scale_kernel<<<gs, bs>>>(d_rho_soc, 1.0, Nd_);  // noop, just ensure sync
+                // d_rho holds [up|dn] for XC
+                std::vector<double> h_rho_half(Nd_);
+                for (int i = 0; i < Nd_; i++) h_rho_half[i] = 0.5 * rho_init[i];
+                CUDA_CHECK(cudaMemcpy(d_rho, h_rho_half.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(d_rho + Nd_, h_rho_half.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            }
+        }
     }
 
     // ============================================================
@@ -1435,7 +1948,8 @@ double GPUSCFRunner::run(
     eigsolver.setup(hamiltonian, halo, domain, bandcomm, Nband);
 
     // Per-spin spectral bounds
-    std::vector<double> eigval_min_s(Nspin, 0.0), eigval_max_s(Nspin, 0.0);
+    int Nspin_lanczos = has_soc_ ? 1 : Nspin;
+    std::vector<double> eigval_min_s(std::max(Nspin, 1), 0.0), eigval_max_s(std::max(Nspin, 1), 0.0);
     {
         std::vector<double> h_Veff(Nd_);
         CUDA_CHECK(cudaMemcpy(h_Veff.data(), d_Veff, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
@@ -1485,8 +1999,9 @@ double GPUSCFRunner::run(
     // ============================================================
     // GPU SCF Loop
     // ============================================================
-    printf("\n--- GPU SCF Loop (Nspin=%d, Nkpts=%d, %s) ---\n",
-           Nspin, Nkpts, is_kpt_ ? "k-point" : "gamma");
+    printf("\n--- GPU SCF Loop (Nspin=%d, Nkpts=%d, %s%s) ---\n",
+           Nspin, Nkpts, is_kpt_ ? "k-point" : "gamma",
+           has_soc_ ? ", SOC" : "");
 
     std::vector<double> h_eigvals(Nband), h_occ(Nband);
     std::vector<double> kpt_weights = kpt_weights_in;
@@ -1513,6 +2028,66 @@ double GPUSCFRunner::run(
 
         // Step 1: Eigensolver (nchefsi passes, loop over spin and k-points)
         for (int pass = 0; pass < nchefsi; pass++) {
+          if (has_soc_) {
+            // ---- SOC spinor eigensolver ----
+            int Nd_spinor = 2 * Nd_;
+            for (int k = 0; k < Nkpts; k++) {
+                int k_glob = kpt_start_ + k;
+                Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+
+                kxLx_ = kpt.x * cell_lengths.x;
+                kyLy_ = kpt.y * cell_lengths.y;
+                kzLz_ = kpt.z * cell_lengths.z;
+                setup_bloch_factors(nloc_influence, crystal, kpt);
+
+                // Upload spinor psi from CPU if first pass of first iter
+                if (scf_iter == 0 && pass == 0) {
+                    wfn.randomize_kpt(0, k, 42 + k);
+                    size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
+                    std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
+                    auto* psi_c = wfn.psi_kpt(0, k).data();
+                    std::memcpy(h_psi_z.data(), psi_c, psi_bytes);
+                    CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(),
+                        psi_bytes, cudaMemcpyHostToDevice));
+                }
+
+                // Spinor eigensolver: Nd = 2*Nd_d, uses hamiltonian_apply_spinor_z_cb
+                gpu::eigensolver_solve_z_gpu(
+                    d_psi_spinor, d_eigvals, d_Veff_spinor,
+                    reinterpret_cast<cuDoubleComplex*>(d_Y_),
+                    d_Xold_spinor, d_Xnew_spinor,
+                    d_Hpsi_spinor, d_x_ex_spinor,
+                    d_Hs_spinor, d_Ms_spinor,
+                    Nd_spinor, Nband,
+                    lambda_cutoff, eigval_min_s[0], eigval_max_s[0],
+                    cheb_degree, dV_,
+                    hamiltonian_apply_spinor_z_cb);
+
+                // Download eigenvalues + spinor psi
+                CUDA_CHECK(cudaDeviceSynchronize());
+                {
+                    CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals,
+                                           Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    if (scf_iter == 0 && k == 0) {
+                        printf("  [SOC eigvals] eig[0]=%.6e eig[%d]=%.6e\n",
+                               h_eigvals[0], Nband-1, h_eigvals[Nband-1]);
+                    }
+                    for (int n = 0; n < Nband; n++)
+                        wfn.eigenvalues(0, k)(n) = h_eigvals[n];
+                }
+                {
+                    size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
+                    std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
+                    CUDA_CHECK(cudaMemcpy(h_psi_z.data(), d_psi_spinor,
+                        psi_bytes, cudaMemcpyDeviceToHost));
+                    if (scf_iter == 0 && k == 0) {
+                        printf("  [SOC psi] psi[0..3]=%.3e %.3e %.3e %.3e\n",
+                               h_psi_z[0], h_psi_z[1], h_psi_z[2], h_psi_z[3]);
+                    }
+                    std::memcpy(wfn.psi_kpt(0, k).data(), h_psi_z.data(), psi_bytes);
+                }
+            }
+          } else {
             for (int s = 0; s < Nspin_local_; s++) {
                 int s_glob = spin_start_ + s;
                 double* d_Veff_s = d_Veff + s_glob * Nd_;
@@ -1581,10 +2156,17 @@ double GPUSCFRunner::run(
                         hamiltonian_apply_cb);
                 }
             }
+          } // end non-SOC eigensolver branch
 
             // Update spectral bounds from eigenvalues (per-spin)
             CUDA_CHECK(cudaDeviceSynchronize());
-            {
+            if (has_soc_) {
+                // SOC: single spin channel
+                const double* eig0 = wfn.eigenvalues(0, 0).data();
+                if (scf_iter > 0)
+                    eigval_min_s[0] = eig0[0];
+                lambda_cutoff = eig0[Nband - 1] + 0.1;
+            } else {
                 double eig_last_max = -1e30;
                 for (int s = 0; s < Nspin_local_; s++) {
                     int s_glob = spin_start_ + s;
@@ -1614,72 +2196,151 @@ double GPUSCFRunner::run(
         }
 
         // Upload occupations to GPU
-        for (int s = 0; s < Nspin_local_; s++) {
-            int s_glob = spin_start_ + s;
+        if (has_soc_) {
             for (int n = 0; n < Nband; n++)
-                h_occ[n] = wfn.occupations(s, 0)(n);
-            CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                                   Nband * sizeof(double), cudaMemcpyHostToDevice));
+                h_occ[n] = wfn.occupations(0, 0)(n);
+            CUDA_CHECK(cudaMemcpy(d_occ, h_occ.data(), Nband * sizeof(double), cudaMemcpyHostToDevice));
+        } else {
+            for (int s = 0; s < Nspin_local_; s++) {
+                int s_glob = spin_start_ + s;
+                for (int n = 0; n < Nband; n++)
+                    h_occ[n] = wfn.occupations(s, 0)(n);
+                CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                                       Nband * sizeof(double), cudaMemcpyHostToDevice));
+            }
         }
 
         // Step 2: Compute new density on GPU
-        // For Nspin=2: accumulate into d_rho_new as total density for SCF error
-        // Also compute per-spin density in a scratch buffer for mixing
         double* d_rho_new_total = d_rho_new;  // total density (Nd)
         CUDA_CHECK(cudaMemset(d_rho_new_total, 0, Nd_ * sizeof(double)));
 
-        // For spin-polarized: also need per-spin new density
+        // For spin-polarized / SOC: also need per-spin new density
         auto& sp_dens = ctx.scratch_pool;
         size_t sp_dens_cp = sp_dens.checkpoint();
         double* d_rho_new_up = nullptr;
         double* d_rho_new_dn = nullptr;
-        if (Nspin >= 2) {
+
+        // SOC-specific scratch for new noncollinear density
+        double* d_rho_new_soc = nullptr;
+        double* d_mag_x_new = nullptr, *d_mag_y_new = nullptr, *d_mag_z_new = nullptr;
+
+        if (has_soc_) {
+            // SOC: use spinor_density_gpu to compute (rho, mx, my, mz)
+            d_rho_new_soc = sp_dens.alloc<double>(Nd_);
+            d_mag_x_new   = sp_dens.alloc<double>(Nd_);
+            d_mag_y_new   = sp_dens.alloc<double>(Nd_);
+            d_mag_z_new   = sp_dens.alloc<double>(Nd_);
+            CUDA_CHECK(cudaMemset(d_rho_new_soc, 0, Nd_ * sizeof(double)));
+            CUDA_CHECK(cudaMemset(d_mag_x_new, 0, Nd_ * sizeof(double)));
+            CUDA_CHECK(cudaMemset(d_mag_y_new, 0, Nd_ * sizeof(double)));
+            CUDA_CHECK(cudaMemset(d_mag_z_new, 0, Nd_ * sizeof(double)));
+
+            int Nd_spinor = 2 * Nd_;
+            for (int k = 0; k < Nkpts; k++) {
+                double wk = kpt_weights[k];
+                // Upload spinor psi for this k-point
+                {
+                    size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
+                    std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
+                    std::memcpy(h_psi_z.data(), wfn.psi_kpt(0, k).data(), psi_bytes);
+                    CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(),
+                        psi_bytes, cudaMemcpyHostToDevice));
+                }
+                // Upload per-k occupations
+                {
+                    std::vector<double> h_occ_k(Nband);
+                    for (int n = 0; n < Nband; n++)
+                        h_occ_k[n] = wfn.occupations(0, k)(n);
+                    CUDA_CHECK(cudaMemcpy(d_occ, h_occ_k.data(),
+                                           Nband * sizeof(double), cudaMemcpyHostToDevice));
+                }
+                // SOC density uses occfac=1 (no spin degeneracy since both spins in spinor)
+                gpu::spinor_density_gpu(d_psi_spinor, d_occ,
+                                         d_rho_new_soc, d_mag_x_new, d_mag_y_new, d_mag_z_new,
+                                         Nd_, Nband, 1.0 * wk);
+            }
+            // Debug: check density values and occ/psi norms
+            {
+                double rho_sum = gpu_sum(d_rho_new_soc, Nd_);
+                double occ_sum = gpu_sum(d_occ, Nband);
+                // Check first few psi values
+                std::vector<double> psi_check(20);
+                CUDA_CHECK(cudaMemcpy(psi_check.data(), (double*)d_psi_spinor,
+                    20 * sizeof(double), cudaMemcpyDeviceToHost));
+                printf("  [SOC dbg] rho_sum=%.6e occ_sum=%.6e psi[0..3]=%.3e %.3e %.3e %.3e\n",
+                       rho_sum, occ_sum, psi_check[0], psi_check[1], psi_check[2], psi_check[3]);
+            }
+            // Copy total density for SCF error
+            CUDA_CHECK(cudaMemcpy(d_rho_new_total, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+        } else if (Nspin >= 2) {
             d_rho_new_up = sp_dens.alloc<double>(Nd_);
             d_rho_new_dn = sp_dens.alloc<double>(Nd_);
             CUDA_CHECK(cudaMemset(d_rho_new_up, 0, Nd_ * sizeof(double)));
             CUDA_CHECK(cudaMemset(d_rho_new_dn, 0, Nd_ * sizeof(double)));
-        }
 
-        for (int s = 0; s < Nspin_local_; s++) {
-            int s_glob = spin_start_ + s;
-            double* d_rho_spin_target = (Nspin >= 2) ? (s_glob == 0 ? d_rho_new_up : d_rho_new_dn) : d_rho_new_total;
+            for (int s = 0; s < Nspin_local_; s++) {
+                int s_glob = spin_start_ + s;
+                double* d_rho_spin_target = (s_glob == 0 ? d_rho_new_up : d_rho_new_dn);
 
-            if (is_kpt_) {
-                for (int k = 0; k < Nkpts; k++) {
-                    double wk = kpt_weights[k];
-                    // Upload complex psi for this (s,k)
-                    {
-                        std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                        std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
-                                    2 * Nd_ * Nband * sizeof(double));
-                        CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                            2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                if (is_kpt_) {
+                    for (int k = 0; k < Nkpts; k++) {
+                        double wk = kpt_weights[k];
+                        {
+                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
+                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
+                                        2 * Nd_ * Nband * sizeof(double));
+                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
+                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        }
+                        gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
+                                                   d_rho_spin_target, Nd_, Nband, occfac * wk);
                     }
-                    gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
-                                               d_rho_spin_target, Nd_, Nband, occfac * wk);
+                } else {
+                    gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
+                                              d_rho_spin_target, Nd_, Nband, occfac);
                 }
-            } else {
-                gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                          d_rho_spin_target, Nd_, Nband, occfac);
             }
-        }
 
-        // Compute total density from spin components
-        if (Nspin >= 2) {
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
             add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_rho_new_total, Nd_);
+        } else {
+            for (int s = 0; s < Nspin_local_; s++) {
+                int s_glob = spin_start_ + s;
+                if (is_kpt_) {
+                    for (int k = 0; k < Nkpts; k++) {
+                        double wk = kpt_weights[k];
+                        {
+                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
+                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
+                                        2 * Nd_ * Nband * sizeof(double));
+                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
+                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        }
+                        gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
+                                                   d_rho_new_total, Nd_, Nband, occfac * wk);
+                    }
+                } else {
+                    gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
+                                              d_rho_new_total, Nd_, Nband, occfac);
+                }
+            }
         }
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Step 3: Compute energy (D2H for energy components)
         {
-            int veff_size = Nd_ * Nspin;
-            int vxc_size = Nd_ * Nspin;
+            // For SOC energy: use Nspin=2 with d_rho = [up|dn] from collinear conversion
+            int Nspin_energy = has_soc_ ? 2 : Nspin;
+            int veff_size = Nd_ * Nspin_energy;
+            int vxc_size = Nd_ * Nspin_energy;
             std::vector<double> h_rho_in(Nd_), h_Veff_e(veff_size), h_phi_e(Nd_), h_exc_e(Nd_), h_Vxc_e(vxc_size);
 
             // For energy, use total input density
-            if (Nspin >= 2) {
+            if (has_soc_) {
+                // SOC: total density is d_rho_soc
+                CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            } else if (Nspin >= 2) {
                 // Compute total from per-spin
                 auto& sp_e = ctx.scratch_pool;
                 size_t sp_e_cp = sp_e.checkpoint();
@@ -1693,13 +2354,14 @@ double GPUSCFRunner::run(
             } else {
                 CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             }
+            // Download Veff for energy (for SOC, use d_Veff which holds [Vxc_up|Vxc_dn] from spin XC + phi)
             CUDA_CHECK(cudaMemcpy(h_Veff_e.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_phi_e.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_exc_e.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_Vxc_e.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost));
 
             // Download psi for Eband computation (only spin-0, kpt-0 for gamma)
-            if (!is_kpt_) {
+            if (!is_kpt_ && !has_soc_) {
                 for (int s = 0; s < Nspin_local_; s++) {
                     int s_glob = spin_start_ + s;
                     std::vector<double> h_psi_tmp(Nd_ * Nband);
@@ -1711,9 +2373,9 @@ double GPUSCFRunner::run(
             }
 
             ElectronDensity dens_in;
-            dens_in.allocate(Nd_, Nspin);
+            dens_in.allocate(Nd_, Nspin_energy);
             std::memcpy(dens_in.rho_total().data(), h_rho_in.data(), Nd_ * sizeof(double));
-            if (Nspin >= 2) {
+            if (has_soc_ || Nspin >= 2) {
                 std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
                 CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
                 CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
@@ -1730,7 +2392,7 @@ double GPUSCFRunner::run(
                 params.smearing,
                 kpt_weights, Nd_, dV_,
                 has_nlcc_ ? h_rho_core_vec.data() : nullptr, Ef_prev_, kpt_start_,
-                nullptr, nullptr, Nspin);
+                nullptr, nullptr, Nspin_energy);
 
             // SCF error: ||rho_out_total - rho_in_total|| / ||rho_out_total||
             std::vector<double> h_rho_new(Nd_);
@@ -1744,7 +2406,21 @@ double GPUSCFRunner::run(
             }
             double scf_error = (sum_sq_out > 0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0;
 
-            if (Nspin == 2) {
+            if (has_soc_) {
+                // SOC: report total |m|
+                double mag_sum = 0;
+                if (d_mag_x_new && d_mag_y_new && d_mag_z_new) {
+                    std::vector<double> h_mx(Nd_), h_my(Nd_), h_mz(Nd_);
+                    CUDA_CHECK(cudaMemcpy(h_mx.data(), d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(h_my.data(), d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(h_mz.data(), d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    for (int i = 0; i < Nd_; i++)
+                        mag_sum += std::sqrt(h_mx[i]*h_mx[i] + h_my[i]*h_my[i] + h_mz[i]*h_mz[i]);
+                    mag_sum *= dV_;
+                }
+                printf("SCF iter %3d: Etot = %18.10f Ha, SCF error = %10.3e, |m| = %8.4f (SOC)\n",
+                       scf_iter + 1, energy_.Etotal, scf_error, mag_sum);
+            } else if (Nspin == 2) {
                 // Compute magnetization for reporting
                 double mag_sum = 0;
                 if (d_rho_new_up && d_rho_new_dn) {
@@ -1779,7 +2455,48 @@ double GPUSCFRunner::run(
         }
 
         // Step 4: Mix density
-        if (Nspin == 1) {
+        if (has_soc_) {
+            // SOC: mix packed [rho | mx | my | mz] (4*Nd)
+            auto& sp_mix = ctx.scratch_pool;
+            double* d_dens_in  = sp_mix.alloc<double>(4 * Nd_);
+            double* d_dens_out = sp_mix.alloc<double>(4 * Nd_);
+            int bs = 256;
+            int gs = gpu::ceildiv(Nd_, bs);
+
+            // Pack input: [rho | mx | my | mz] from current density
+            CUDA_CHECK(cudaMemcpy(d_dens_in, d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_dens_in + Nd_, d_mag_x, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_dens_in + 2*Nd_, d_mag_y, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_dens_in + 3*Nd_, d_mag_z, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+
+            // Pack output: [rho | mx | my | mz] from new density
+            CUDA_CHECK(cudaMemcpy(d_dens_out, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_dens_out + Nd_, d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_dens_out + 2*Nd_, d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_dens_out + 3*Nd_, d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+
+            // Mix on packed 4*Nd array
+            gpu_pulay_mix(d_dens_in, d_dens_out, 4 * Nd_, mixing_history, mixing_param);
+
+            // Unpack mixed density back
+            CUDA_CHECK(cudaMemcpy(d_rho_soc, d_dens_in, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_mag_x, d_dens_in + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_mag_y, d_dens_in + 2*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_mag_z, d_dens_in + 3*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+
+            // Clamp rho and renormalize
+            clamp_min_kernel<<<gs, bs>>>(d_rho_soc, 0.0, Nd_);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            double rho_sum = gpu_sum(d_rho_soc, Nd_);
+            double Ne_current = rho_sum * dV_;
+            if (Ne_current > 1e-10) {
+                double sc = (double)Nelectron / Ne_current;
+                scale_kernel<<<gs, bs>>>(d_rho_soc, sc, Nd_);
+                scale_kernel<<<gs, bs>>>(d_mag_x, sc, Nd_);
+                scale_kernel<<<gs, bs>>>(d_mag_y, sc, Nd_);
+                scale_kernel<<<gs, bs>>>(d_mag_z, sc, Nd_);
+            }
+        } else if (Nspin == 1) {
             // Simple total density mixing
             gpu_pulay_mix(d_rho, d_rho_new_total, Nd_, mixing_history, mixing_param);
 
@@ -1838,37 +2555,79 @@ double GPUSCFRunner::run(
 
         sp_dens.restore(sp_dens_cp);
 
-        // Step 5: XC
-        if (Nspin >= 2) {
+        // Step 5: XC + Step 6: Poisson + Step 7: Veff
+        if (has_soc_) {
+            int bs = 256;
+            int gs = gpu::ceildiv(Nd_, bs);
+
+            // SOC Step 5a: Convert noncollinear to collinear for XC
+            // d_rho = [rho_up | rho_dn] from (rho, mx, my, mz)
+            mag_to_collinear_kernel<<<gs, bs>>>(d_rho_soc, d_mag_x, d_mag_y, d_mag_z,
+                                                  d_rho, d_rho + Nd_, Nd_);
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // SOC Step 5b: Spin-polarized XC on collinear densities
             gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
-        } else {
-            gpu_xc_evaluate(d_rho, d_exc, d_Vxc, Nd_);
-        }
 
-        // Step 6: Poisson solver (always uses total density)
-        if (Nspin >= 2) {
-            // Compute total density into d_rho_new (reuse as temp)
-            int bs = 256;
-            int gs = gpu::ceildiv(Nd_, bs);
-            add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
-            gpu_poisson_solve(d_rho_new, d_phi, ctx.buf.b, Nd_, poisson_tol);
-        } else {
-            gpu_poisson_solve(d_rho, d_phi, ctx.buf.b, Nd_, poisson_tol);
-        }
+            // SOC Step 6: Poisson on total density
+            gpu_poisson_solve(d_rho_soc, d_phi, ctx.buf.b, Nd_, poisson_tol);
 
-        // Step 7: Veff = Vxc_s + phi for each spin
-        {
-            int bs = 256;
-            int gs = gpu::ceildiv(Nd_, bs);
-            for (int s = 0; s < Nspin; s++) {
-                veff_combine_spin_kernel<<<gs, bs>>>(
-                    d_Vxc + s * Nd_, d_phi, d_Veff + s * Nd_, Nd_);
+            // SOC Step 7a: Build Veff for energy = [Vxc_up + phi | Vxc_dn + phi]
+            veff_combine_spin_kernel<<<gs, bs>>>(d_Vxc, d_phi, d_Veff, Nd_);
+            veff_combine_spin_kernel<<<gs, bs>>>(d_Vxc + Nd_, d_phi, d_Veff + Nd_, Nd_);
+
+            // SOC Step 7b: Build Veff_spinor from XC + magnetization direction
+            veff_spinor_from_xc_kernel<<<gs, bs>>>(d_Vxc, d_Vxc + Nd_, d_phi,
+                                                     d_mag_x, d_mag_y, d_mag_z,
+                                                     d_Veff_spinor, Nd_);
+        } else {
+            // Non-SOC XC
+            if (Nspin >= 2) {
+                gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
+            } else {
+                gpu_xc_evaluate(d_rho, d_exc, d_Vxc, Nd_);
+            }
+
+            // Non-SOC Poisson
+            if (Nspin >= 2) {
+                int bs = 256;
+                int gs = gpu::ceildiv(Nd_, bs);
+                add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
+                gpu_poisson_solve(d_rho_new, d_phi, ctx.buf.b, Nd_, poisson_tol);
+            } else {
+                gpu_poisson_solve(d_rho, d_phi, ctx.buf.b, Nd_, poisson_tol);
+            }
+
+            // Non-SOC Veff
+            {
+                int bs = 256;
+                int gs = gpu::ceildiv(Nd_, bs);
+                for (int s = 0; s < Nspin; s++) {
+                    veff_combine_spin_kernel<<<gs, bs>>>(
+                        d_Vxc + s * Nd_, d_phi, d_Veff + s * Nd_, Nd_);
+                }
             }
         }
     }
 
     if (!converged_) {
         printf("WARNING: GPU SCF did not converge within %d iterations.\n", max_iter);
+    }
+
+    // Free SOC-specific device buffers
+    if (has_soc_) {
+        if (d_psi_spinor)   cudaFreeAsync(d_psi_spinor, 0);
+        if (d_Hpsi_spinor)  cudaFreeAsync(d_Hpsi_spinor, 0);
+        if (d_Xold_spinor)  cudaFreeAsync(d_Xold_spinor, 0);
+        if (d_Xnew_spinor)  cudaFreeAsync(d_Xnew_spinor, 0);
+        if (d_x_ex_spinor)  cudaFreeAsync(d_x_ex_spinor, 0);
+        if (d_Hs_spinor)    cudaFreeAsync(d_Hs_spinor, 0);
+        if (d_Ms_spinor)    cudaFreeAsync(d_Ms_spinor, 0);
+        if (d_Veff_spinor)  cudaFreeAsync(d_Veff_spinor, 0);
+        if (d_rho_soc)      cudaFreeAsync(d_rho_soc, 0);
+        if (d_mag_x)        cudaFreeAsync(d_mag_x, 0);
+        if (d_mag_y)        cudaFreeAsync(d_mag_y, 0);
+        if (d_mag_z)        cudaFreeAsync(d_mag_z, 0);
     }
 
     Ef_ = Ef;
@@ -2015,6 +2774,7 @@ void GPUSCFRunner::compute_force_stress(
 // ============================================================
 void GPUSCFRunner::cleanup() {
     gpu_vnl_.free();
+    gpu_soc_.free_soc();
     if (d_Y_) { cudaFreeAsync(d_Y_, 0); d_Y_ = nullptr; }
     if (d_Y_s1_) { cudaFreeAsync(d_Y_s1_, 0); d_Y_s1_ = nullptr; }
     if (d_rho_core_) { cudaFreeAsync(d_rho_core_, 0); d_rho_core_ = nullptr; }

@@ -67,6 +67,7 @@ if(USE_CUDA)
         operators/Hamiltonian.cu
         operators/NonlocalProjector.cu
         operators/ComplexOperators.cu
+        operators/SOCOperators.cu
         solvers/EigenSolver.cu
         solvers/LinearSolver.cu
         xc/XCFunctional.cu
