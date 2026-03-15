@@ -1,4 +1,14 @@
 build/
+build_*/
 .claude/
 *.o
 *.a
+*.so
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+python/lynx/_core*.so
+.pytest_cache/
