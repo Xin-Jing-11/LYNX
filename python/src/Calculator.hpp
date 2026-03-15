@@ -41,6 +41,9 @@ public:
     /// Load configuration from JSON file
     void load_config(const std::string& json_file);
 
+    /// Set configuration directly (no JSON file needed)
+    void set_config(const lynx::SystemConfig& config);
+
     /// Set up all internal objects (lattice, grid, operators, etc.)
     /// Uses MPI_COMM_SELF for single-process mode.
     void setup(MPI_Comm comm = MPI_COMM_SELF);

@@ -3,8 +3,13 @@ LYNX — Real-space DFT simulator with Python bindings.
 
 Three granularity levels:
   Level 1 (High-level):  lynx.Calculator("input.json")
+                          lynx.DFTConfig(...).create_calculator()
   Level 2 (Mid-level):   calc.setup(); access internal operators
   Level 3 (Low-level):   lynx.Laplacian, lynx.Gradient, etc. on numpy arrays
+
+Units:
+  LYNX internal: Bohr (length), Hartree (energy)
+  ASE interface: Angstrom (length), eV (energy) — converted automatically
 """
 
 __version__ = "0.1.0"
@@ -62,6 +67,9 @@ from ._core import (
     AtomInfluence,
     AtomNlocInfluence,
     Crystal,
+    # Config
+    SystemConfig,
+    AtomTypeInput,
     # High-level
     Calculator,
     # Helpers
@@ -70,6 +78,8 @@ from ._core import (
 )
 
 from ._core import _ensure_mpi
+from .config import DFTConfig
+from . import units
 
 
 def init():

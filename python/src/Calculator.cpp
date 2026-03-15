@@ -11,6 +11,11 @@ void Calculator::load_config(const std::string& json_file) {
     lynx::InputParser::validate(config_);
 }
 
+void Calculator::set_config(const lynx::SystemConfig& config) {
+    config_ = config;
+    // Skip validation of Nstates here — setup() will auto-compute if <= 0
+}
+
 void Calculator::setup(MPI_Comm comm) {
     // Lattice & grid
     lattice_ = lynx::Lattice(config_.latvec, config_.cell_type);
