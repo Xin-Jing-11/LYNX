@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include "types.hpp"
 
-namespace sparc {
+namespace lynx {
 
 template<typename T>
 class NDArray {
@@ -183,4 +183,4 @@ private:
     }
 };
 
-} // namespace sparc
+} // namespace lynx

@@ -2,7 +2,7 @@
 #include "operators/FDStencil.hpp"
 #include <cmath>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(FDStencil, Order6Weights) {
     Mat3 lv;

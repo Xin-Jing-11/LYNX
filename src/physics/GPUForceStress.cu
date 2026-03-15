@@ -12,7 +12,7 @@
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -608,6 +608,6 @@ void compute_force_stress_gpu(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

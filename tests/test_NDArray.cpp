@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/NDArray.hpp"
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(NDArray, Allocate1D) {
     NDArray<double> arr(100);

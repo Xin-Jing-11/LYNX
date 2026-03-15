@@ -17,9 +17,9 @@
 #include <vector>
 #include <array>
 
-namespace sparc {
+namespace lynx {
 
-// Stress tensor calculation matching reference SPARC.
+// Stress tensor calculation matching reference LYNX.
 // Components: kinetic, XC, electrostatic (local), nonlocal.
 // Stored as 6-component Voigt notation:
 //   [σ_xx, σ_xy, σ_xz, σ_yy, σ_yz, σ_zz] (indices 0-5)
@@ -143,4 +143,4 @@ private:
         int band_start = 0);
 };
 
-} // namespace sparc
+} // namespace lynx

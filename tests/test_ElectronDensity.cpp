@@ -5,7 +5,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(ElectronDensity, Allocate) {
     ElectronDensity rho;

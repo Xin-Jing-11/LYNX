@@ -5,7 +5,7 @@
 #include "core/Lattice.hpp"
 #include "core/FDGrid.hpp"
 
-namespace sparc {
+namespace lynx {
 
 class OutputWriter {
 public:
@@ -13,4 +13,4 @@ public:
                               const FDGrid& grid, int world_rank = 0);
 };
 
-} // namespace sparc
+} // namespace lynx

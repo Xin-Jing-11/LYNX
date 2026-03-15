@@ -1,7 +1,7 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // Gradient kernel for direction=0 (x), stride=1, coefficients from d_D1x
@@ -217,5 +217,5 @@ void gradient_v2_gpu(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 #endif // USE_CUDA

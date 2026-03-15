@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstdio>
 
-namespace sparc {
+namespace lynx {
 
 void KPoints::generate(int Kx, int Ky, int Kz, Vec3 shift, const Lattice& lattice) {
     Nkpts_full_ = Kx * Ky * Kz;
@@ -103,4 +103,4 @@ bool KPoints::is_gamma_only() const {
            std::fabs(kpts_cart_[0].z) < tol;
 }
 
-} // namespace sparc
+} // namespace lynx

@@ -9,7 +9,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 // Helper: create a simple single-process test setup
 struct LapTestSetup {

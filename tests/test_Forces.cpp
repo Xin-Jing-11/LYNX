@@ -7,7 +7,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Forces, SymmetrizeProperty) {
     // Test that after symmetrization, forces sum to zero in each direction

@@ -5,7 +5,7 @@
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -373,6 +373,6 @@ __global__ void mix_residual_kernel(
 // (Same structure as Anderson in AAR — reuse anderson_kernel)
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

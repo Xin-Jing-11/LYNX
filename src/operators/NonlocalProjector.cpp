@@ -5,7 +5,7 @@
 #include <vector>
 #include <algorithm>
 
-namespace sparc {
+namespace lynx {
 
 void NonlocalProjector::setup(const Crystal& crystal,
                                const std::vector<AtomNlocInfluence>& nloc_influence,
@@ -339,4 +339,4 @@ void NonlocalProjector::apply_kpt(const Complex* psi, Complex* Hpsi, int ncol, d
     }
 }
 
-} // namespace sparc
+} // namespace lynx

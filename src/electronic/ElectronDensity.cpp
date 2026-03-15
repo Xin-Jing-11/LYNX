@@ -2,7 +2,7 @@
 #include <cstring>
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 void ElectronDensity::allocate(int Nd_d, int Nspin) {
     Nd_d_ = Nd_d;
@@ -146,4 +146,4 @@ double ElectronDensity::integrate(double dV) const {
     return sum * dV;
 }
 
-} // namespace sparc
+} // namespace lynx

@@ -3,13 +3,13 @@
 #include <fstream>
 #include <cstdio>
 
-using namespace sparc;
+using namespace lynx;
 
 namespace {
 
 // Helper: write a temp JSON file and return path
 std::string write_temp_json(const std::string& content) {
-    std::string path = "/tmp/sparc_test_input.json";
+    std::string path = "/tmp/lynx_test_input.json";
     std::ofstream ofs(path);
     ofs << content;
     ofs.close();

@@ -2,7 +2,7 @@
 #include <cstring>
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 HaloExchange::HaloExchange(const Domain& domain, int FDn)
     : nx_(domain.Nx_d()), ny_(domain.Ny_d()), nz_(domain.Nz_d()),
@@ -188,4 +188,4 @@ void HaloExchange::apply_periodic_bc_kpt(Complex* x_ex, int ncol,
     }
 }
 
-} // namespace sparc
+} // namespace lynx

@@ -3,7 +3,7 @@
 #include <vector>
 #include <string>
 
-namespace sparc {
+namespace lynx {
 
 // Stores pseudopotential data for one element type.
 // Radial functions on a radial grid, KB projectors per angular momentum channel.
@@ -97,10 +97,10 @@ private:
     int pspxc_ = 0;
     bool is_r_uniform_ = false;
 
-    // Hermite cubic spline: compute first derivatives (matches reference SPARC getYD_gen)
+    // Hermite cubic spline: compute first derivatives (matches reference LYNX getYD_gen)
     static void spline_deriv(const std::vector<double>& x,
                              const std::vector<double>& y,
                              std::vector<double>& yd);
 };
 
-} // namespace sparc
+} // namespace lynx

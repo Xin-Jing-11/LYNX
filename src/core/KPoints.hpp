@@ -4,13 +4,13 @@
 #include "core/Lattice.hpp"
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
 // K-point grid generation and time-reversal symmetry reduction.
-// Matches reference SPARC Calculate_kpoints() exactly.
+// Matches reference LYNX Calculate_kpoints() exactly.
 //
 // K-points are stored in Cartesian reciprocal coordinates (2π/L units),
-// matching reference SPARC convention: k_cart_i = k_red_i * 2π / L_i
+// matching reference LYNX convention: k_cart_i = k_red_i * 2π / L_i
 class KPoints {
 public:
     KPoints() = default;
@@ -52,4 +52,4 @@ private:
     std::vector<double> weights_;
 };
 
-} // namespace sparc
+} // namespace lynx

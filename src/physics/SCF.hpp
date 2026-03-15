@@ -31,7 +31,7 @@
 #include "physics/Electrostatics.hpp"
 #endif
 
-namespace sparc {
+namespace lynx {
 
 struct SCFParams {
     int max_iter = 100;
@@ -180,4 +180,4 @@ public:
                              const double* mag_init = nullptr);
 };
 
-} // namespace sparc
+} // namespace lynx

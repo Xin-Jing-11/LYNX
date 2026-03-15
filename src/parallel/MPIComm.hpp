@@ -2,7 +2,7 @@
 
 #include <mpi.h>
 
-namespace sparc {
+namespace lynx {
 
 class MPIComm {
 public:
@@ -33,4 +33,4 @@ private:
     bool owned_ = false;
 };
 
-} // namespace sparc
+} // namespace lynx

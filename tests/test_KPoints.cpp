@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 
-using namespace sparc;
+using namespace lynx;
 
 // Helper: create orthogonal lattice with given cell length
 static Lattice make_cubic(double a) {

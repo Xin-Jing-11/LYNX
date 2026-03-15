@@ -6,7 +6,7 @@
 #include "core/types.hpp"
 #include "parallel/Parallelization.hpp"
 
-namespace sparc {
+namespace lynx {
 
 struct SystemConfig {
     // Lattice
@@ -80,4 +80,4 @@ public:
     static void validate(const SystemConfig& config);
 };
 
-} // namespace sparc
+} // namespace lynx

@@ -8,7 +8,7 @@
 #include "core/FDGrid.hpp"
 #include "atoms/Crystal.hpp"
 
-namespace sparc {
+namespace lynx {
 
 using Complex = std::complex<double>;
 
@@ -22,7 +22,7 @@ using Complex = std::complex<double>;
 //   Hpsi += Chi * alpha            (accumulate)
 //
 // For k-points: Chi is REAL, Bloch phase factors are applied as scalars
-// during matrix operations (matching reference SPARC).
+// during matrix operations (matching reference LYNX).
 class NonlocalProjector {
 public:
     NonlocalProjector() = default;
@@ -75,4 +75,4 @@ private:
 
 };
 
-} // namespace sparc
+} // namespace lynx

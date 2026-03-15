@@ -11,7 +11,7 @@
 #include <mpi.h>
 #include <cassert>
 
-namespace sparc {
+namespace lynx {
 
 std::vector<double> Forces::compute(
     const Wavefunction& wfn,
@@ -104,7 +104,7 @@ std::vector<double> Forces::compute(
 }
 
 // ---------------------------------------------------------------------------
-// Local force matching reference SPARC Calculate_local_forces_linear().
+// Local force matching reference LYNX Calculate_local_forces_linear().
 //
 // Algorithm:
 // 1. Compute ∇φ (gradient of electrostatic potential) on the DM domain
@@ -346,7 +346,7 @@ void Forces::compute_local(
 }
 
 // ---------------------------------------------------------------------------
-// Nonlocal force matching reference SPARC Calculate_nonlocal_forces_linear().
+// Nonlocal force matching reference LYNX Calculate_nonlocal_forces_linear().
 //
 // Algorithm:
 // 1. For all bands at once: compute alpha = <χ|ψ>·dV
@@ -626,7 +626,7 @@ void Forces::compute_nonlocal(
 }
 
 // ---------------------------------------------------------------------------
-// NLCC XC force matching reference SPARC Calculate_forces_xc_linear().
+// NLCC XC force matching reference LYNX Calculate_forces_xc_linear().
 //
 // For each atom J with NLCC core charge:
 //   1. Interpolate ρ_core_J on double-extended grid (rb + 2*FDn)
@@ -814,4 +814,4 @@ void Forces::symmetrize(std::vector<double>& forces, int n_atom) {
     }
 }
 
-} // namespace sparc
+} // namespace lynx

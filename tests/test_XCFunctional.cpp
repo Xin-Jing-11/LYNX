@@ -7,7 +7,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(XCFunctional, LDA_UniformElectronGas) {
     XCFunctional xc;
@@ -46,7 +46,7 @@ TEST(XCFunctional, LDA_ZeroDensity) {
 }
 
 TEST(XCFunctional, LDA_SlaterExchange_KnownValue) {
-    // Verify Slater exchange matches reference SPARC exactly
+    // Verify Slater exchange matches reference LYNX exactly
     // ex = -C2 * rho^(1/3), vx = -C3 * rho^(1/3)
     // C2 = 0.738558766382022, C3 = 0.9847450218426965
     XCFunctional xc;

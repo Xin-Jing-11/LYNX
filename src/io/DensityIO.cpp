@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cstring>
 
-namespace sparc {
+namespace lynx {
 
 bool DensityIO::write(const std::string& filename,
                       const ElectronDensity& density,
@@ -118,4 +118,4 @@ bool DensityIO::read(const std::string& filename,
     return true;
 }
 
-} // namespace sparc
+} // namespace lynx

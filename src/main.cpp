@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
 
     if (argc < 2) {
         if (rank == 0)
-            std::fprintf(stderr, "Usage: sparc <input.json>\n");
+            std::fprintf(stderr, "Usage: lynx <input.json>\n");
         MPI_Finalize();
         return 1;
     }
@@ -46,16 +46,16 @@ int main(int argc, char** argv) {
         std::string input_file = argv[1];
 
         // ===== Parse input =====
-        auto config = sparc::InputParser::parse(input_file);
-        sparc::InputParser::validate(config);
+        auto config = lynx::InputParser::parse(input_file);
+        lynx::InputParser::validate(config);
 
         // ===== Create lattice and grid =====
-        sparc::Lattice lattice(config.latvec, config.cell_type);
-        sparc::FDGrid grid(config.Nx, config.Ny, config.Nz, lattice,
+        lynx::Lattice lattice(config.latvec, config.cell_type);
+        lynx::FDGrid grid(config.Nx, config.Ny, config.Nz, lattice,
                            config.bcx, config.bcy, config.bcz);
-        sparc::FDStencil stencil(config.fd_order, grid, lattice);
+        lynx::FDStencil stencil(config.fd_order, grid, lattice);
 
-        sparc::OutputWriter::print_summary(config, lattice, grid, rank);
+        lynx::OutputWriter::print_summary(config, lattice, grid, rank);
 
         if (rank == 0 && !lattice.is_orthogonal()) {
             auto& lT = lattice.lapc_T();
@@ -80,11 +80,11 @@ int main(int argc, char** argv) {
         }
 
         // ===== Generate k-point grid =====
-        sparc::KPoints kpoints;
+        lynx::KPoints kpoints;
         kpoints.generate(config.Kx, config.Ky, config.Kz, config.kpt_shift, lattice);
         int Nkpts = kpoints.Nkpts();  // symmetry-reduced count
         bool is_kpt = !kpoints.is_gamma_only();
-        int Nspin = (config.spin_type == sparc::SpinType::None) ? 1 : 2;
+        int Nspin = (config.spin_type == lynx::SpinType::None) ? 1 : 2;
 
         if (rank == 0) {
             std::printf("K-points: %dx%dx%d grid, %d full -> %d symmetry-reduced%s\n",
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
             config.parallel.npband = nproc_after_kpt;
         }
 
-        sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
+        lynx::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
 
         const auto& domain = parallel.domain();
@@ -147,8 +147,8 @@ int main(int argc, char** argv) {
         }
 
         // ===== Load pseudopotentials and create Crystal =====
-        std::vector<sparc::AtomType> atom_types;
-        std::vector<sparc::Vec3> all_positions;
+        std::vector<lynx::AtomType> atom_types;
+        std::vector<lynx::Vec3> all_positions;
         std::vector<int> type_indices;
 
         int total_Nelectron = 0;
@@ -157,23 +157,23 @@ int main(int argc, char** argv) {
             int n_atoms = static_cast<int>(at_in.coords.size());
 
             // Load pseudopotential to get Zval
-            sparc::Pseudopotential psd_tmp;
+            lynx::Pseudopotential psd_tmp;
             psd_tmp.load_psp8(at_in.pseudo_file);
             double Zval = psd_tmp.Zval();
             double mass = 1.0; // placeholder — not needed for single-point
 
-            sparc::AtomType atype(at_in.element, mass, Zval, n_atoms);
+            lynx::AtomType atype(at_in.element, mass, Zval, n_atoms);
             atype.psd().load_psp8(at_in.pseudo_file);
 
             for (int ia = 0; ia < n_atoms; ++ia) {
-                sparc::Vec3 pos = at_in.coords[ia];
+                lynx::Vec3 pos = at_in.coords[ia];
                 if (at_in.fractional) {
                     // For non-orthogonal: store in non-Cartesian coords (scaled fractional)
                     // For orthogonal: non-Cart = Cartesian, so frac_to_cart is fine
                     if (lattice.is_orthogonal()) {
                         pos = lattice.frac_to_cart(pos);
                     } else {
-                        sparc::Vec3 L = lattice.lengths();
+                        lynx::Vec3 L = lattice.lengths();
                         pos = {pos.x * L.x, pos.y * L.y, pos.z * L.z};
                     }
                 } else {
@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
         int Nelectron = (config.Nelectron > 0) ? config.Nelectron : total_Nelectron;
         int Natom = static_cast<int>(all_positions.size());
 
-        sparc::Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
+        lynx::Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
 
         if (rank == 0) {
             std::printf("Atoms: %d total, %d electrons, %d types\n",
@@ -201,7 +201,7 @@ int main(int argc, char** argv) {
         }
 
         // ===== Compute atom influence =====
-        // Reference SPARC uses Calculate_PseudochargeCutoff to find per-type cutoffs
+        // Reference LYNX uses Calculate_PseudochargeCutoff to find per-type cutoffs
         // based on TOL_PSEUDOCHARGE. We add a margin to rc_max to ensure the
         // pseudocharge influence region is large enough.
         double rc_max = 0.0;
@@ -218,10 +218,10 @@ int main(int argc, char** argv) {
         double h_max = std::max({grid.dx(), grid.dy(), grid.dz()});
         rc_max += 8.0 * h_max;
 
-        std::vector<sparc::AtomInfluence> influence;
+        std::vector<lynx::AtomInfluence> influence;
         crystal.compute_atom_influence(domain, rc_max, influence);
 
-        std::vector<sparc::AtomNlocInfluence> nloc_influence;
+        std::vector<lynx::AtomNlocInfluence> nloc_influence;
         crystal.compute_nloc_influence(domain, nloc_influence);
 
         if (rank == 0) {
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
         }
 
         // ===== Electrostatics: pseudocharge + Vloc =====
-        sparc::Electrostatics elec;
+        lynx::Electrostatics elec;
         elec.compute_pseudocharge(crystal, influence, domain, grid, stencil);
 
         int Nd_d = domain.Nd_d();
@@ -260,12 +260,12 @@ int main(int argc, char** argv) {
         }
 
         // ===== Setup operators =====
-        sparc::HaloExchange halo(domain, stencil.FDn());
-        sparc::Laplacian laplacian(stencil, domain);
-        sparc::Gradient gradient(stencil, domain);
+        lynx::HaloExchange halo(domain, stencil.FDn());
+        lynx::Laplacian laplacian(stencil, domain);
+        lynx::Gradient gradient(stencil, domain);
 
         // Setup nonlocal projectors
-        sparc::NonlocalProjector vnl;
+        lynx::NonlocalProjector vnl;
         vnl.setup(crystal, nloc_influence, domain, grid);
 
         if (rank == 0) {
@@ -273,14 +273,14 @@ int main(int argc, char** argv) {
         }
 
         // Setup Hamiltonian
-        sparc::Hamiltonian hamiltonian;
+        lynx::Hamiltonian hamiltonian;
         hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
         // ===== Setup SCF =====
         int Nstates = config.Nstates;
         if (Nstates <= 0) Nstates = Nelectron / 2 + 10;
 
-        sparc::SCFParams scf_params;
+        lynx::SCFParams scf_params;
         scf_params.max_iter = config.max_scf_iter;
         scf_params.min_iter = config.min_scf_iter;
         scf_params.tol = config.scf_tol;
@@ -293,7 +293,7 @@ int main(int argc, char** argv) {
         scf_params.cheb_degree = config.cheb_degree;
         scf_params.rho_trigger = config.rho_trigger;
 
-        sparc::SCF scf;
+        lynx::SCF scf;
         // For band parallelism (npband > 1):
         //   bandcomm groups processes with the same band_index (size 1 without domain decomp)
         //   kptcomm groups processes handling the same kpt (size = npband)
@@ -313,7 +313,7 @@ int main(int argc, char** argv) {
         // ===== Allocate wavefunctions =====
         // For band parallelism: psi has Nband_local columns, but eigenvalues/occupations
         // have Nstates (Nband_global) entries.
-        sparc::Wavefunction wfn;
+        lynx::Wavefunction wfn;
         wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local, is_kpt);
 
         // ===== Initialize density =====
@@ -322,9 +322,9 @@ int main(int argc, char** argv) {
             bool density_loaded = false;
             if (!config.density_restart_file.empty()) {
                 // Pre-allocate density so read() can fill it
-                sparc::ElectronDensity restart_rho;
+                lynx::ElectronDensity restart_rho;
                 restart_rho.allocate(Nd_d, Nspin);
-                if (sparc::DensityIO::read(config.density_restart_file, restart_rho, grid, lattice)) {
+                if (lynx::DensityIO::read(config.density_restart_file, restart_rho, grid, lattice)) {
                     scf.set_initial_density(restart_rho.rho_total().data(), Nd_d,
                                             Nspin == 2 ? restart_rho.mag().data() : nullptr);
                     density_loaded = true;
@@ -439,7 +439,7 @@ int main(int argc, char** argv) {
 
         // Write converged density to file if requested
         if (!config.density_output_file.empty() && rank == 0) {
-            if (sparc::DensityIO::write(config.density_output_file, scf.density(), grid, lattice)) {
+            if (lynx::DensityIO::write(config.density_output_file, scf.density(), grid, lattice)) {
                 std::printf("Density written to %s\n", config.density_output_file.c_str());
             } else {
                 std::fprintf(stderr, "WARNING: Failed to write density to %s\n",
@@ -450,7 +450,7 @@ int main(int argc, char** argv) {
         // ===== Forces =====
         if (config.print_forces) {
             std::vector<double> kpt_weights = kpoints.normalized_weights();
-            sparc::Forces forces;
+            lynx::Forces forces;
             auto f = forces.compute(wfn, crystal, influence, nloc_influence, vnl,
                                     stencil, gradient, halo, domain, grid,
                                     scf.phi(), scf.density().rho_total().data(),
@@ -493,8 +493,8 @@ int main(int argc, char** argv) {
         // ===== Stress =====
         if (config.calc_stress || config.calc_pressure) {
             std::vector<double> kpt_weights = kpoints.normalized_weights();
-            sparc::Stress stress;
-            int Nspin_calc = (config.spin_type == sparc::SpinType::Collinear) ? 2 : 1;
+            lynx::Stress stress;
+            int Nspin_calc = (config.spin_type == lynx::SpinType::Collinear) ? 2 : 1;
             const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
             const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
             auto sigma = stress.compute(wfn, crystal, influence, nloc_influence, vnl,
@@ -524,7 +524,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (rank == 0) std::printf("\nSPARC calculation complete.\n");
+        if (rank == 0) std::printf("\nLYNX calculation complete.\n");
 
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Error on rank %d: %s\n", rank, e.what());

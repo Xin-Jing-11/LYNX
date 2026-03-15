@@ -3,7 +3,7 @@
 #include "core/constants.hpp"
 #include <cmath>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Lattice, OrthogonalBasic) {
     Mat3 lv;

@@ -17,7 +17,7 @@
 #include "parallel/HaloExchange.hpp"
 #include "atoms/Crystal.hpp"
 
-namespace sparc {
+namespace lynx {
 
 struct SCFParams;  // forward declaration (defined in SCF.hpp)
 
@@ -179,6 +179,6 @@ private:
     void cleanup();
 };
 
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

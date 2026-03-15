@@ -3,7 +3,7 @@
 #include <cmath>
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -743,6 +743,6 @@ void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

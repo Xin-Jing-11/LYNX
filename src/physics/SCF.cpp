@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <mpi.h>
 
-namespace sparc {
+namespace lynx {
 
 void SCF::setup(const FDGrid& grid,
                  const Domain& domain,
@@ -361,7 +361,7 @@ double SCF::run(Wavefunction& wfn,
             std::printf("Chebyshev degree: %d\n", params_.cheb_degree);
     }
 
-    // Randomize wavefunctions — match reference SPARC exactly
+    // Randomize wavefunctions — match reference LYNX exactly
     // Reference: SetRandMat(Xorb, DMndsp, Nband, -0.5, 0.5, spincomm)
     // seed = rank_in_spincomm * 100 + 1 (serial: seed=1)
     // For gamma-point, each (spin,kpt) pair gets same seed (reference fills all at once)
@@ -384,7 +384,7 @@ double SCF::run(Wavefunction& wfn,
     if (Natom <= 0) Natom = std::max(1, Nelectron / 4);
 
     // ===== SCF Loop =====
-    // Reference SPARC control flow (eigSolve_CheFSI):
+    // Reference LYNX control flow (eigSolve_CheFSI):
     //   SCFcount=0: do rhoTrigger (default 4) CheFSI passes
     //   SCFcount>0: do Nchefsi (default 1) CheFSI passes
     // Between each CheFSI pass, occupations are computed to update lambda_cutoff.
@@ -492,7 +492,7 @@ double SCF::run(Wavefunction& wfn,
         }
 
         // 3. Compute energy BEFORE mixing, using rho_in (the density that
-        //    generated the current potentials). This matches reference SPARC,
+        //    generated the current potentials). This matches reference LYNX,
         //    which computes energy based on rho_in for faster convergence.
         energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
                                        exc_.data(), Vxc_.data(), rho_b,
@@ -578,7 +578,7 @@ double SCF::run(Wavefunction& wfn,
             std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
         } else {
             // Spin-polarized: mix packed array [total | magnetization] (2*Nd_d)
-            // Reference SPARC: mixing variable is [rho, mag] where mag = rho_up - rho_down
+            // Reference LYNX: mixing variable is [rho, mag] where mag = rho_up - rho_down
             std::vector<double> dens_in(2 * Nd_d), dens_out(2 * Nd_d);
 
             // Pack input: [rho_total | mag]
@@ -720,4 +720,4 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
 }
 #endif
 
-} // namespace sparc
+} // namespace lynx

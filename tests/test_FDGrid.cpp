@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/FDGrid.hpp"
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(FDGrid, BasicPeriodic) {
     Mat3 lv;

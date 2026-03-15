@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <string>
 
-using namespace sparc;
+using namespace lynx;
 
 namespace {
 
@@ -33,7 +33,7 @@ TEST(DensityIO, WriteReadRoundtrip_Nspin1) {
         rho_out.rho_total().data()[i] = rho_out.rho(0).data()[i];
     }
 
-    std::string filename = "/tmp/test_density_nspin1.sparcrho";
+    std::string filename = "/tmp/test_density_nspin1.lynxrho";
     ASSERT_TRUE(DensityIO::write(filename, rho_out, grid, lattice));
 
     // Read back
@@ -66,7 +66,7 @@ TEST(DensityIO, WriteReadRoundtrip_Nspin2) {
         rho_out.mag().data()[i] = up - dn;
     }
 
-    std::string filename = "/tmp/test_density_nspin2.sparcrho";
+    std::string filename = "/tmp/test_density_nspin2.lynxrho";
     ASSERT_TRUE(DensityIO::write(filename, rho_out, grid, lattice));
 
     ElectronDensity rho_in;
@@ -89,7 +89,7 @@ TEST(DensityIO, ReadNonexistentFile) {
 
     ElectronDensity rho;
     rho.allocate(64, 1);
-    EXPECT_FALSE(DensityIO::read("/tmp/nonexistent_density.sparcrho", rho, grid, lattice));
+    EXPECT_FALSE(DensityIO::read("/tmp/nonexistent_density.lynxrho", rho, grid, lattice));
 }
 
 TEST(DensityIO, ReadGridMismatch) {
@@ -103,7 +103,7 @@ TEST(DensityIO, ReadGridMismatch) {
     for (int i = 0; i < 512; ++i) rho_out.rho(0).data()[i] = 0.01;
     std::memcpy(rho_out.rho_total().data(), rho_out.rho(0).data(), 512 * sizeof(double));
 
-    std::string filename = "/tmp/test_density_mismatch.sparcrho";
+    std::string filename = "/tmp/test_density_mismatch.lynxrho";
     ASSERT_TRUE(DensityIO::write(filename, rho_out, grid8, lattice));
 
     // Try to read with 6x6x6 — should fail
@@ -125,7 +125,7 @@ TEST(DensityIO, ReadSpinMismatch) {
     for (int i = 0; i < Nd; ++i) rho_out.rho(0).data()[i] = 0.01;
     std::memcpy(rho_out.rho_total().data(), rho_out.rho(0).data(), Nd * sizeof(double));
 
-    std::string filename = "/tmp/test_density_spinmismatch.sparcrho";
+    std::string filename = "/tmp/test_density_spinmismatch.lynxrho";
     ASSERT_TRUE(DensityIO::write(filename, rho_out, grid, lattice));
 
     // Try to read with Nspin=2 — should fail

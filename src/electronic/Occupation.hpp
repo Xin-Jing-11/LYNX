@@ -6,7 +6,7 @@
 
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
 // Fermi level determination and occupation calculation.
 // Supports Gaussian and Fermi-Dirac smearing.
@@ -63,4 +63,4 @@ private:
                                    SmearingType smearing);
 };
 
-} // namespace sparc
+} // namespace lynx

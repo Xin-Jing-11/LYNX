@@ -6,7 +6,7 @@
 
 using json = nlohmann::json;
 
-namespace sparc {
+namespace lynx {
 
 namespace {
 
@@ -243,4 +243,4 @@ void InputParser::validate(const SystemConfig& config) {
         throw std::runtime_error("Nstates must be positive");
 }
 
-} // namespace sparc
+} // namespace lynx

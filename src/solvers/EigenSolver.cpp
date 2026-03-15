@@ -50,7 +50,7 @@ extern "C" {
                 void* work, const int* lwork, double* rwork, int* info);
 }
 
-namespace sparc {
+namespace lynx {
 
 EigenSolver::~EigenSolver() {
 #ifdef USE_SCALAPACK
@@ -1028,4 +1028,4 @@ void EigenSolver::lanczos_bounds_kpt(const double* Veff, int Nd_d,
     eigval_min -= 0.1;
 }
 
-} // namespace sparc
+} // namespace lynx

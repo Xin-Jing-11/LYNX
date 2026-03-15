@@ -2,7 +2,7 @@
 
 #include "FDGrid.hpp"
 
-namespace sparc {
+namespace lynx {
 
 struct DomainVertices {
     int xs = 0, xe = 0;  // x start/end (inclusive)
@@ -34,4 +34,4 @@ private:
     int Nx_d_ = 0, Ny_d_ = 0, Nz_d_ = 0, Nd_d_ = 0;
 };
 
-} // namespace sparc
+} // namespace lynx

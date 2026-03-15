@@ -5,7 +5,7 @@
 #include "parallel/MPIComm.hpp"
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Energy, BandEnergy) {
     Wavefunction wfn;

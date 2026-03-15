@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/Domain.hpp"
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Domain, BasicConstruction) {
     Mat3 lv;

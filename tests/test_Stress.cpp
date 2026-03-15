@@ -7,7 +7,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Stress, PressureFormula) {
     // P = -(1/3)(σ_xx + σ_yy + σ_zz)

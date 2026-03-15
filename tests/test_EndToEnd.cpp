@@ -33,7 +33,7 @@
 #include "parallel/HaloExchange.hpp"
 #include "parallel/Parallelization.hpp"
 
-using namespace sparc;
+using namespace lynx;
 
 // ============================================================
 // Helper: run the full single-point DFT pipeline from a JSON config
@@ -353,7 +353,7 @@ TEST(EndToEnd, XCFunctionalRealDensity) {
 
 // ============================================================
 // Test: Full BaTiO3 SCF calculation — validate energy and forces
-// Reference: SPARC BaTiO3_quick test
+// Reference: LYNX BaTiO3_quick test
 //   Etotal = -136.9227950641 Ha
 //   Eband  = -10.613764677 Ha
 //   Exc    = -28.295344017 Ha
@@ -376,7 +376,7 @@ TEST(EndToEnd, BaTiO3_SCF) {
         std::printf("  Ef     = %.10f Ha (ref: 0.31446488165)\n", result.Ef);
     }
 
-    // Reference values from SPARC BaTiO3_quick test
+    // Reference values from LYNX BaTiO3_quick test
     double ref_Etotal = -136.9227950641;
 
     // Energy should match to within ~1e-3 Ha for this coarse grid
@@ -416,7 +416,7 @@ TEST(EndToEnd, BaTiO3_SCF) {
 
 // ============================================================
 // Test: Full Si8 SCF — non-orthogonal cell with stress
-// Reference: SPARC Si8 test
+// Reference: LYNX Si8 test
 //   Etotal = -33.26990391 Ha
 //   Pressure = 20.4249871 GPa
 //   Stress (GPa):

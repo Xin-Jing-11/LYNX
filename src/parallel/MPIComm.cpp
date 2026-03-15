@@ -2,7 +2,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace sparc {
+namespace lynx {
 
 MPIComm::MPIComm(MPI_Comm comm, bool owned)
     : comm_(comm), owned_(owned) {}
@@ -77,4 +77,4 @@ MPIComm MPIComm::split(int color, int key) const {
     return MPIComm(new_comm, true);
 }
 
-} // namespace sparc
+} // namespace lynx

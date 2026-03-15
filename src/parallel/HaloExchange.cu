@@ -1,7 +1,7 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -339,5 +339,5 @@ void halo_exchange_batched_nomemset_gpu(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 #endif // USE_CUDA

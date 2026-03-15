@@ -6,7 +6,7 @@
 #include <vector>
 #include <cstdio>
 
-namespace sparc {
+namespace lynx {
 
 void Mixer::setup(int Nd_d,
                    MixingVariable var,
@@ -79,7 +79,7 @@ void Mixer::apply_kerker(const double* f, double amix, double* Pf) const {
 
     // Step 2: Solve -(Lap - kTF²) * Pf = Lf
     // i.e., (-Lap + kTF²) * Pf = -Lf  ... wait, reference uses:
-    //   AAR(pSPARC, res_fun, precond_fun, -lambda_TF^2, DMnd, Pf, Lf, ...)
+    //   AAR(pLYNX, res_fun, precond_fun, -lambda_TF^2, DMnd, Pf, Lf, ...)
     // where res_fun computes: b + (Lap + c)*x = Lf + (Lap - kTF²)*x
     // So residual = Lf - (-Lap + kTF²)*Pf, and we solve (-Lap + kTF²)*Pf = Lf
     // Actually: res_fun = b + (Lap + c)*x where c = -kTF², so operator is (Lap - kTF²)
@@ -297,4 +297,4 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
     iter_++;
 }
 
-} // namespace sparc
+} // namespace lynx

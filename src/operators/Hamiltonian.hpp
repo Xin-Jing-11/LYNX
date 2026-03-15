@@ -9,7 +9,7 @@
 #include "parallel/HaloExchange.hpp"
 #include <complex>
 
-namespace sparc {
+namespace lynx {
 
 using Complex = std::complex<double>;
 
@@ -78,4 +78,4 @@ private:
                                double* y, int ncol, double c) const;
 };
 
-} // namespace sparc
+} // namespace lynx

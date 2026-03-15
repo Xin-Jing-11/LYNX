@@ -10,7 +10,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 struct HamTestSetup {
     Mat3 lv;

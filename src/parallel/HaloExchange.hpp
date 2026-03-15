@@ -6,7 +6,7 @@
 #include <complex>
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
 using Complex = std::complex<double>;
 
@@ -59,4 +59,4 @@ private:
                                Complex phase_l_z, Complex phase_r_z) const;
 };
 
-} // namespace sparc
+} // namespace lynx

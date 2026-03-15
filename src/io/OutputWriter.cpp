@@ -2,14 +2,14 @@
 #include "core/constants.hpp"
 #include <cstdio>
 
-namespace sparc {
+namespace lynx {
 
 void OutputWriter::print_summary(const SystemConfig& config, const Lattice& lattice,
                                  const FDGrid& grid, int world_rank) {
     if (world_rank != 0) return;
 
     std::printf("====================================================\n");
-    std::printf("              SPARC C++ (Phase 1)\n");
+    std::printf("              LYNX C++ (Phase 1)\n");
     std::printf("====================================================\n\n");
 
     std::printf("Lattice vectors (Bohr):\n");
@@ -43,4 +43,4 @@ void OutputWriter::print_summary(const SystemConfig& config, const Lattice& latt
     std::printf("====================================================\n");
 }
 
-} // namespace sparc
+} // namespace lynx

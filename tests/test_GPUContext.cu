@@ -7,7 +7,7 @@
 #include <cusolverDn.h>
 #include "core/GPUContext.cuh"
 
-using namespace sparc::gpu;
+using namespace lynx::gpu;
 
 // Simple kernel to verify GPU memory is accessible
 __global__ void fill_kernel(double* data, int n, double val) {

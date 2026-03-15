@@ -2,7 +2,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace sparc {
+namespace lynx {
 
 Crystal::Crystal(std::vector<AtomType> types, std::vector<Vec3> positions,
                  std::vector<int> type_indices, const Lattice& lattice)
@@ -249,4 +249,4 @@ void Crystal::compute_nloc_influence(const Domain& domain,
     }
 }
 
-} // namespace sparc
+} // namespace lynx

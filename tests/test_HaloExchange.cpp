@@ -7,7 +7,7 @@
 #include <complex>
 #include <cmath>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(HaloExchange, PeriodicSingleProcess) {
     Mat3 lv;

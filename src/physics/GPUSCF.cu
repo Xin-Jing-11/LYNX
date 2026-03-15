@@ -27,7 +27,7 @@
 #include "electronic/Occupation.hpp"
 #include "physics/Electrostatics.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // ============================================================
 // Forward declarations for GPU functions
@@ -2030,6 +2030,6 @@ GPUSCFRunner::~GPUSCFRunner() {
     cleanup();
 }
 
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

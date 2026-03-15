@@ -1,9 +1,9 @@
 /**
- * Compare H*psi between our C++ code and reference SPARC C code.
+ * Compare H*psi between our C++ code and reference LYNX C code.
  *
  * Usage:
- *   1. Run reference SPARC with SPARC_DUMP_HPSI=1 to generate /tmp/ref_*.bin
- *   2. Run this test: mpirun -np 1 ./build/src/sparc_hpsi_compare examples/BaTiO3_quick.json
+ *   1. Run reference LYNX with LYNX_DUMP_HPSI=1 to generate /tmp/ref_*.bin
+ *   2. Run this test: mpirun -np 1 ./build/src/lynx_hpsi_compare examples/BaTiO3_quick.json
  *
  * This test:
  *   - Sets up the system from JSON input
@@ -62,23 +62,23 @@ int main(int argc, char** argv) {
     int rank; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     if (argc < 2) {
-        if (rank == 0) fprintf(stderr, "Usage: sparc_hpsi_compare <input.json>\n");
+        if (rank == 0) fprintf(stderr, "Usage: lynx_hpsi_compare <input.json>\n");
         MPI_Finalize(); return 1;
     }
 
     try {
         std::string input_file = argv[1];
-        auto config = sparc::InputParser::parse(input_file);
-        sparc::InputParser::validate(config);
+        auto config = lynx::InputParser::parse(input_file);
+        lynx::InputParser::validate(config);
 
-        sparc::Lattice lattice(config.latvec, config.cell_type);
-        sparc::FDGrid grid(config.Nx, config.Ny, config.Nz, lattice,
+        lynx::Lattice lattice(config.latvec, config.cell_type);
+        lynx::FDGrid grid(config.Nx, config.Ny, config.Nz, lattice,
                            config.bcx, config.bcy, config.bcz);
-        sparc::FDStencil stencil(config.fd_order, grid, lattice);
+        lynx::FDStencil stencil(config.fd_order, grid, lattice);
 
         // Setup parallelization (1 proc)
         int Nkpts = 1, Nspin = 1;
-        sparc::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
+        lynx::Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                                         grid, Nspin, Nkpts, config.Nstates);
         const auto& domain = parallel.domain();
         int Nd_d = domain.Nd_d();
@@ -159,10 +159,10 @@ int main(int argc, char** argv) {
 
         // === Step 4: Setup Hamiltonian and apply local part ===
         printf("\n--- Step 4: Local H*psi (Lap + Veff) ---\n");
-        sparc::HaloExchange halo(domain, stencil.FDn());
+        lynx::HaloExchange halo(domain, stencil.FDn());
 
         // Setup Hamiltonian WITHOUT nonlocal (to test local part separately)
-        sparc::Hamiltonian hamiltonian;
+        lynx::Hamiltonian hamiltonian;
         hamiltonian.setup(stencil, domain, grid, halo, nullptr);
 
         std::vector<double> Hpsi_local(Nd_d, 0.0);
@@ -203,21 +203,21 @@ int main(int argc, char** argv) {
         printf("\n--- Step 5: Full H*psi (with nonlocal) ---\n");
 
         // Load pseudopotentials and create Crystal (same as main.cpp)
-        std::vector<sparc::AtomType> atom_types;
-        std::vector<sparc::Vec3> all_positions;
+        std::vector<lynx::AtomType> atom_types;
+        std::vector<lynx::Vec3> all_positions;
         std::vector<int> type_indices;
 
         for (size_t it = 0; it < config.atom_types.size(); ++it) {
             const auto& at_in = config.atom_types[it];
             int n_atoms = static_cast<int>(at_in.coords.size());
-            sparc::Pseudopotential psd_tmp;
+            lynx::Pseudopotential psd_tmp;
             psd_tmp.load_psp8(at_in.pseudo_file);
             double Zval = psd_tmp.Zval();
-            sparc::AtomType atype(at_in.element, 1.0, Zval, n_atoms);
+            lynx::AtomType atype(at_in.element, 1.0, Zval, n_atoms);
             atype.psd().load_psp8(at_in.pseudo_file);
 
             for (int ia = 0; ia < n_atoms; ++ia) {
-                sparc::Vec3 pos = at_in.coords[ia];
+                lynx::Vec3 pos = at_in.coords[ia];
                 if (at_in.fractional) pos = lattice.frac_to_cart(pos);
                 all_positions.push_back(pos);
                 type_indices.push_back(static_cast<int>(it));
@@ -225,12 +225,12 @@ int main(int argc, char** argv) {
             atom_types.push_back(std::move(atype));
         }
 
-        sparc::Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
+        lynx::Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
 
-        std::vector<sparc::AtomNlocInfluence> nloc_influence;
+        std::vector<lynx::AtomNlocInfluence> nloc_influence;
         crystal.compute_nloc_influence(domain, nloc_influence);
 
-        sparc::NonlocalProjector vnl;
+        lynx::NonlocalProjector vnl;
         vnl.setup(crystal, nloc_influence, domain, grid);
         printf("  Nonlocal projectors: %d total\n", vnl.total_nproj());
 
@@ -256,7 +256,7 @@ int main(int argc, char** argv) {
         }
 
         // Setup full Hamiltonian
-        sparc::Hamiltonian hamiltonian_full;
+        lynx::Hamiltonian hamiltonian_full;
         hamiltonian_full.setup(stencil, domain, grid, halo, &vnl);
 
         std::vector<double> Hpsi_full(Nd_d, 0.0);

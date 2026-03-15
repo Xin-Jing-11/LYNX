@@ -31,6 +31,6 @@ FROM nvidia/cuda:12.4.0-runtime-ubuntu24.04 AS runtime
 RUN apt-get update && apt-get install -y \
     libopenmpi3t64 libopenblas0 libscalapack-openmpi2.2 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /workspace/build/src/sparc /usr/local/bin/sparc
+COPY --from=build /workspace/build/src/lynx /usr/local/bin/lynx
 COPY examples/ /workspace/examples/
-ENTRYPOINT ["sparc"]
+ENTRYPOINT ["lynx"]

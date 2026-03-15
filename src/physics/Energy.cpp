@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <mpi.h>
 
-namespace sparc {
+namespace lynx {
 
 double Energy::band_energy(const Wavefunction& wfn,
                              const std::vector<double>& kpt_weights,
@@ -87,7 +87,7 @@ EnergyComponents Energy::compute_all(
     // Band energy (local contribution — will be reduced below)
     E.Eband = band_energy(wfn, kpt_weights, Nspin, kpt_start);
 
-    // XC energy: Exc = ∫ (rho + rho_core) * exc dV (matching reference SPARC)
+    // XC energy: Exc = ∫ (rho + rho_core) * exc dV (matching reference LYNX)
     const double* rho = density.rho_total().data();
     if (rho_core) {
         // With NLCC, integrate (rho_valence + rho_core) * exc
@@ -162,4 +162,4 @@ EnergyComponents Energy::compute_all(
     return E;
 }
 
-} // namespace sparc
+} // namespace lynx

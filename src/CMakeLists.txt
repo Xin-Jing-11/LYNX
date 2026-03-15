@@ -1,4 +1,4 @@
-add_library(sparc_core
+add_library(lynx_core
     core/NDArray.cpp
     core/Lattice.cpp
     core/FDGrid.cpp
@@ -33,25 +33,25 @@ add_library(sparc_core
     physics/Electrostatics.cpp
 )
 
-target_include_directories(sparc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(sparc_core PUBLIC MPI::MPI_CXX nlohmann_json::nlohmann_json)
+target_include_directories(lynx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(lynx_core PUBLIC MPI::MPI_CXX nlohmann_json::nlohmann_json)
 
 # Math libraries (MKL or OpenBLAS+LAPACK+ScaLAPACK)
 if(MATH_LIBRARIES)
-    target_link_libraries(sparc_core PUBLIC ${MATH_LIBRARIES})
+    target_link_libraries(lynx_core PUBLIC ${MATH_LIBRARIES})
 endif()
 if(MATH_INCLUDE_DIRS)
-    target_include_directories(sparc_core PUBLIC ${MATH_INCLUDE_DIRS})
+    target_include_directories(lynx_core PUBLIC ${MATH_INCLUDE_DIRS})
 endif()
 if(MATH_DEFINES)
-    target_compile_definitions(sparc_core PUBLIC ${MATH_DEFINES})
+    target_compile_definitions(lynx_core PUBLIC ${MATH_DEFINES})
 endif()
 
-add_executable(sparc main.cpp)
-target_link_libraries(sparc PRIVATE sparc_core)
+add_executable(lynx main.cpp)
+target_link_libraries(lynx PRIVATE lynx_core)
 
 if(USE_CUDA)
-    target_sources(sparc_core PRIVATE
+    target_sources(lynx_core PRIVATE
         core/gpu_common.cu
         parallel/HaloExchange.cu
         operators/Laplacian.cu
@@ -65,10 +65,10 @@ if(USE_CUDA)
         physics/GPUSCF.cu
         physics/GPUForceStress.cu
     )
-    target_link_libraries(sparc_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand)
-    target_compile_definitions(sparc_core PUBLIC USE_CUDA)
-    set_target_properties(sparc_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand)
+    target_compile_definitions(lynx_core PUBLIC USE_CUDA)
+    set_target_properties(lynx_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
-add_executable(sparc_hpsi_compare ../tests/test_HamiltonianCompare.cpp)
-target_link_libraries(sparc_hpsi_compare PRIVATE sparc_core)
+add_executable(lynx_hpsi_compare ../tests/test_HamiltonianCompare.cpp)
+target_link_libraries(lynx_hpsi_compare PRIVATE lynx_core)

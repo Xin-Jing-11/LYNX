@@ -1,7 +1,7 @@
-// XC functional implementation — ported from SPARC reference code
+// XC functional implementation — ported from LYNX reference code
 // (exchangeCorrelation.c, Georgia Tech, Xu/Sharma/Suryanarayana)
 //
-// Each function matches the reference SPARC implementation exactly
+// Each function matches the reference LYNX implementation exactly
 // to ensure numerical reproducibility.
 
 #include "xc/XCFunctional.hpp"
@@ -10,7 +10,7 @@
 #include <vector>
 #include <cstring>
 
-namespace sparc {
+namespace lynx {
 
 void XCFunctional::setup(XCType type, const Domain& domain, const FDGrid& grid,
                           const Gradient* gradient, const HaloExchange* halo) {
@@ -740,7 +740,7 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
             v2xc[i] = v2x[i] + v2c[i];
         }
 
-        // Store Dxcdgrho if requested (matching reference: pSPARC->Dxcdgrho)
+        // Store Dxcdgrho if requested (matching reference: pLYNX->Dxcdgrho)
         if (Dxcdgrho_out) {
             for (int i = 0; i < Nd_d; i++) {
                 Dxcdgrho_out[i] = v2xc[i];
@@ -925,4 +925,4 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
     }
 }
 
-} // namespace sparc
+} // namespace lynx

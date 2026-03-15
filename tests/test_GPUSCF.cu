@@ -47,12 +47,12 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 
-using namespace sparc;
+using namespace lynx;
 
 // ============================================================
 // Forward declarations for GPU functions
 // ============================================================
-namespace sparc { namespace gpu {
+namespace lynx { namespace gpu {
 
 void halo_exchange_gpu(
     const double* d_x, double* d_x_ex,
@@ -142,7 +142,7 @@ void compute_force_stress_gpu(
     int xs, int ys, int zs, double occfac,
     double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl);
 
-}} // namespace sparc::gpu
+}} // namespace lynx::gpu
 
 // ============================================================
 // GPU nonlocal projector data — flattened from CPU NonlocalProjector
@@ -494,7 +494,7 @@ static void gpu_hamiltonian_apply(
     double* d_Hpsi, double* d_x_ex, int ncol)
 {
     // GPU local part: -0.5*Lap + Veff
-    sparc::gpu::hamiltonian_apply_local_gpu(
+    lynx::gpu::hamiltonian_apply_local_gpu(
         d_psi, d_Veff, d_Hpsi, d_x_ex,
         g_nx, g_ny, g_nz, g_FDn, ncol, 0.0,
         true, true, true, true,
@@ -503,7 +503,7 @@ static void gpu_hamiltonian_apply(
 
     // GPU nonlocal part: Vnl*psi → add to Hpsi (no D2H/H2D!)
     if (g_gpu_vnl && g_gpu_vnl->total_phys_nproj > 0) {
-        sparc::gpu::nonlocal_projector_apply_gpu(
+        lynx::gpu::nonlocal_projector_apply_gpu(
             d_psi, d_Hpsi,
             g_gpu_vnl->d_Chi_flat, g_gpu_vnl->d_gpos_flat,
             g_gpu_vnl->d_gpos_offsets, g_gpu_vnl->d_chi_offsets,
@@ -520,10 +520,10 @@ static void gpu_hamiltonian_apply(
 // GPU Poisson operator: -Lap * x
 // ============================================================
 static void poisson_op_gpu(const double* d_x, double* d_Ax) {
-    sparc::gpu::halo_exchange_gpu(d_x, g_aar_x_ex,
+    lynx::gpu::halo_exchange_gpu(d_x, g_aar_x_ex,
         g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
     int nx_ex = g_nx + 2*g_FDn, ny_ex = g_ny + 2*g_FDn;
-    sparc::gpu::laplacian_orth_v2_gpu(g_aar_x_ex, nullptr, d_Ax,
+    lynx::gpu::laplacian_orth_v2_gpu(g_aar_x_ex, nullptr, d_Ax,
         g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex,
         -1.0, 0.0, 0.0, g_poisson_diag, 1);
 }
@@ -531,7 +531,7 @@ static void poisson_op_gpu(const double* d_x, double* d_Ax) {
 // GPU Poisson Jacobi preconditioner: f = m_inv * r
 static void poisson_precond_gpu(const double* d_r, double* d_f) {
     int bs = 256;
-    jacobi_scale_kernel<<<sparc::gpu::ceildiv(g_Nd, bs), bs>>>(
+    jacobi_scale_kernel<<<lynx::gpu::ceildiv(g_Nd, bs), bs>>>(
         d_r, d_f, g_jacobi_m_inv, g_Nd);
 }
 
@@ -539,11 +539,11 @@ static void poisson_precond_gpu(const double* d_r, double* d_f) {
 // GPU Kerker operator: (-Lap + kTF²) * x
 // ============================================================
 static void kerker_op_gpu(const double* d_x, double* d_Ax) {
-    sparc::gpu::halo_exchange_gpu(d_x, g_aar_x_ex,
+    lynx::gpu::halo_exchange_gpu(d_x, g_aar_x_ex,
         g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
     int nx_ex = g_nx + 2*g_FDn, ny_ex = g_ny + 2*g_FDn;
     constexpr double kTF2 = 1.0;  // kTF²
-    sparc::gpu::laplacian_orth_v2_gpu(g_aar_x_ex, nullptr, d_Ax,
+    lynx::gpu::laplacian_orth_v2_gpu(g_aar_x_ex, nullptr, d_Ax,
         g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex,
         -1.0, 0.0, kTF2, g_kerker_diag, 1);
 }
@@ -551,7 +551,7 @@ static void kerker_op_gpu(const double* d_x, double* d_Ax) {
 // GPU Kerker Jacobi preconditioner
 static void kerker_precond_gpu(const double* d_r, double* d_f) {
     int bs = 256;
-    jacobi_scale_kernel<<<sparc::gpu::ceildiv(g_Nd, bs), bs>>>(
+    jacobi_scale_kernel<<<lynx::gpu::ceildiv(g_Nd, bs), bs>>>(
         d_r, d_f, g_kerker_m_inv, g_Nd);
 }
 
@@ -571,9 +571,9 @@ static double gpu_sum(const double* d_x, int N) {
 // ============================================================
 static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
                               int Nd, bool has_nlcc) {
-    auto& ctx = sparc::gpu::GPUContext::instance();
+    auto& ctx = lynx::gpu::GPUContext::instance();
     int bs = 256;
-    int grid_sz = sparc::gpu::ceildiv(Nd, bs);
+    int grid_sz = lynx::gpu::ceildiv(Nd, bs);
     int nx_ex = g_nx + 2*g_FDn, ny_ex = g_ny + 2*g_FDn;
 
     double* d_Drho_x = ctx.buf.grad_rho;
@@ -593,16 +593,16 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
     }
 
     // Gradient of rho_xc
-    sparc::gpu::halo_exchange_gpu(d_rho_xc, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
-    sparc::gpu::gradient_gpu(d_x_ex, d_Drho_x, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 0, 1);
-    sparc::gpu::gradient_gpu(d_x_ex, d_Drho_y, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 1, 1);
-    sparc::gpu::gradient_gpu(d_x_ex, d_Drho_z, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 2, 1);
+    lynx::gpu::halo_exchange_gpu(d_rho_xc, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
+    lynx::gpu::gradient_gpu(d_x_ex, d_Drho_x, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 0, 1);
+    lynx::gpu::gradient_gpu(d_x_ex, d_Drho_y, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 1, 1);
+    lynx::gpu::gradient_gpu(d_x_ex, d_Drho_z, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 2, 1);
 
     // sigma = |∇ρ|²
     sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
     // Fused PBE kernel: (rho_xc, sigma) → (exc, Vxc, v2xc)
-    sparc::gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+    lynx::gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
 
     // Divergence correction: Vxc += -div(v2xc * ∇ρ)
     // Scale gradients by v2xc (in place)
@@ -614,18 +614,18 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
     double* d_DDrho = d_sigma;  // reuse sigma buffer (no longer needed)
 
     // x-direction
-    sparc::gpu::halo_exchange_gpu(d_Drho_x, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
-    sparc::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 0, 1);
+    lynx::gpu::halo_exchange_gpu(d_Drho_x, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
+    lynx::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 0, 1);
     divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
 
     // y-direction
-    sparc::gpu::halo_exchange_gpu(d_Drho_y, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
-    sparc::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 1, 1);
+    lynx::gpu::halo_exchange_gpu(d_Drho_y, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
+    lynx::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 1, 1);
     divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
 
     // z-direction
-    sparc::gpu::halo_exchange_gpu(d_Drho_z, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
-    sparc::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 2, 1);
+    lynx::gpu::halo_exchange_gpu(d_Drho_z, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
+    lynx::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 2, 1);
     divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
 }
 
@@ -634,9 +634,9 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
 // ============================================================
 static int gpu_poisson_solve(double* d_rho, double* d_phi,
                               double* d_rhs, int Nd, double tol) {
-    auto& ctx = sparc::gpu::GPUContext::instance();
+    auto& ctx = lynx::gpu::GPUContext::instance();
     int bs = 256;
-    int grid_sz = sparc::gpu::ceildiv(Nd, bs);
+    int grid_sz = lynx::gpu::ceildiv(Nd, bs);
 
     // RHS = 4π(rho + pseudocharge)
     poisson_rhs_kernel<<<grid_sz, bs>>>(d_rho, g_d_pseudocharge, d_rhs,
@@ -656,7 +656,7 @@ static int gpu_poisson_solve(double* d_rho, double* d_phi,
     // Set halo workspace for operator callbacks
     g_aar_x_ex = ctx.buf.aar_x_ex;
 
-    int iters = sparc::gpu::aar_gpu(
+    int iters = lynx::gpu::aar_gpu(
         poisson_op_gpu, poisson_precond_gpu,
         d_rhs, d_phi, Nd,
         0.6, 0.6, 7, 6, tol, 3000,
@@ -679,9 +679,9 @@ static int gpu_poisson_solve(double* d_rho, double* d_phi,
 // ============================================================
 static void gpu_pulay_mix(double* d_x, const double* d_g,
                             int Nd, int m_depth, double beta_mix) {
-    auto& ctx = sparc::gpu::GPUContext::instance();
+    auto& ctx = lynx::gpu::GPUContext::instance();
     int bs = 256;
-    int grid_sz = sparc::gpu::ceildiv(Nd, bs);
+    int grid_sz = lynx::gpu::ceildiv(Nd, bs);
 
     double* d_fk   = ctx.buf.mix_fk;
     double* d_xkm1 = ctx.buf.mix_xkm1;
@@ -780,9 +780,9 @@ static void gpu_pulay_mix(double* d_x, const double* d_g,
     {
         constexpr double idiemac_kTF2 = 0.1;  // idiemac * kTF²
         int nx_ex = g_nx + 2*g_FDn, ny_ex = g_ny + 2*g_FDn;
-        sparc::gpu::halo_exchange_gpu(d_f_wavg, ctx.buf.aar_x_ex,
+        lynx::gpu::halo_exchange_gpu(d_f_wavg, ctx.buf.aar_x_ex,
             g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
-        sparc::gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+        lynx::gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
             g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex,
             1.0, 0.0, -idiemac_kTF2, g_kerker_rhs_diag, 1);
     }
@@ -797,7 +797,7 @@ static void gpu_pulay_mix(double* d_x, const double* d_g,
         double* d_kxold = sp.alloc<double>(Nd);
         double* d_kfold = sp.alloc<double>(Nd);
 
-        sparc::gpu::aar_gpu(
+        lynx::gpu::aar_gpu(
             kerker_op_gpu, kerker_precond_gpu,
             d_Lf, d_Pf, Nd,
             0.6, 0.6, 7, 6, g_precond_tol, 1000,
@@ -952,7 +952,7 @@ int main(int argc, char** argv) {
     g_precond_tol = h_eff * h_eff * 1e-3;
 
     // Upload FD stencil coefficients to GPU constant memory
-    sparc::gpu::upload_stencil_coefficients(
+    lynx::gpu::upload_stencil_coefficients(
         stencil.D2_coeff_x(), stencil.D2_coeff_y(), stencil.D2_coeff_z(),
         stencil.D1_coeff_x(), stencil.D1_coeff_y(), stencil.D1_coeff_z(),
         nullptr, nullptr, nullptr, FDn);
@@ -960,7 +960,7 @@ int main(int argc, char** argv) {
     // ============================================================
     // Phase 2: GPU memory allocation + data upload
     // ============================================================
-    auto& ctx = sparc::gpu::GPUContext::instance();
+    auto& ctx = lynx::gpu::GPUContext::instance();
     ctx.init_scf_buffers(Nd, nx, ny, nz, FDn,
                           Nband, Nband, Nspin,
                           7, 7, 1,
@@ -1158,7 +1158,7 @@ int main(int argc, char** argv) {
 
         // Step 1: GPU Eigensolver (nchefsi passes of CheFSI)
         for (int pass = 0; pass < nchefsi; pass++) {
-            sparc::gpu::eigensolver_solve_gpu(
+            lynx::gpu::eigensolver_solve_gpu(
                 d_psi, d_eigvals, d_Veff,
                 d_Y, d_Xold, d_Xnew,
                 d_Hpsi, d_x_ex,
@@ -1194,7 +1194,7 @@ int main(int argc, char** argv) {
 
         // Step 2: Compute new density on GPU
         CUDA_CHECK(cudaMemset(d_rho_new, 0, Nd * sizeof(double)));
-        sparc::gpu::compute_density_gpu(d_psi, d_occ, d_rho_new, Nd, Nband, 2.0);
+        lynx::gpu::compute_density_gpu(d_psi, d_occ, d_rho_new, Nd, Nband, 2.0);
         CUDA_CHECK(cudaDeviceSynchronize());
 
         // Step 3: Compute energy (D2H for energy components — diagnostic only)
@@ -1272,7 +1272,7 @@ int main(int argc, char** argv) {
         // Clamp + normalize density on GPU
         {
             int bs = 256;
-            int gs = sparc::gpu::ceildiv(Nd, bs);
+            int gs = lynx::gpu::ceildiv(Nd, bs);
             clamp_min_kernel<<<gs, bs>>>(d_rho, 0.0, Nd);
             CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -1293,7 +1293,7 @@ int main(int argc, char** argv) {
         // Step 7: Veff = Vxc + phi (GPU)
         {
             int bs = 256;
-            int gs = sparc::gpu::ceildiv(Nd, bs);
+            int gs = lynx::gpu::ceildiv(Nd, bs);
             veff_combine_kernel<<<gs, bs>>>(d_Vxc, d_phi, d_Veff, Nd);
         }
     }
@@ -1341,7 +1341,7 @@ int main(int argc, char** argv) {
         std::array<double, 6> gpu_stress_k = {}, gpu_stress_nl = {};
         double gpu_energy_nl = 0.0;
 
-        sparc::gpu::compute_force_stress_gpu(
+        lynx::gpu::compute_force_stress_gpu(
             d_psi, d_occ,
             gpu_vnl_data.d_Chi_flat, gpu_vnl_data.d_gpos_flat,
             gpu_vnl_data.d_gpos_offsets, gpu_vnl_data.d_chi_offsets,

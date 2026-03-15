@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <mpi.h>
 
-namespace sparc {
+namespace lynx {
 
 double Occupation::fermi_dirac(double x, double beta) {
     double arg = x * beta;
@@ -17,7 +17,7 @@ double Occupation::fermi_dirac(double x, double beta) {
 double Occupation::gaussian_smearing(double x, double beta) {
     // f(x) = 0.5 * erfc(beta * x)
     // where x = (epsilon - Ef)
-    // Matches reference SPARC: 0.5 * (1 - erf(beta * (lambda - lambda_f)))
+    // Matches reference LYNX: 0.5 * (1 - erf(beta * (lambda - lambda_f)))
     return 0.5 * std::erfc(beta * x);
 }
 
@@ -273,4 +273,4 @@ double Occupation::entropy(const Wavefunction& wfn,
     return -S / beta;
 }
 
-} // namespace sparc
+} // namespace lynx

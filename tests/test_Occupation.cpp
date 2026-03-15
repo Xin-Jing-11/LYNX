@@ -5,7 +5,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Occupation, FermiDirac) {
     // At T=0 (beta→inf): f(x<0)=1, f(x>0)=0

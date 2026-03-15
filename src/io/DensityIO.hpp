@@ -5,7 +5,7 @@
 #include "core/FDGrid.hpp"
 #include "core/Lattice.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // Binary density file I/O for checkpoint/restart.
 // Format: 128-byte header + nspin * Nd raw doubles.
@@ -26,7 +26,7 @@ public:
                      const FDGrid& grid,
                      const Lattice& lattice);
 
-    static constexpr char MAGIC[8] = {'S','P','A','R','C','R','H','O'};
+    static constexpr char MAGIC[8] = {'L','Y','N','X','_','R','H','O'};
     static constexpr uint32_t VERSION = 1;
 
     struct FileHeader {
@@ -42,4 +42,4 @@ public:
     static_assert(sizeof(FileHeader) == 128, "FileHeader must be 128 bytes");
 };
 
-} // namespace sparc
+} // namespace lynx

@@ -5,7 +5,7 @@
 #include "electronic/Wavefunction.hpp"
 #include "parallel/MPIComm.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // Electron density: rho(r) = sum_{n,k,s} f_{nks} |psi_{nks}(r)|^2
 class ElectronDensity {
@@ -58,4 +58,4 @@ private:
     NDArray<double> mag_;
 };
 
-} // namespace sparc
+} // namespace lynx

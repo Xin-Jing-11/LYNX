@@ -1,7 +1,7 @@
 #ifdef USE_CUDA
 #include "gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // Define constant memory symbols
@@ -37,5 +37,5 @@ void upload_stencil_coefficients(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 #endif // USE_CUDA

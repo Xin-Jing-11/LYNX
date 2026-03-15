@@ -3,7 +3,7 @@
 #include "types.hpp"
 #include "Lattice.hpp"
 
-namespace sparc {
+namespace lynx {
 
 class FDGrid {
 public:
@@ -33,4 +33,4 @@ private:
     const Lattice* lattice_ = nullptr;
 };
 
-} // namespace sparc
+} // namespace lynx

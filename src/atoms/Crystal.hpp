@@ -6,7 +6,7 @@
 #include "core/Domain.hpp"
 #include "atoms/AtomType.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // Influence of an atom type on a local domain — atoms whose rc-sphere
 // overlaps with this process's domain (includes periodic images)
@@ -65,4 +65,4 @@ private:
     const Lattice* lattice_ = nullptr;
 };
 
-} // namespace sparc
+} // namespace lynx

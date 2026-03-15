@@ -1,6 +1,6 @@
 #pragma once
 
-namespace sparc::constants {
+namespace lynx::constants {
 
 constexpr double PI = 3.14159265358979323846;
 constexpr double TWOPI = 2.0 * PI;
@@ -12,4 +12,4 @@ constexpr double KB = 3.1668115634556e-6;       // Ha/K (Boltzmann)
 constexpr double EH = 27.211386245988;           // Ha in eV
 constexpr double HA_BOHR3_GPA = 29421.01569650548;
 
-} // namespace sparc::constants
+} // namespace lynx::constants

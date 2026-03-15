@@ -14,10 +14,10 @@
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 
-using namespace sparc::gpu;
+using namespace lynx::gpu;
 
 // Forward declarations for GPU functions
-namespace sparc { namespace gpu {
+namespace lynx { namespace gpu {
 void compute_ata_gpu(const double* d_X, double* d_S, int Nd, int N, double dV);
 void compute_atb_gpu(const double* d_X, const double* d_HX, double* d_Hs, int Nd, int N, double dV);
 void symmetrize_gpu(double* d_Hs, int N);

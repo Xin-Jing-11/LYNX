@@ -11,10 +11,10 @@
 #include <mpi.h>
 #include <cassert>
 
-namespace sparc {
+namespace lynx {
 
 // Transform gradient from non-Cartesian to Cartesian: ∇_cart = LatUVec^{-1} * ∇_nc
-// (matching reference SPARC nonCart2Cart_grad, which uses gradT^T)
+// (matching reference LYNX nonCart2Cart_grad, which uses gradT^T)
 static inline void nonCart2Cart_grad(const Mat3& uvec_inv, double& x, double& y, double& z) {
     double a = x, b = y, c = z;
     x = uvec_inv(0,0)*a + uvec_inv(0,1)*b + uvec_inv(0,2)*c;
@@ -23,7 +23,7 @@ static inline void nonCart2Cart_grad(const Mat3& uvec_inv, double& x, double& y,
 }
 
 // Transform coordinates from non-Cartesian to Cartesian: cart = LatUVec^T * nc
-// (matching reference SPARC nonCart2Cart_coord, which uses LatUVec columns)
+// (matching reference LYNX nonCart2Cart_coord, which uses LatUVec columns)
 static inline void nonCart2Cart_coord(const Mat3& uvec, double& x, double& y, double& z) {
     double a = x, b = y, c = z;
     // cart_j = Σ_i nc_i * LatUVec(i,j) = (LatUVec^T * nc)_j
@@ -1069,4 +1069,4 @@ void Stress::compute_nonlocal_kinetic(
     }
 }
 
-} // namespace sparc
+} // namespace lynx

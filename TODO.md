@@ -1,4 +1,4 @@
-# SPARC C++ Rewrite — TODO & Progress
+# LYNX C++ Rewrite — TODO & Progress
 
 ## Completed
 
@@ -26,7 +26,7 @@
 - [x] LinearSolver (AAR + CG)
 - [x] Wavefunction, ElectronDensity, Occupation (Gaussian/Fermi-Dirac)
 - [x] XCFunctional: LDA_PZ, LDA_PW, GGA_PBE, GGA_PBEsol, GGA_RPBE
-- [x] SCF loop with convergence matching reference SPARC
+- [x] SCF loop with convergence matching reference LYNX
 - [x] Energy (Eband, Exc, Ehart, Eself, Ec, Entropy, Etotal)
 - [x] Electrostatics (pseudocharge, Vloc, Eself, Ec, atomic density, NLCC core density)
 - [x] BaTiO3: Etot matches to 3e-6 Ha (0.08 meV/atom)

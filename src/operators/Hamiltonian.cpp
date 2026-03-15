@@ -3,7 +3,7 @@
 #include <cstring>
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 void Hamiltonian::setup(const FDStencil& stencil,
                         const Domain& domain,
@@ -224,4 +224,4 @@ template void Hamiltonian::lap_plus_diag_nonorth_impl<double>(const double*, con
 template void Hamiltonian::lap_plus_diag_nonorth_impl<Complex>(const Complex*, const double*,
                                                                 Complex*, int, double) const;
 
-} // namespace sparc
+} // namespace lynx

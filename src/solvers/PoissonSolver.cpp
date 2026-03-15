@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdio>
 
-namespace sparc {
+namespace lynx {
 
 void PoissonSolver::setup(const Laplacian& laplacian,
                             const FDStencil& stencil,
@@ -59,4 +59,4 @@ int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
     return iters;
 }
 
-} // namespace sparc
+} // namespace lynx

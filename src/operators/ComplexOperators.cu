@@ -2,7 +2,7 @@
 #include "core/gpu_common.cuh"
 #include <cuComplex.h>
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -880,5 +880,5 @@ void nonlocal_projector_apply_z_gpu(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 #endif // USE_CUDA

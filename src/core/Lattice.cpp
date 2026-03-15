@@ -3,7 +3,7 @@
 #include <cmath>
 #include <stdexcept>
 
-namespace sparc {
+namespace lynx {
 
 Lattice::Lattice(const Mat3& latvec, CellType cell_type)
     : latvec_(latvec), cell_type_(cell_type) {
@@ -37,7 +37,7 @@ void Lattice::compute_derived() {
     metric_T_ = ltrans * latvec_;
 
     // Laplacian transformation: lapc_T = (LatUVec^{-1})^T * LatUVec^{-1}
-    // Must use unit lattice vectors (not full latvec), matching reference SPARC
+    // Must use unit lattice vectors (not full latvec), matching reference LYNX
     lat_uvec_inv_ = lat_uvec_.inverse();
     lapc_T_ = lat_uvec_inv_.transpose() * lat_uvec_inv_;
 
@@ -122,4 +122,4 @@ Mat3 Lattice::reciprocal_latvec() const {
     return recip.transpose();
 }
 
-} // namespace sparc
+} // namespace lynx

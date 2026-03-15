@@ -10,7 +10,7 @@
 #include <mpi.h>
 #include <chrono>
 
-namespace sparc {
+namespace lynx {
 
 // Reference potential: smooth version of -Z/r
 // Uses a polynomial inside rc to avoid the 1/r singularity.
@@ -180,7 +180,7 @@ void Electrostatics::compute_pseudocharge(
         const auto& rVloc_d = psd.rVloc_spline_d();
         double Znucl = psd.Zval();
 
-        // Reference cutoff radius (must match SPARC's REFERENCE_CUTOFF = 0.5 Bohr)
+        // Reference cutoff radius (must match LYNX's REFERENCE_CUTOFF = 0.5 Bohr)
         double rc_ref = 0.5;
         std::printf("  pschg: type=%d, %d images, Znucl=%.1f\n", it, inf.n_atom, Znucl);
         std::fflush(stdout);
@@ -309,7 +309,7 @@ void Electrostatics::compute_pseudocharge(
     }
     int_b_ *= dV;
 
-    // Eself = -0.5 * dV * Σ(bJ_ref * VJ_ref), matching reference SPARC
+    // Eself = -0.5 * dV * Σ(bJ_ref * VJ_ref), matching reference LYNX
     Eself_ *= dV * 0.5;
     Eself_Ec_ = Eself_;  // Ec will be added later via compute_Ec
 }
@@ -339,7 +339,7 @@ void Electrostatics::compute_Vloc(
         const auto& rVloc_d = psd.rVloc_spline_d();
         double Znucl = psd.Zval();
 
-        // Reference cutoff radius (must match SPARC's REFERENCE_CUTOFF = 0.5 Bohr)
+        // Reference cutoff radius (must match LYNX's REFERENCE_CUTOFF = 0.5 Bohr)
         double rc_ref = 0.5;
 
         for (int iat = 0; iat < inf.n_atom; ++iat) {
@@ -380,7 +380,7 @@ void Electrostatics::compute_Vloc(
                         }
 
                         double vref = V_ref(r, rc_ref, Znucl);
-                        Vloc[idx] += vref - vj;  // Vc = V_ref - V_J (matches reference SPARC sign convention)
+                        Vloc[idx] += vref - vj;  // Vc = V_ref - V_J (matches reference LYNX sign convention)
                     }
                 }
             }
@@ -548,4 +548,4 @@ bool Electrostatics::compute_core_density(
     return has_nlcc;
 }
 
-} // namespace sparc
+} // namespace lynx

@@ -7,10 +7,10 @@
 #include "operators/Gradient.hpp"
 #include "parallel/HaloExchange.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // Exchange-correlation functional evaluation.
-// Ported from SPARC reference: exchangeCorrelation.c
+// Ported from LYNX reference: exchangeCorrelation.c
 // Supports LDA (Slater + PW92/PZ81) and GGA (PBE/PBEsol/RPBE).
 class XCFunctional {
 public:
@@ -29,7 +29,7 @@ public:
 
     // Evaluate for spin-polarized (collinear)
     // rho: [DMnd*3] layout: rho[0..DMnd-1] = total, rho[DMnd..2*DMnd-1] = up,
-    //       rho[2*DMnd..3*DMnd-1] = down  (matching reference SPARC convention)
+    //       rho[2*DMnd..3*DMnd-1] = down  (matching reference LYNX convention)
     // Vxc: [DMnd*2] layout: Vxc[0..DMnd-1] = up, Vxc[DMnd..2*DMnd-1] = down
     void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
                        double* Dxcdgrho = nullptr) const;
@@ -46,7 +46,7 @@ private:
     const Gradient* gradient_ = nullptr;
     const HaloExchange* halo_ = nullptr;
 
-    // --- LDA functionals (matching reference SPARC exactly) ---
+    // --- LDA functionals (matching reference LYNX exactly) ---
 
     // Slater exchange: ex(i) = -C2 * rho^(1/3), vx(i) = -C3 * rho^(1/3)
     static void slater(int DMnd, const double* rho, double* ex, double* vx);
@@ -62,7 +62,7 @@ private:
     static void pw_spin(int DMnd, const double* rho, double* ec, double* vc);
 
 public:
-    // --- GGA functionals (matching reference SPARC exactly) ---
+    // --- GGA functionals (matching reference LYNX exactly) ---
     // Public for use by Stress (v2xc recomputation)
 
     // PBE exchange: iflag=1(PBE), 2(PBEsol), 3(RPBE), 4(ZY-revPBE)
@@ -93,4 +93,4 @@ private:
     int get_pbe_iflag() const;
 };
 
-} // namespace sparc
+} // namespace lynx

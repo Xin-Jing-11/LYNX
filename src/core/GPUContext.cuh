@@ -14,7 +14,7 @@
 #include <cassert>
 #include "gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -692,6 +692,6 @@ struct GPUContext {
 };
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

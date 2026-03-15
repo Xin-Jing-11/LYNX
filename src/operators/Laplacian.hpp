@@ -4,7 +4,7 @@
 #include "core/Domain.hpp"
 #include <complex>
 
-namespace sparc {
+namespace lynx {
 
 using Complex = std::complex<double>;
 
@@ -50,4 +50,4 @@ private:
                        double a, double b, double c, int ncol) const;
 };
 
-} // namespace sparc
+} // namespace lynx

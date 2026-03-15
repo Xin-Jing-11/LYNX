@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LYNX DFT Simulator</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+</head>
+<body>
+  <!-- Top Bar -->
+  <header id="topbar">
+    <div class="topbar-left">
+      <h1>LYNX <span class="accent">DFT</span></h1>
+      <span class="subtitle">Real-Space Density Functional Theory</span>
+    </div>
+    <div class="topbar-center">
+      <button id="btn-load-example" class="btn btn-secondary" title="Load example">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3.5A1.5 1.5 0 012.5 2h3.879a1.5 1.5 0 011.06.44l1.122 1.12A1.5 1.5 0 009.62 4H13.5A1.5 1.5 0 0115 5.5v7a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z"/></svg>
+        Examples
+      </button>
+      <button id="btn-import" class="btn btn-secondary" title="Import JSON">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 0a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V4.707A1 1 0 0013.707 4L10 .293A1 1 0 009.293 0H4z"/></svg>
+        Import
+      </button>
+      <button id="btn-export" class="btn btn-secondary" title="Export JSON">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a.5.5 0 01.5.5v11.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 12.293V.5A.5.5 0 018 0z"/></svg>
+        Export
+      </button>
+    </div>
+    <div class="topbar-right">
+      <div id="job-indicator" class="hidden">
+        <span class="pulse"></span>
+        <span id="job-status-text">Idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Example Picker Modal -->
+  <div id="modal-examples" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Load Example</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body" id="example-list"></div>
+    </div>
+  </div>
+
+  <!-- Main Layout -->
+  <div id="app">
+    <!-- Left Panel: Input Configuration -->
+    <aside id="panel-left" class="panel">
+      <div class="panel-header">
+        <h2>Configuration</h2>
+        <button id="btn-collapse-left" class="btn-icon" title="Collapse">&#9664;</button>
+      </div>
+      <div class="panel-body" id="config-form">
+
+        <!-- Lattice Section -->
+        <details open class="config-section">
+          <summary>Lattice</summary>
+          <div class="form-group">
+            <label>Cell Type</label>
+            <select id="cell-type">
+              <option value="orthogonal">Orthogonal</option>
+              <option value="non-orthogonal">Non-Orthogonal</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Lattice Vectors (Bohr)</label>
+            <div class="vec-grid">
+              <input type="number" id="lv-00" step="0.1" value="10.26" placeholder="a_x">
+              <input type="number" id="lv-01" step="0.1" value="0" placeholder="a_y">
+              <input type="number" id="lv-02" step="0.1" value="0" placeholder="a_z">
+              <input type="number" id="lv-10" step="0.1" value="0" placeholder="b_x">
+              <input type="number" id="lv-11" step="0.1" value="10.26" placeholder="b_y">
+              <input type="number" id="lv-12" step="0.1" value="0" placeholder="b_z">
+              <input type="number" id="lv-20" step="0.1" value="0" placeholder="c_x">
+              <input type="number" id="lv-21" step="0.1" value="0" placeholder="c_y">
+              <input type="number" id="lv-22" step="0.1" value="10.26" placeholder="c_z">
+            </div>
+          </div>
+        </details>
+
+        <!-- Atoms Section -->
+        <details open class="config-section">
+          <summary>Atoms</summary>
+          <div id="atom-groups"></div>
+          <button id="btn-add-atom-group" class="btn btn-small btn-accent">+ Add Element</button>
+        </details>
+
+        <!-- Grid Section -->
+        <details class="config-section">
+          <summary>Grid</summary>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Nx</label>
+              <input type="number" id="grid-nx" value="30" min="4" max="200">
+            </div>
+            <div class="form-group">
+              <label>Ny</label>
+              <input type="number" id="grid-ny" value="30" min="4" max="200">
+            </div>
+            <div class="form-group">
+              <label>Nz</label>
+              <input type="number" id="grid-nz" value="30" min="4" max="200">
+            </div>
+          </div>
+          <div class="form-group">
+            <label>FD Order</label>
+            <select id="fd-order">
+              <option value="6">6</option>
+              <option value="8">8</option>
+              <option value="10">10</option>
+              <option value="12" selected>12</option>
+              <option value="14">14</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Boundary Conditions</label>
+            <div class="form-row">
+              <select id="bc-x"><option value="periodic" selected>Periodic</option><option value="dirichlet">Dirichlet</option></select>
+              <select id="bc-y"><option value="periodic" selected>Periodic</option><option value="dirichlet">Dirichlet</option></select>
+              <select id="bc-z"><option value="periodic" selected>Periodic</option><option value="dirichlet">Dirichlet</option></select>
+            </div>
+          </div>
+        </details>
+
+        <!-- Electronic Section -->
+        <details class="config-section">
+          <summary>Electronic</summary>
+          <div class="form-group">
+            <label>XC Functional</label>
+            <select id="xc-func">
+              <option value="LDA_PZ">LDA (PZ)</option>
+              <option value="LDA_PW">LDA (PW92)</option>
+              <option value="GGA_PBE" selected>GGA (PBE)</option>
+              <option value="GGA_PBEsol">GGA (PBEsol)</option>
+              <option value="GGA_RPBE">GGA (RPBE)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Spin</label>
+            <select id="spin-type">
+              <option value="none" selected>None</option>
+              <option value="collinear">Collinear</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Temperature (K)</label>
+              <input type="number" id="elec-temp" value="300" min="0" step="100">
+            </div>
+            <div class="form-group">
+              <label>Smearing</label>
+              <select id="smearing">
+                <option value="gaussian" selected>Gaussian</option>
+                <option value="fermi-dirac">Fermi-Dirac</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Number of States</label>
+            <input type="number" id="nstates" value="20" min="1" max="500">
+          </div>
+        </details>
+
+        <!-- K-points Section -->
+        <details class="config-section">
+          <summary>K-Points</summary>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Kx</label>
+              <input type="number" id="kpt-x" value="1" min="1" max="20">
+            </div>
+            <div class="form-group">
+              <label>Ky</label>
+              <input type="number" id="kpt-y" value="1" min="1" max="20">
+            </div>
+            <div class="form-group">
+              <label>Kz</label>
+              <input type="number" id="kpt-z" value="1" min="1" max="20">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Shift X</label>
+              <input type="number" id="kpt-sx" value="0" step="0.5" min="0" max="0.5">
+            </div>
+            <div class="form-group">
+              <label>Shift Y</label>
+              <input type="number" id="kpt-sy" value="0" step="0.5" min="0" max="0.5">
+            </div>
+            <div class="form-group">
+              <label>Shift Z</label>
+              <input type="number" id="kpt-sz" value="0" step="0.5" min="0" max="0.5">
+            </div>
+          </div>
+        </details>
+
+        <!-- SCF Section -->
+        <details class="config-section">
+          <summary>SCF</summary>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Max Iterations</label>
+              <input type="number" id="scf-maxiter" value="100" min="1" max="1000">
+            </div>
+            <div class="form-group">
+              <label>Tolerance</label>
+              <input type="number" id="scf-tol" value="1e-6" step="1e-7">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Mixing</label>
+              <select id="mixing-var">
+                <option value="density" selected>Density</option>
+                <option value="potential">Potential</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Preconditioner</label>
+              <select id="mixing-precond">
+                <option value="kerker" selected>Kerker</option>
+                <option value="none">None</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>History</label>
+              <input type="number" id="mixing-history" value="7" min="1" max="20">
+            </div>
+            <div class="form-group">
+              <label>Parameter</label>
+              <input type="number" id="mixing-param" value="0.3" step="0.05" min="0.01" max="1.0">
+            </div>
+          </div>
+        </details>
+
+        <!-- Run Controls -->
+        <div class="run-controls">
+          <button id="btn-run" class="btn btn-primary btn-large">
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2l10 6-10 6V2z"/></svg>
+            Run Simulation
+          </button>
+          <button id="btn-stop" class="btn btn-danger btn-large hidden" title="Stop running simulation">
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1"/></svg>
+            Stop
+          </button>
+          <button id="btn-preview" class="btn btn-accent btn-large" title="Preview structure with synthetic density">
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 3.5a.5.5 0 00-1 0V9a.5.5 0 00.252.434l3.5 2a.5.5 0 00.496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 108 0a8 8 0 000 16zm7-8A7 7 0 111 8a7 7 0 0114 0z"/></svg>
+            Preview
+          </button>
+          <div class="form-row" style="margin-top: 8px;">
+            <div class="form-group">
+              <label>Device</label>
+              <select id="device-type">
+                <option value="cpu" selected>CPU</option>
+                <option value="gpu">GPU (CUDA)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>MPI Procs</label>
+              <input type="number" id="nprocs" value="1" min="1" max="64">
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center: 3D Viewer -->
+    <main id="viewer-container">
+      <div id="viewer-3d">
+        <!-- Camera preset buttons (overlay) -->
+        <div id="camera-presets">
+          <div class="cam-group">
+            <span class="cam-group-label">Axis</span>
+            <button class="cam-btn" data-view="+x" title="View along +X">+X</button>
+            <button class="cam-btn" data-view="-x" title="View along -X">&minus;X</button>
+            <button class="cam-btn" data-view="+y" title="View along +Y">+Y</button>
+            <button class="cam-btn" data-view="-y" title="View along -Y">&minus;Y</button>
+            <button class="cam-btn" data-view="+z" title="View along +Z">+Z</button>
+            <button class="cam-btn" data-view="-z" title="View along -Z">&minus;Z</button>
+          </div>
+          <div class="cam-group">
+            <span class="cam-group-label">Iso</span>
+            <button class="cam-btn" data-view="iso1" title="Isometric view 1">&#x2B1A; 1</button>
+            <button class="cam-btn" data-view="iso2" title="Isometric view 2">&#x2B1A; 2</button>
+            <button class="cam-btn" data-view="iso3" title="Isometric view 3">&#x2B1A; 3</button>
+            <button class="cam-btn" data-view="iso4" title="Isometric view 4">&#x2B1A; 4</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Viewer bottom controls -->
+      <div id="viewer-controls">
+        <!-- Row 1: toggles -->
+        <div class="viewer-toolbar">
+          <label class="toggle-label">
+            <input type="checkbox" id="show-atoms" checked> Atoms
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="show-bonds" checked> Bonds
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="show-cell" checked> Unit Cell
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="show-labels"> Labels
+          </label>
+        </div>
+
+        <!-- Row 2: Density visualization mode tabs -->
+        <div id="density-section">
+          <div class="density-tab-bar">
+            <button class="density-tab" data-dtab="dtab-iso">Isosurface</button>
+            <button class="density-tab" data-dtab="dtab-volume">Volume 3D</button>
+            <button class="density-tab" data-dtab="dtab-slices">Slices</button>
+          </div>
+
+          <!-- Isosurface controls -->
+          <div id="dtab-iso" class="density-tab-content">
+            <div class="density-row">
+              <label class="toggle-label">
+                <input type="checkbox" id="show-density"> Enable
+              </label>
+              <div class="slider-group flex1">
+                <label>Isovalue: <span id="iso-value-display">0.05</span></label>
+                <input type="range" id="iso-slider" min="0" max="1" step="0.001" value="0.3">
+              </div>
+              <div class="slider-group" style="min-width:90px">
+                <label>Opacity: <span id="opacity-display">0.6</span></label>
+                <input type="range" id="opacity-slider" min="0" max="1" step="0.01" value="0.6">
+              </div>
+              <div class="form-group inline">
+                <label>Color</label>
+                <input type="color" id="density-color" value="#4488ff">
+              </div>
+            </div>
+          </div>
+
+          <!-- Volume 3D controls -->
+          <div id="dtab-volume" class="density-tab-content hidden">
+            <div class="density-row">
+              <label class="toggle-label">
+                <input type="checkbox" id="show-volume"> Enable
+              </label>
+              <div class="form-group inline">
+                <label>Colormap</label>
+                <select id="vol-colormap">
+                  <option value="orbital" selected>Orbital</option>
+                  <option value="viridis">Viridis</option>
+                  <option value="plasma">Plasma</option>
+                  <option value="inferno">Inferno</option>
+                  <option value="coolwarm">Coolwarm</option>
+                  <option value="blueRed">Blue-Red</option>
+                </select>
+              </div>
+              <div class="slider-group flex1">
+                <label>Threshold: <span id="vol-thresh-low-display">0.08</span></label>
+                <input type="range" id="vol-thresh-low" min="0" max="0.5" step="0.005" value="0.08">
+              </div>
+              <div class="slider-group" style="min-width:90px">
+                <label>Brightness: <span id="vol-brightness-display">1.8</span></label>
+                <input type="range" id="vol-brightness" min="0.2" max="5.0" step="0.1" value="1.8">
+              </div>
+              <div class="slider-group" style="min-width:80px">
+                <label>Quality: <span id="vol-steps-display">160</span></label>
+                <input type="range" id="vol-steps" min="32" max="256" step="8" value="160">
+              </div>
+              <div class="slider-group" style="min-width:80px">
+                <label>Opacity: <span id="vol-opacity-display">0.70</span></label>
+                <input type="range" id="vol-opacity" min="0" max="1" step="0.01" value="0.70">
+              </div>
+            </div>
+            <div class="colorbar-container">
+              <span class="colorbar-label" id="colorbar-min">0.00</span>
+              <canvas id="colorbar-canvas" width="200" height="14"></canvas>
+              <span class="colorbar-label" id="colorbar-max">1.00</span>
+              <span class="colorbar-unit">e/Bohr&sup3;</span>
+            </div>
+          </div>
+
+          <!-- Slice controls -->
+          <div id="dtab-slices" class="density-tab-content hidden">
+            <div class="density-row">
+              <label class="toggle-label">
+                <input type="checkbox" id="show-slices"> Enable
+              </label>
+              <div class="slider-group flex1">
+                <label>X slice: <span id="slice-x-display">0.50</span></label>
+                <input type="range" id="slice-x" min="0" max="1" step="0.01" value="0.50">
+              </div>
+              <div class="slider-group flex1">
+                <label>Y slice: <span id="slice-y-display">0.50</span></label>
+                <input type="range" id="slice-y" min="0" max="1" step="0.01" value="0.50">
+              </div>
+              <div class="slider-group flex1">
+                <label>Z slice: <span id="slice-z-display">0.50</span></label>
+                <input type="range" id="slice-z" min="0" max="1" step="0.01" value="0.50">
+              </div>
+            </div>
+            <div class="colorbar-container">
+              <span class="colorbar-label" id="colorbar-min-s">0.00</span>
+              <canvas id="colorbar-canvas-s" width="200" height="14"></canvas>
+              <span class="colorbar-label" id="colorbar-max-s">1.00</span>
+              <span class="colorbar-unit">e/Bohr&sup3;</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Panel: Results -->
+    <aside id="panel-right" class="panel">
+      <div class="panel-header">
+        <h2>Results</h2>
+        <button id="btn-collapse-right" class="btn-icon" title="Collapse">&#9654;</button>
+      </div>
+      <div class="panel-body" id="results-panel">
+        <!-- Tabs -->
+        <div class="tab-bar">
+          <button class="tab active" data-tab="tab-scf">SCF</button>
+          <button class="tab" data-tab="tab-energy">Energy</button>
+          <button class="tab" data-tab="tab-forces">Forces</button>
+          <button class="tab" data-tab="tab-stress">Stress</button>
+          <button class="tab" data-tab="tab-log">Log</button>
+        </div>
+
+        <!-- SCF Convergence -->
+        <div id="tab-scf" class="tab-content active">
+          <div class="placeholder-msg" id="scf-placeholder">Run a simulation to see SCF convergence</div>
+          <canvas id="scf-chart" class="hidden" width="400" height="250"></canvas>
+          <div id="scf-info" class="info-grid hidden">
+            <div class="info-item"><span class="info-label">Iterations</span><span id="scf-niter" class="info-value">--</span></div>
+            <div class="info-item"><span class="info-label">Converged</span><span id="scf-converged" class="info-value">--</span></div>
+            <div class="info-item"><span class="info-label">Final Residual</span><span id="scf-residual" class="info-value">--</span></div>
+            <div class="info-item"><span class="info-label">Fermi Energy</span><span id="scf-fermi" class="info-value">--</span></div>
+          </div>
+        </div>
+
+        <!-- Energy -->
+        <div id="tab-energy" class="tab-content">
+          <div class="placeholder-msg" id="energy-placeholder">No energy data yet</div>
+          <table id="energy-table" class="data-table hidden">
+            <thead><tr><th>Component</th><th>Value (Ha)</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <!-- Forces -->
+        <div id="tab-forces" class="tab-content">
+          <div class="placeholder-msg" id="forces-placeholder">No force data yet</div>
+          <table id="forces-table" class="data-table hidden">
+            <thead><tr><th>Atom</th><th>Element</th><th>Fx</th><th>Fy</th><th>Fz</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <!-- Stress -->
+        <div id="tab-stress" class="tab-content">
+          <div class="placeholder-msg" id="stress-placeholder">No stress data yet</div>
+          <div id="stress-display" class="hidden">
+            <table id="stress-table" class="data-table">
+              <thead><tr><th></th><th>xx</th><th>yy</th><th>zz</th></tr></thead>
+              <tbody>
+                <tr><td>Normal</td><td id="s-xx">--</td><td id="s-yy">--</td><td id="s-zz">--</td></tr>
+              </tbody>
+            </table>
+            <table id="stress-table-shear" class="data-table" style="margin-top:6px">
+              <thead><tr><th></th><th>xy</th><th>yz</th><th>xz</th></tr></thead>
+              <tbody>
+                <tr><td>Shear</td><td id="s-xy">--</td><td id="s-yz">--</td><td id="s-xz">--</td></tr>
+              </tbody>
+            </table>
+            <div class="info-item" style="margin-top:12px;">
+              <span class="info-label">Pressure</span>
+              <span id="pressure-val" class="info-value">--</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Log -->
+        <div id="tab-log" class="tab-content">
+          <div class="stdout-section hidden">
+            <div class="stdout-header">LYNX Output</div>
+            <pre id="stdout-output" class="log-area stdout-log"></pre>
+          </div>
+          <div class="stdout-header" style="margin-top:8px">UI Log</div>
+          <pre id="log-output" class="log-area">Ready.</pre>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <input type="file" id="file-input" accept=".json" style="display:none">
+  <script src="/static/js/marching_cubes.js"></script>
+  <script src="/static/js/viewer.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

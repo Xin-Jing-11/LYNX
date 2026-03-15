@@ -5,7 +5,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace sparc {
+namespace lynx {
 
 int Pseudopotential::nproj_per_atom() const {
     int total = 0;
@@ -120,7 +120,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
                     }
                 }
             }
-            // Fix r=0 boundary: copy from r=dr (matching reference SPARC)
+            // Fix r=0 boundary: copy from r=dr (matching reference LYNX)
             // Critical for l=0 projectors which are non-zero at the origin
             for (int p = 0; p < nprj; ++p) {
                 if (mmax > 1) {
@@ -262,7 +262,7 @@ void Pseudopotential::compute_splines() {
 }
 
 // Compute first derivatives at node points using tridiagonal system
-// (matches reference SPARC getYD_gen)
+// (matches reference LYNX getYD_gen)
 void Pseudopotential::spline_deriv(const std::vector<double>& x,
                                    const std::vector<double>& y,
                                    std::vector<double>& yd) {
@@ -325,7 +325,7 @@ void Pseudopotential::spline_deriv(const std::vector<double>& x,
     }
 }
 
-// Hermite cubic spline interpolation (matches reference SPARC SplineInterp)
+// Hermite cubic spline interpolation (matches reference LYNX SplineInterp)
 void Pseudopotential::spline_interp(const std::vector<double>& r_grid,
                                     const std::vector<double>& f,
                                     const std::vector<double>& yd,
@@ -431,4 +431,4 @@ double Pseudopotential::spline_interp_single(const std::vector<double>& r_grid,
     return ((A3 * x + A2) * x + A1) * x + A0;
 }
 
-} // namespace sparc
+} // namespace lynx

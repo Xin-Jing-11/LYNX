@@ -1,6 +1,6 @@
 #include "core/Domain.hpp"
 
-namespace sparc {
+namespace lynx {
 
 Domain::Domain(const FDGrid& global_grid, const DomainVertices& verts)
     : grid_(&global_grid), verts_(verts) {
@@ -17,4 +17,4 @@ int Domain::local_to_global(int i, int j, int k) const {
     return gi + gj * grid_->Nx() + gk * grid_->Nx() * grid_->Ny();
 }
 
-} // namespace sparc
+} // namespace lynx

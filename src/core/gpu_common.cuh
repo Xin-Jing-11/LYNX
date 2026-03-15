@@ -18,7 +18,7 @@
 #define MAX_FDN 6
 #define MAX_FD_COEFF (MAX_FDN + 1)
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // FD stencil coefficients in constant memory
@@ -47,6 +47,6 @@ void upload_stencil_coefficients(
 inline __host__ __device__ int ceildiv(int a, int b) { return (a + b - 1) / b; }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

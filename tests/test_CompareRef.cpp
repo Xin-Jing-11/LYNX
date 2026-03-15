@@ -1,6 +1,6 @@
-// Component-by-component comparison test against reference SPARC dumps
-// Run reference first: cd dev_SPARC_GPU/tests/BaTiO3_quick/standard && mpirun -np 1 ../../../lib/sparc -name BaTiO3_quick
-// Then run this: mpirun -np 1 ./tests/sparc_compare_tests --gtest_filter=*
+// Component-by-component comparison test against reference LYNX dumps
+// Run reference first: cd dev_SPARC_GPU/tests/BaTiO3_quick/standard && mpirun -np 1 ../../../lib/lynx -name BaTiO3_quick
+// Then run this: mpirun -np 1 ./tests/lynx_compare_tests --gtest_filter=*
 
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -34,7 +34,7 @@
 #include "xc/XCFunctional.hpp"
 #include "core/constants.hpp"
 
-using namespace sparc;
+using namespace lynx;
 
 // Helper to set up the full system from BaTiO3_quick.json
 struct SystemSetup {

@@ -2,7 +2,7 @@
 
 #include "types.hpp"
 
-namespace sparc {
+namespace lynx {
 
 class Lattice {
 public:
@@ -53,4 +53,4 @@ private:
     void compute_derived();
 };
 
-} // namespace sparc
+} // namespace lynx

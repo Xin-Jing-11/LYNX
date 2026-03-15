@@ -4,7 +4,7 @@
 #include "core/FDGrid.hpp"
 #include "core/Lattice.hpp"
 
-namespace sparc {
+namespace lynx {
 
 class FDStencil {
 public:
@@ -47,4 +47,4 @@ private:
     static double fract(int n, int k);
 };
 
-} // namespace sparc
+} // namespace lynx

@@ -10,10 +10,10 @@
 
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
 // Anderson/Pulay mixing with optional Kerker preconditioner.
-// Matches reference SPARC Mixing_periodic_pulay exactly.
+// Matches reference LYNX Mixing_periodic_pulay exactly.
 class Mixer {
 public:
     Mixer() = default;
@@ -65,4 +65,4 @@ private:
     void apply_kerker(const double* f, double amix, double* Pf) const;
 };
 
-} // namespace sparc
+} // namespace lynx

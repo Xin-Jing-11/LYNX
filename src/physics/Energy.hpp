@@ -10,7 +10,7 @@
 
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
 // Energy components of the Kohn-Sham DFT calculation.
 struct EnergyComponents {
@@ -72,4 +72,4 @@ public:
         const MPIComm* bandcomm = nullptr);
 };
 
-} // namespace sparc
+} // namespace lynx

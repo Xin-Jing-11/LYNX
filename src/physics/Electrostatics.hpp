@@ -9,7 +9,7 @@
 
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
 // Electrostatics: pseudocharge density, self energy, correction energy,
 // local potential on the grid.
@@ -98,4 +98,4 @@ private:
     double int_b_ = 0.0;     // integral of b (should equal -total_Z)
 };
 
-} // namespace sparc
+} // namespace lynx

@@ -2,7 +2,7 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace sparc {
+namespace lynx {
 
 void Wavefunction::allocate(int Nd_d, int Nband, int Nspin, int Nkpts, bool is_complex) {
     // Non-band-parallel: Nband_local == Nband_global
@@ -68,4 +68,4 @@ void Wavefunction::randomize_kpt(int spin, int kpt, unsigned seed) {
     }
 }
 
-} // namespace sparc
+} // namespace lynx

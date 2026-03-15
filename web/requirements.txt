@@ -1,0 +1,4 @@
+flask>=3.0
+flask-socketio>=5.3
+numpy>=1.24
+eventlet>=0.35

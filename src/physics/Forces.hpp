@@ -15,9 +15,9 @@
 
 #include <vector>
 
-namespace sparc {
+namespace lynx {
 
-// Force calculation matching reference SPARC.
+// Force calculation matching reference LYNX.
 // Three contributions:
 //   F_local  = -∫ b_J · ∇φ dV + 0.5 * correction  (electrostatic + pseudocharge)
 //   F_nloc   = -occfac·2·Σ g_n Γ <χ|ψ><χ|∇ψ>      (nonlocal KB projectors)
@@ -109,4 +109,4 @@ private:
     static void symmetrize(std::vector<double>& forces, int n_atom);
 };
 
-} // namespace sparc
+} // namespace lynx

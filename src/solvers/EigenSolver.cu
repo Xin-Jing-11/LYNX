@@ -9,7 +9,7 @@
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -689,6 +689,6 @@ void compute_density_z_gpu(const cuDoubleComplex* d_psi, const double* d_occ,
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 
 #endif // USE_CUDA

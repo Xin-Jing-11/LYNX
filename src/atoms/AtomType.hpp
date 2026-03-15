@@ -4,7 +4,7 @@
 #include <memory>
 #include "atoms/Pseudopotential.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // Represents one element type in the simulation
 class AtomType {
@@ -28,4 +28,4 @@ private:
     Pseudopotential psd_;
 };
 
-} // namespace sparc
+} // namespace lynx

@@ -2,10 +2,10 @@
 
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 // Real spherical harmonics Y_lm(x, y, z, r) for l = 0..6.
-// Matches reference SPARC (tools.c RealSphericalHarmonic).
+// Matches reference LYNX (tools.c RealSphericalHarmonic).
 // All expressions use unit vector (xn,yn,zn) = (x,y,z)/r for efficiency.
 // (x, y, z) is the position vector; r = ||(x,y,z)|| (may be pre-computed).
 inline double spherical_harmonic(int l, int m, double x, double y, double z, double r) {
@@ -122,4 +122,4 @@ inline double spherical_harmonic(int l, int m, double x, double y, double z, dou
     return 0.0; // l >= 7 not implemented
 }
 
-} // namespace sparc
+} // namespace lynx

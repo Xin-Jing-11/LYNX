@@ -7,7 +7,7 @@
 #include <vector>
 #include <complex>
 
-namespace sparc {
+namespace lynx {
 
 using Complex = std::complex<double>;
 
@@ -77,4 +77,4 @@ private:
     std::vector<NDArray<double>> occ_;
 };
 
-} // namespace sparc
+} // namespace lynx

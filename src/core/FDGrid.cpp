@@ -1,7 +1,7 @@
 #include "core/FDGrid.hpp"
 #include <stdexcept>
 
-namespace sparc {
+namespace lynx {
 
 FDGrid::FDGrid(int Nx, int Ny, int Nz, const Lattice& lattice,
                BCType bcx, BCType bcy, BCType bcz)
@@ -34,4 +34,4 @@ FDGrid::FDGrid(int Nx, int Ny, int Nz, const Lattice& lattice,
     dV_ = lattice.jacobian() / (nx_intervals * ny_intervals * nz_intervals);
 }
 
-} // namespace sparc
+} // namespace lynx

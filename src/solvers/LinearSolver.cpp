@@ -4,7 +4,7 @@
 #include <vector>
 #include <algorithm>
 
-namespace sparc {
+namespace lynx {
 
 double LinearSolver::dot(const double* a, const double* b, int N, const MPIComm& comm) {
     double local_dot = 0.0;
@@ -237,4 +237,4 @@ int LinearSolver::cg(const OpFunc& op,
     return -max_iter;
 }
 
-} // namespace sparc
+} // namespace lynx

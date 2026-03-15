@@ -2,7 +2,7 @@
 #include "electronic/Wavefunction.hpp"
 #include <cmath>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(Wavefunction, Allocate) {
     Wavefunction wfn;

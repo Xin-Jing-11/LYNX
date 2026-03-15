@@ -9,7 +9,7 @@
 #include "parallel/HaloExchange.hpp"
 #include "solvers/LinearSolver.hpp"
 
-namespace sparc {
+namespace lynx {
 
 // Solves the Poisson equation: -Lap(phi) = 4*pi*(rho + b)
 // where b is the pseudocharge density.
@@ -44,4 +44,4 @@ private:
     double jacobi_weight_ = 0.0;  // Jacobi preconditioner weight
 };
 
-} // namespace sparc
+} // namespace lynx

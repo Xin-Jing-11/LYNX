@@ -4,7 +4,7 @@
 #include <cmath>
 #include <vector>
 
-using namespace sparc;
+using namespace lynx;
 
 TEST(LinearSolver, CGSolveDiagonal) {
     // Solve D*x = b where D is a diagonal matrix

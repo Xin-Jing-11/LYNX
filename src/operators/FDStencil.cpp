@@ -2,7 +2,7 @@
 #include "core/constants.hpp"
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 double FDStencil::fract(int n, int k) {
     double Nr = 1.0, Dr = 1.0;
@@ -129,4 +129,4 @@ void FDStencil::compute_max_eigval(const FDGrid& grid, const Lattice& lattice) {
     }
 }
 
-} // namespace sparc
+} // namespace lynx

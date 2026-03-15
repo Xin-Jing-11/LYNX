@@ -9,7 +9,7 @@
 
 #include <functional>
 
-namespace sparc {
+namespace lynx {
 
 // Alternating Anderson-Richardson (AAR) iterative solver.
 // Solves: A*x = b  where A is typically the Laplacian operator.
@@ -55,4 +55,4 @@ public:
     static double dot(const double* a, const double* b, int N, const MPIComm& comm);
 };
 
-} // namespace sparc
+} // namespace lynx

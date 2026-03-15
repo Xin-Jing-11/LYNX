@@ -1,6 +1,6 @@
 #include "operators/Gradient.hpp"
 
-namespace sparc {
+namespace lynx {
 
 Gradient::Gradient(const FDStencil& stencil, const Domain& domain)
     : stencil_(&stencil), domain_(&domain) {}
@@ -55,4 +55,4 @@ void Gradient::apply_impl(const T* x, T* y, int direction, int ncol) const {
 template void Gradient::apply_impl<double>(const double*, double*, int, int) const;
 template void Gradient::apply_impl<Complex>(const Complex*, Complex*, int, int) const;
 
-} // namespace sparc
+} // namespace lynx

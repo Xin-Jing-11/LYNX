@@ -5,7 +5,7 @@
 #include <cstring>
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 using Real = double;
 using Complex = std::complex<double>;
@@ -81,4 +81,4 @@ struct Vec3 {
 // Memory alignment for SIMD/CUDA
 constexpr std::size_t MEMORY_ALIGNMENT = 64;
 
-} // namespace sparc
+} // namespace lynx

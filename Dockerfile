@@ -28,6 +28,6 @@ CMD ["ctest", "--test-dir", "build", "--output-on-failure"]
 
 # --- Runtime stage (minimal) ---
 FROM base AS runtime
-COPY --from=build /workspace/build/src/sparc /usr/local/bin/sparc
+COPY --from=build /workspace/build/src/lynx /usr/local/bin/lynx
 COPY examples/ /workspace/examples/
-ENTRYPOINT ["sparc"]
+ENTRYPOINT ["lynx"]

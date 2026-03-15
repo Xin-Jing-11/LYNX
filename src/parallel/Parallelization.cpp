@@ -1,7 +1,7 @@
 #include "parallel/Parallelization.hpp"
 #include <stdexcept>
 
-namespace sparc {
+namespace lynx {
 
 int Parallelization::block_size(int N, int np, int rank) {
     return N / np + ((rank < N % np) ? 1 : 0);
@@ -83,4 +83,4 @@ Parallelization::Parallelization(MPI_Comm world, const ParallelParams& params,
     domain_ = Domain(grid, verts);
 }
 
-} // namespace sparc
+} // namespace lynx

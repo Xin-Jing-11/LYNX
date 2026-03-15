@@ -4,7 +4,7 @@
 #include "core/FDGrid.hpp"
 #include "core/Domain.hpp"
 
-namespace sparc {
+namespace lynx {
 
 struct ParallelParams {
     int npspin = 1;
@@ -56,4 +56,4 @@ private:
     Domain domain_;
 };
 
-} // namespace sparc
+} // namespace lynx

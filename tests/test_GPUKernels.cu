@@ -1,6 +1,6 @@
 // GPU kernel correctness + performance tests
 // Build: cmake -B build -DUSE_CUDA=ON -DBUILD_TESTS=ON && cmake --build build
-// Run:   ./build/tests/sparc_gpu_tests
+// Run:   ./build/tests/lynx_gpu_tests
 
 #ifdef USE_CUDA
 
@@ -16,7 +16,7 @@
 #include "core/gpu_common.cuh"
 
 // Forward declarations for GPU functions
-namespace sparc { namespace gpu {
+namespace lynx { namespace gpu {
     void upload_stencil_coefficients(
         const double* D2x, const double* D2y, const double* D2z,
         const double* D1x, const double* D1y, const double* D1z,
@@ -125,7 +125,7 @@ namespace sparc { namespace gpu {
                           int direction, int ncol);
 }}
 
-using namespace sparc::gpu;
+using namespace lynx::gpu;
 
 // ============================================================
 // CPU reference implementations (self-contained, no project deps)
@@ -244,7 +244,7 @@ protected:
     static constexpr int ND = NX * NY * NZ;
     static constexpr int ND_EX = NX_EX * NY_EX * NZ_EX;
 
-    // FD coefficients for order 12 (from SPARC reference)
+    // FD coefficients for order 12 (from LYNX reference)
     double D2_w[7] = {-3.277777777778, 1.777777777778, -0.311111111111,
                        0.075396825397, -0.017676767677, 0.003480963480, -0.000462962963};
     // Scale for uniform grid h=1.0 (tests don't need physical spacing)

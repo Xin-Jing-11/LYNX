@@ -1,7 +1,7 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // Forward declarations
@@ -66,5 +66,5 @@ void hamiltonian_apply_local_gpu(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 #endif // USE_CUDA

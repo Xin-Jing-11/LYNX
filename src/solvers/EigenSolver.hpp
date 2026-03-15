@@ -8,7 +8,7 @@
 #include "parallel/HaloExchange.hpp"
 #include <complex>
 
-namespace sparc {
+namespace lynx {
 
 using Complex = std::complex<double>;
 
@@ -133,4 +133,4 @@ private:
     void rotate_orbitals_kpt(Complex* X, const Complex* Q, int Nd_d, int Nband);
 };
 
-} // namespace sparc
+} // namespace lynx

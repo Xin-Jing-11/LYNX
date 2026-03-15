@@ -1,7 +1,7 @@
 #include "operators/Laplacian.hpp"
 #include <cmath>
 
-namespace sparc {
+namespace lynx {
 
 Laplacian::Laplacian(const FDStencil& stencil, const Domain& domain)
     : stencil_(&stencil), domain_(&domain) {}
@@ -199,4 +199,4 @@ template void Laplacian::apply_nonorth_impl<double>(const double*, const double*
 template void Laplacian::apply_nonorth_impl<Complex>(const Complex*, const double*, Complex*,
                                                       double, double, double, int) const;
 
-} // namespace sparc
+} // namespace lynx

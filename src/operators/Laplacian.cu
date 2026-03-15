@@ -1,7 +1,7 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
 
-namespace sparc {
+namespace lynx {
 namespace gpu {
 
 // ============================================================
@@ -770,5 +770,5 @@ void laplacian_nonorth_gpu(
 }
 
 } // namespace gpu
-} // namespace sparc
+} // namespace lynx
 #endif // USE_CUDA
