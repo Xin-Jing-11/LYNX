@@ -843,6 +843,14 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
     CUDA_CHECK(cudaMallocAsync(&d_ndc_arr_soc, n_influence_soc * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_nproj_soc_arr, n_influence_soc * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_IP_displ_soc, n_influence_soc * sizeof(int), 0));
+    {
+        double gmax = 0;
+        for (int i = 0; i < total_soc_nproj; i++)
+            gmax = std::max(gmax, std::abs(h_Gamma_soc[i]));
+        printf("GPU SOC: Gamma_soc max=%.6e, nproj=%d\n", gmax, total_soc_nproj);
+        for (int i = 0; i < std::min(10, total_soc_nproj); i++)
+            printf("  Gamma_soc[%d]=%.6e\n", i, h_Gamma_soc[i]);
+    }
     CUDA_CHECK(cudaMallocAsync(&d_Gamma_soc, total_soc_nproj * sizeof(double), 0));
     CUDA_CHECK(cudaMallocAsync(&d_proj_l, total_soc_nproj * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_proj_m, total_soc_nproj * sizeof(int), 0));
@@ -1002,14 +1010,11 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
 
         if (call_count == 0 && n == 0) {
             cudaDeviceSynchronize();
-            double hp_re, hp_im;
-            cudaMemcpy(&hp_re, (double*)Hpsi_up, sizeof(double), cudaMemcpyDeviceToHost);
-            cudaMemcpy(&hp_im, (double*)Hpsi_up + 1, sizeof(double), cudaMemcpyDeviceToHost);
-            double psi_re, psi_im;
-            cudaMemcpy(&psi_re, (double*)psi_up, sizeof(double), cudaMemcpyDeviceToHost);
-            cudaMemcpy(&psi_im, (double*)psi_up + 1, sizeof(double), cudaMemcpyDeviceToHost);
-            printf("  [H dbg] after up local: psi_up[0]=(%.3e,%.3e) Hpsi_up[0]=(%.3e,%.3e)\n",
-                   psi_re, psi_im, hp_re, hp_im);
+            double nrm = 0, nrmx = 0;
+            cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d, (double*)Hpsi_up, 1, &nrm);
+            cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d, (double*)psi_up, 1, &nrmx);
+            printf("  [H dbg] after up local: ||psi_up||=%.6e ||Hpsi_up||=%.6e ratio=%.2f\n",
+                   nrmx, nrm, nrm/std::max(nrmx, 1e-30));
         }
 
         // Kinetic + V_dd for spin-down
@@ -1051,10 +1056,9 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
 
     if (call_count == 0) {
         cudaDeviceSynchronize();
-        double hp_re, hp_im;
-        cudaMemcpy(&hp_re, (double*)d_Hpsi, sizeof(double), cudaMemcpyDeviceToHost);
-        cudaMemcpy(&hp_im, (double*)d_Hpsi + 1, sizeof(double), cudaMemcpyDeviceToHost);
-        printf("  [H dbg] after Vnl: Hpsi[0]=(%.3e,%.3e)\n", hp_re, hp_im);
+        double nrm = 0;
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_Hpsi, 1, &nrm);
+        printf("  [H dbg] after Vnl: ||Hpsi||=%.6e\n", nrm);
     }
 
     // Off-diagonal Veff: Hpsi_up += V_ud * psi_dn, Hpsi_dn += conj(V_ud) * psi_up
@@ -1062,10 +1066,9 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
 
     if (call_count == 0) {
         cudaDeviceSynchronize();
-        double hp_re, hp_im;
-        cudaMemcpy(&hp_re, (double*)d_Hpsi, sizeof(double), cudaMemcpyDeviceToHost);
-        cudaMemcpy(&hp_im, (double*)d_Hpsi + 1, sizeof(double), cudaMemcpyDeviceToHost);
-        printf("  [H dbg] after V_ud: Hpsi[0]=(%.3e,%.3e)\n", hp_re, hp_im);
+        double nrm = 0;
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_Hpsi, 1, &nrm);
+        printf("  [H dbg] after V_ud: ||Hpsi||=%.6e\n", nrm);
     }
 
     // SOC terms (Term 1 + Term 2)
@@ -1089,9 +1092,11 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     if (call_count == 0) {
         cudaDeviceSynchronize();
         double hp_re, hp_im;
-        cudaMemcpy(&hp_re, (double*)d_Hpsi, sizeof(double), cudaMemcpyDeviceToHost);
-        cudaMemcpy(&hp_im, (double*)d_Hpsi + 1, sizeof(double), cudaMemcpyDeviceToHost);
-        printf("  [H dbg] after SOC: Hpsi[0]=(%.3e,%.3e)\n", hp_re, hp_im);
+        double nrm_soc = 0, nrmx_full = 0;
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_Hpsi, 1, &nrm_soc);
+        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_psi, 1, &nrmx_full);
+        printf("  [H dbg] after SOC: ||Hpsi||=%.6e ||psi||=%.6e ratio=%.2f\n",
+               nrm_soc, nrmx_full, nrm_soc / std::max(nrmx_full, 1e-30));
         call_count++;
     }
 }
@@ -1951,12 +1956,85 @@ double GPUSCFRunner::run(
     int Nspin_lanczos = has_soc_ ? 1 : Nspin;
     std::vector<double> eigval_min_s(std::max(Nspin, 1), 0.0), eigval_max_s(std::max(Nspin, 1), 0.0);
     {
-        std::vector<double> h_Veff(Nd_);
-        CUDA_CHECK(cudaMemcpy(h_Veff.data(), d_Veff, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-        eigsolver.lanczos_bounds(h_Veff.data(), Nd_, eigval_min_s[0], eigval_max_s[0]);
-        for (int s = 1; s < Nspin; s++) {
-            eigval_min_s[s] = eigval_min_s[0];
-            eigval_max_s[s] = eigval_max_s[0];
+        if (has_soc_) {
+            // SOC: use spinor Lanczos on CPU (4-component Veff_spinor)
+            std::vector<double> h_Veff_spinor(4 * Nd_);
+            CUDA_CHECK(cudaMemcpy(h_Veff_spinor.data(), d_Veff_spinor,
+                                   4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+            Vec3 cell_lengths = grid.lattice().lengths();
+            eigsolver.lanczos_bounds_spinor_kpt(h_Veff_spinor.data(), Nd_,
+                                                 kpt0, cell_lengths,
+                                                 eigval_min_s[0], eigval_max_s[0]);
+        } else {
+            std::vector<double> h_Veff(Nd_);
+            CUDA_CHECK(cudaMemcpy(h_Veff.data(), d_Veff, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            if (is_kpt_) {
+                Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+                Vec3 cell_lengths = grid.lattice().lengths();
+                eigsolver.lanczos_bounds_kpt(h_Veff.data(), Nd_, kpt0, cell_lengths,
+                                              eigval_min_s[0], eigval_max_s[0]);
+            } else {
+                eigsolver.lanczos_bounds(h_Veff.data(), Nd_, eigval_min_s[0], eigval_max_s[0]);
+            }
+            for (int s = 1; s < Nspin; s++) {
+                eigval_min_s[s] = eigval_min_s[0];
+                eigval_max_s[s] = eigval_max_s[0];
+            }
+        }
+    }
+    // For SOC: Lanczos on CPU may underestimate eigmax because the spinor Hamiltonian
+    // includes SOC terms that aren't captured by short Lanczos runs.
+    // Use a power-iteration-like estimate: eigmax ≈ ||H*x||/||x|| for random x on GPU.
+    if (has_soc_) {
+        // Use GPU to estimate eigmax via Rayleigh quotient
+        auto& ctx = gpu::GPUContext::instance();
+        int Nd_spinor = 2 * Nd_;
+        // Set up callback state and Bloch phases for first k-point
+        s_instance_ = this;
+        Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+        Vec3 cell_len = grid.lattice().lengths();
+        kxLx_ = kpt0.x * cell_len.x;
+        kyLy_ = kpt0.y * cell_len.y;
+        kzLz_ = kpt0.z * cell_len.z;
+        setup_bloch_factors(nloc_influence, crystal, kpt0);
+        // Randomize spinor psi on GPU (it's already uploaded, just re-upload first k-point)
+        wfn.randomize_kpt(0, 0, 42);
+        {
+            size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
+            std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
+            std::memcpy(h_psi_z.data(), wfn.psi_kpt(0, 0).data(), psi_bytes);
+            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(), psi_bytes, cudaMemcpyHostToDevice));
+        }
+        cuDoubleComplex* d_test = d_psi_spinor;
+        cuDoubleComplex* d_Htest = d_Hpsi_spinor;
+        // Apply H once per k-point to get spectral radius estimate
+        double eigmax_est = eigval_max_s[0];
+        for (int k = 0; k < std::min(Nkpts, 2); k++) {
+            Vec3 kpt_k = kpoints_->kpts_cart()[kpt_start_ + k];
+            kxLx_ = kpt_k.x * cell_len.x;
+            kyLy_ = kpt_k.y * cell_len.y;
+            kzLz_ = kpt_k.z * cell_len.z;
+            setup_bloch_factors(nloc_influence, crystal, kpt_k);
+            wfn.randomize_kpt(0, k, 42 + k);
+            {
+                size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
+                std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
+                std::memcpy(h_psi_z.data(), wfn.psi_kpt(0, k).data(), psi_bytes);
+                CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(), psi_bytes, cudaMemcpyHostToDevice));
+            }
+            hamiltonian_apply_spinor_z_cb(d_test, d_Veff_spinor, d_Htest, d_x_ex_spinor, 1);
+            cudaDeviceSynchronize();
+            double nrmH = 0, nrmX = 0;
+            cublasDnrm2(ctx.cublas, 2 * Nd_spinor, (double*)d_Htest, 1, &nrmH);
+            cublasDnrm2(ctx.cublas, 2 * Nd_spinor, (double*)d_test, 1, &nrmX);
+            double ratio = (nrmX > 1e-30) ? nrmH / nrmX : eigmax_est;
+            if (ratio > eigmax_est) eigmax_est = ratio;
+        }
+        if (eigmax_est > eigval_max_s[0]) {
+            printf("SOC eigmax: Lanczos=%.2f < GPU estimate=%.2f, using %.2f\n",
+                   eigval_max_s[0], eigmax_est, eigmax_est * 1.2);
+            eigval_max_s[0] = std::max(eigmax_est * 2.0, 1000.0);  // generous margin for SOC
         }
     }
     double lambda_cutoff = 0.5 * (eigval_min_s[0] + eigval_max_s[0]);

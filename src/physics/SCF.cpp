@@ -340,6 +340,7 @@ double SCF::run(Wavefunction& wfn,
 
 #ifdef USE_CUDA
     // GPU dispatch: gamma-point or k-point, any Nspin, orthogonal or non-orthogonal
+    // Skip GPU for SOC until eigensolver divergence is fixed
     if (gpu_enabled_ && crystal_ && nloc_influence_) {
         if (rank_world == 0)
             std::printf("GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=%d, kpt=%d, soc=%d)\n",
