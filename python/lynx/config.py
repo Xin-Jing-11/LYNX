@@ -5,13 +5,14 @@ Usage:
     import lynx
     from lynx.config import DFTConfig
 
+    # Pseudopotential is auto-selected based on xc functional:
     config = DFTConfig(
         cell=[[10.26, 0, 0], [0, 10.26, 0], [0, 0, 10.26]],  # Bohr
         positions=[[0,0,0], [2.565,2.565,2.565]],              # Bohr (Cartesian)
         symbols=['Si', 'Si'],
-        pseudo_files={'Si': '/path/to/Si.psp8'},
         kpts=(2, 2, 2),
         Nstates=10,
+        xc='GGA_PBE',     # -> automatically picks psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8
     )
     calc = config.create_calculator()
     calc.run()
@@ -23,50 +24,118 @@ import numpy as np
 from . import _core
 from .units import ANG_TO_BOHR
 
+# XC functional -> PseudoDojo submodule directory name
+_XC_TO_PSP_DIR = {
+    'GGA_PBE':    'ONCVPSP-PBE-PDv0.4',
+    'GGA_PBEsol': 'ONCVPSP-PBE-PDv0.4',   # PBEsol uses PBE pseudopotentials
+    'GGA_RPBE':   'ONCVPSP-PBE-PDv0.4',   # RPBE uses PBE pseudopotentials
+    'LDA_PZ':     'ONCVPSP-LDA-PDv0.4',
+    'LDA_PW':     'ONCVPSP-LDA-PDv0.4',
+}
 
-def _find_psp(element, psp_dir=None):
-    """Find pseudopotential file for an element.
+# Preferred .psp8 file for each element (shortest name = standard, no semicore).
+# Falls back to first .psp8 found if element isn't listed here.
+def _pick_best_psp8(elem_dir, element):
+    """Pick the best .psp8 file from a PseudoDojo element directory.
 
-    Search order:
-    1. psp_dir (if provided)
-    2. LYNX_PSP_PATH environment variable
-    3. psps/ directory relative to package root
-
-    Within each base directory, searches:
-    - {base}/PBE/{element}/*.psp8
-    - {base}/LDA/{element}/*.psp8
-    - {base}/*.psp8 (flat fallback for old-style layout)
+    Preference order:
+    1. {Element}.psp8          (standard, no semicore)
+    2. {Element}-sp.psp8       (with semicore — needed for elements like Ba, Ti, Fe)
+    3. First .psp8 found       (fallback)
     """
-    search_paths = []
+    candidates = sorted(f for f in os.listdir(elem_dir) if f.endswith('.psp8'))
+    if not candidates:
+        return None
+
+    # Exact match: Si.psp8, O.psp8, etc.
+    standard = f'{element}.psp8'
+    if standard in candidates:
+        return os.path.join(elem_dir, standard)
+
+    # Semicore: Fe-sp.psp8, Ba-sp.psp8, etc.
+    semicore = f'{element}-sp.psp8'
+    if semicore in candidates:
+        return os.path.join(elem_dir, semicore)
+
+    # Fallback: first available
+    return os.path.join(elem_dir, candidates[0])
+
+
+def _get_psp_search_paths(psp_dir=None):
+    """Build the list of directories to search for pseudopotentials."""
+    paths = []
     if psp_dir:
-        search_paths.append(psp_dir)
+        paths.append(psp_dir)
     env_path = os.environ.get('LYNX_PSP_PATH', '')
     if env_path:
-        search_paths.append(env_path)
-    # Package-relative psps/ directory
+        paths.append(env_path)
+    # Package-relative psps/ directory (LYNX/psps/)
     pkg_psps = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             '..', 'psps')
     if os.path.isdir(pkg_psps):
-        search_paths.append(os.path.abspath(pkg_psps))
+        paths.append(os.path.abspath(pkg_psps))
+    return paths
 
-    for path in search_paths:
-        if not os.path.isdir(path):
+
+def find_psp(element, xc='GGA_PBE', psp_dir=None):
+    """Find the pseudopotential file for an element, matched to the XC functional.
+
+    Automatically selects the correct PseudoDojo submodule based on the XC
+    functional (PBE-family -> ONCVPSP-PBE-PDv0.4, LDA-family -> ONCVPSP-LDA-PDv0.4).
+
+    Parameters
+    ----------
+    element : str
+        Chemical symbol (e.g. 'Si', 'Fe', 'O').
+    xc : str
+        XC functional name ('GGA_PBE', 'LDA_PW', etc.). Determines which
+        pseudopotential set to use.
+    psp_dir : str, optional
+        Additional directory to search.
+
+    Returns
+    -------
+    str
+        Absolute path to the .psp8 file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no pseudopotential is found for the element.
+    """
+    search_paths = _get_psp_search_paths(psp_dir)
+
+    # Determine the preferred submodule directory for this XC functional
+    preferred_dir = _XC_TO_PSP_DIR.get(xc)
+
+    # Order: preferred XC match first, then the other
+    all_xc_dirs = ['ONCVPSP-PBE-PDv0.4', 'ONCVPSP-LDA-PDv0.4']
+    if preferred_dir:
+        xc_dirs = [preferred_dir] + [d for d in all_xc_dirs if d != preferred_dir]
+    else:
+        xc_dirs = all_xc_dirs
+
+    for base in search_paths:
+        if not os.path.isdir(base):
             continue
-        # Search in PseudoDojo-style subdirectories
-        for xc_dir in ['ONCVPSP-PBE-PDv0.4', 'ONCVPSP-LDA-PDv0.4']:
-            elem_dir = os.path.join(path, xc_dir, element)
+
+        # Search PseudoDojo-style: {base}/ONCVPSP-{XC}-PDv0.4/{element}/
+        for xc_subdir in xc_dirs:
+            elem_dir = os.path.join(base, xc_subdir, element)
             if os.path.isdir(elem_dir):
-                for fname in sorted(os.listdir(elem_dir)):
-                    if fname.endswith('.psp8'):
-                        return os.path.join(elem_dir, fname)
-        # Fallback: flat directory with old naming convention
-        for fname in os.listdir(path):
+                psp = _pick_best_psp8(elem_dir, element)
+                if psp:
+                    return psp
+
+        # Fallback: flat directory with old naming convention ({base}/*_{element}_*.psp8)
+        for fname in os.listdir(base):
             if fname.endswith('.psp8') and f'_{element}_' in fname:
-                return os.path.join(path, fname)
+                return os.path.join(base, fname)
+
     raise FileNotFoundError(
-        f"No pseudopotential found for '{element}'. "
-        f"Set LYNX_PSP_PATH environment variable, pass psp_dir=, or "
-        f"pass pseudo_files={{'{element}': '/path/to/{element}.psp8'}}."
+        f"No pseudopotential found for '{element}' (xc={xc}). "
+        f"Run 'git submodule update --init' to fetch PseudoDojo pseudopotentials, "
+        f"or set LYNX_PSP_PATH, or pass pseudo_files={{'{element}': '/path/to/{element}.psp8'}}."
     )
 
 
@@ -75,6 +144,11 @@ class DFTConfig:
 
     All lengths are in **Bohr** and all energies in **Hartree** (LYNX internal units).
     Use `DFTConfig.from_ase()` for automatic Angstrom->Bohr conversion from ASE Atoms.
+
+    If `pseudo_files` is not provided, pseudopotentials are automatically selected
+    from the PseudoDojo submodules based on the `xc` functional:
+      - GGA_PBE / GGA_PBEsol / GGA_RPBE -> psps/ONCVPSP-PBE-PDv0.4/
+      - LDA_PZ / LDA_PW                  -> psps/ONCVPSP-LDA-PDv0.4/
 
     Parameters
     ----------
@@ -87,9 +161,10 @@ class DFTConfig:
     symbols : list of str
         Chemical symbols, one per atom (e.g. ['Si', 'Si']).
     pseudo_files : dict, optional
-        Map element -> pseudopotential file path. If not given, auto-search.
+        Map element -> pseudopotential file path. If not given, auto-selected
+        from PseudoDojo based on xc.
     psp_dir : str, optional
-        Directory to search for .psp8 files.
+        Additional directory to search for .psp8 files.
     Nx, Ny, Nz : int, optional
         FD grid dimensions. If omitted, computed from mesh_spacing.
     mesh_spacing : float, optional
@@ -191,7 +266,7 @@ class DFTConfig:
         if smearing not in smearing_map:
             raise ValueError(f"Unknown smearing '{smearing}'. Options: {list(smearing_map.keys())}")
 
-        # Resolve pseudopotentials
+        # Resolve pseudopotentials — auto-select based on xc if not provided
         if pseudo_files is None:
             pseudo_files = {}
         unique_symbols = list(dict.fromkeys(symbols))  # preserve order
@@ -200,7 +275,7 @@ class DFTConfig:
             if sym in pseudo_files:
                 psp_resolved[sym] = pseudo_files[sym]
             else:
-                psp_resolved[sym] = _find_psp(sym, psp_dir)
+                psp_resolved[sym] = find_psp(sym, xc=xc, psp_dir=psp_dir)
 
         # Build SystemConfig
         cfg = _core.SystemConfig()
@@ -261,6 +336,8 @@ class DFTConfig:
         """Create DFTConfig from an ASE Atoms object.
 
         Converts ASE units (Angstrom) to LYNX units (Bohr) automatically.
+        If pseudo_files is not provided, pseudopotentials are auto-selected
+        based on the xc functional.
 
         Parameters
         ----------

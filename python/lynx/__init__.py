@@ -78,7 +78,7 @@ from ._core import (
 )
 
 from ._core import _ensure_mpi
-from .config import DFTConfig
+from .config import DFTConfig, find_psp
 from . import units
 
 
