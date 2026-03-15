@@ -33,6 +33,11 @@ add_library(lynx_core
     physics/Electrostatics.cpp
 )
 
+# Need PIC when linking into Python shared library
+if(BUILD_PYTHON)
+    set_target_properties(lynx_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
 target_include_directories(lynx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(lynx_core PUBLIC MPI::MPI_CXX nlohmann_json::nlohmann_json)
 

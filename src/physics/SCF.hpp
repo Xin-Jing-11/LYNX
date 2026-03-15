@@ -53,6 +53,10 @@ struct SCFParams {
 class SCF {
 public:
     SCF() = default;
+    SCF(const SCF&) = delete;
+    SCF& operator=(const SCF&) = delete;
+    SCF(SCF&&) = default;
+    SCF& operator=(SCF&&) = default;
 
     void setup(const FDGrid& grid,
                const Domain& domain,

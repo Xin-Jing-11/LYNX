@@ -16,6 +16,10 @@ namespace lynx {
 class Electrostatics {
 public:
     Electrostatics() = default;
+    Electrostatics(const Electrostatics&) = delete;
+    Electrostatics& operator=(const Electrostatics&) = delete;
+    Electrostatics(Electrostatics&&) = default;
+    Electrostatics& operator=(Electrostatics&&) = default;
 
     // Compute pseudocharge density b(r) = Σ_J b_J(r) on the local domain.
     // Also computes Eself and Ec.

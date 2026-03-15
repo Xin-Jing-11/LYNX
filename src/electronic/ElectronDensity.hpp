@@ -11,6 +11,10 @@ namespace lynx {
 class ElectronDensity {
 public:
     ElectronDensity() = default;
+    ElectronDensity(const ElectronDensity&) = delete;
+    ElectronDensity& operator=(const ElectronDensity&) = delete;
+    ElectronDensity(ElectronDensity&&) = default;
+    ElectronDensity& operator=(ElectronDensity&&) = default;
 
     void allocate(int Nd_d, int Nspin);
 

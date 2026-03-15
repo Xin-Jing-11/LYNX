@@ -26,6 +26,10 @@ using Complex = std::complex<double>;
 class NonlocalProjector {
 public:
     NonlocalProjector() = default;
+    NonlocalProjector(const NonlocalProjector&) = delete;
+    NonlocalProjector& operator=(const NonlocalProjector&) = delete;
+    NonlocalProjector(NonlocalProjector&&) = default;
+    NonlocalProjector& operator=(NonlocalProjector&&) = default;
 
     // Setup: compute projector values on the grid for all influencing atoms
     void setup(const Crystal& crystal,

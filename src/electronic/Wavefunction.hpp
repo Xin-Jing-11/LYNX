@@ -21,6 +21,10 @@ using Complex = std::complex<double>;
 class Wavefunction {
 public:
     Wavefunction() = default;
+    Wavefunction(const Wavefunction&) = delete;
+    Wavefunction& operator=(const Wavefunction&) = delete;
+    Wavefunction(Wavefunction&&) = default;
+    Wavefunction& operator=(Wavefunction&&) = default;
 
     // Allocate storage for given domain size and number of bands.
     // Nband: local band count (psi columns). Eigenvalues/occupations also sized Nband.
