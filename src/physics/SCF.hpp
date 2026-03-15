@@ -170,9 +170,17 @@ private:
     int Nband_global_ = 0;  // total bands across all band-parallel procs (0 = use Nband)
     int band_start_ = 0;    // global index of first local band
 
+    // SOC / noncollinear
+    bool is_soc_ = false;
+    NDArray<double> Veff_spinor_;  // [V_uu | V_dd | Re(V_ud) | Im(V_ud)], 4*Nd_d
+
     // Compute effective potential: Veff = Vxc + phi + Vloc
     // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns
     void compute_Veff(const double* rho, const double* rho_b, const double* Vloc);
+
+    // Compute spinor Veff from noncollinear density (rho, mx, my, mz)
+    void compute_Veff_spinor(const ElectronDensity& density,
+                              const double* rho_b, const double* Vloc);
 
     // Initialize density from superposition of atomic densities (simplified)
     void init_density(int Nd_d, int Nelectron);

@@ -84,8 +84,14 @@ int main(int argc, char** argv) {
         kpoints.generate(config.Kx, config.Ky, config.Kz, config.kpt_shift, lattice);
         int Nkpts = kpoints.Nkpts();  // symmetry-reduced count
         bool is_kpt = !kpoints.is_gamma_only();
-        int Nspin = (config.spin_type == lynx::SpinType::None) ? 1 : 2;
+        bool is_soc = (config.spin_type == lynx::SpinType::NonCollinear);
+        int Nspin = is_soc ? 1 : ((config.spin_type == lynx::SpinType::None) ? 1 : 2);
+        int Nspinor = is_soc ? 2 : 1;
+        if (is_soc) is_kpt = true;  // SOC always complex
 
+        if (rank == 0 && is_soc) {
+            std::printf("Spin-orbit coupling (SOC) enabled: Nspin=%d, Nspinor=%d\n", Nspin, Nspinor);
+        }
         if (rank == 0) {
             std::printf("K-points: %dx%dx%d grid, %d full -> %d symmetry-reduced%s\n",
                         config.Kx, config.Ky, config.Kz,
@@ -101,8 +107,10 @@ int main(int argc, char** argv) {
         }
 
         // Auto-determine spin parallelization if not set
-        // Only auto-enable if Nspin==2, nproc>=2, and user didn't explicitly set it
-        if (config.parallel.npspin <= 1 && Nspin == 2 && nproc >= 2) {
+        // SOC: disable spin parallelism (Nspin=1, Nspinor=2)
+        if (is_soc) {
+            config.parallel.npspin = 1;
+        } else if (config.parallel.npspin <= 1 && Nspin == 2 && nproc >= 2) {
             config.parallel.npspin = 2;
         }
 
@@ -268,6 +276,14 @@ int main(int argc, char** argv) {
         lynx::NonlocalProjector vnl;
         vnl.setup(crystal, nloc_influence, domain, grid);
 
+        // Setup SOC projectors if needed
+        if (is_soc) {
+            vnl.setup_soc(crystal, nloc_influence, domain, grid);
+            if (rank == 0) {
+                std::printf("SOC projectors: %s\n", vnl.has_soc() ? "enabled" : "none");
+            }
+        }
+
         if (rank == 0) {
             std::printf("Nonlocal projectors: %d total\n", vnl.total_nproj());
         }
@@ -278,7 +294,14 @@ int main(int argc, char** argv) {
 
         // ===== Setup SCF =====
         int Nstates = config.Nstates;
-        if (Nstates <= 0) Nstates = Nelectron / 2 + 10;
+        if (Nstates <= 0) {
+            if (is_soc) {
+                // SOC: spinor holds both spin components, no /2
+                Nstates = Nelectron + 20;
+            } else {
+                Nstates = Nelectron / 2 + 10;
+            }
+        }
 
         lynx::SCFParams scf_params;
         scf_params.max_iter = config.max_scf_iter;
@@ -314,7 +337,7 @@ int main(int argc, char** argv) {
         // For band parallelism: psi has Nband_local columns, but eigenvalues/occupations
         // have Nstates (Nband_global) entries.
         lynx::Wavefunction wfn;
-        wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local, is_kpt);
+        wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local, is_kpt, Nspinor);
 
         // ===== Initialize density =====
         // Try restart file first, fall back to atomic superposition
@@ -349,7 +372,7 @@ int main(int argc, char** argv) {
                     rho_max = std::max(rho_max, rho_at[i]);
 
                 std::vector<double> mag_init;
-                if (Nspin == 2) {
+                if (!is_soc && Nspin == 2) {
                     mag_init.resize(Nd_d, 0.0);
                     double total_spin = 0.0;
                     for (size_t it = 0; it < config.atom_types.size(); ++it) {
@@ -368,7 +391,7 @@ int main(int argc, char** argv) {
                 }
 
                 scf.set_initial_density(rho_at.data(), Nd_d,
-                                        Nspin == 2 ? mag_init.data() : nullptr);
+                                        (!is_soc && Nspin == 2) ? mag_init.data() : nullptr);
                 if (rank == 0) {
                     double rsum = 0;
                     for (int i = 0; i < Nd_d; ++i) rsum += rho_at[i];
@@ -494,7 +517,8 @@ int main(int argc, char** argv) {
         if (config.calc_stress || config.calc_pressure) {
             std::vector<double> kpt_weights = kpoints.normalized_weights();
             lynx::Stress stress;
-            int Nspin_calc = (config.spin_type == lynx::SpinType::Collinear) ? 2 : 1;
+            int Nspin_calc = (config.spin_type == lynx::SpinType::Collinear) ? 2 :
+                             (config.spin_type == lynx::SpinType::NonCollinear) ? 1 : 1;
             const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
             const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
             auto sigma = stress.compute(wfn, crystal, influence, nloc_influence, vnl,

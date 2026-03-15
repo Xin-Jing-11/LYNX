@@ -137,6 +137,92 @@ void ElectronDensity::compute(const Wavefunction& wfn,
     }
 }
 
+void ElectronDensity::allocate_noncollinear(int Nd_d) {
+    Nd_d_ = Nd_d;
+    Nspin_ = 1;  // single density channel for noncollinear
+
+    rho_.clear();
+    rho_.emplace_back(Nd_d);
+    rho_total_ = NDArray<double>(Nd_d);
+    mag_x_ = NDArray<double>(Nd_d);
+    mag_y_ = NDArray<double>(Nd_d);
+    mag_z_ = NDArray<double>(Nd_d);
+}
+
+void ElectronDensity::compute_spinor(const Wavefunction& wfn,
+                                      const std::vector<double>& kpt_weights,
+                                      double dV,
+                                      const MPIComm& bandcomm,
+                                      const MPIComm& kptcomm,
+                                      int kpt_start,
+                                      int band_start) {
+    int Nband_loc = wfn.Nband();
+    int Nd_d = wfn.Nd_d();
+    int Nkpts = wfn.Nkpts();
+
+    // Zero arrays
+    rho_total_.zero();
+    rho_[0].zero();
+    mag_x_.zero();
+    mag_y_.zero();
+    mag_z_.zero();
+
+    // spin_fac = 1.0 for spinor (both components present)
+    double spin_fac = 1.0;
+
+    for (int k = 0; k < Nkpts; ++k) {
+        const auto& occ = wfn.occupations(0, k);
+        double wk = kpt_weights[kpt_start + k];
+
+        const auto& psi_c = wfn.psi_kpt(0, k);
+
+        for (int n = 0; n < Nband_loc; ++n) {
+            double fn = occ(band_start + n);
+            if (fn < 1e-16) continue;
+
+            const Complex* col = psi_c.col(n);
+            const Complex* psi_up = col;
+            const Complex* psi_dn = col + Nd_d;
+            double w = spin_fac * wk * fn;
+
+            double* rho = rho_total_.data();
+            double* mx = mag_x_.data();
+            double* my = mag_y_.data();
+            double* mz = mag_z_.data();
+
+            for (int i = 0; i < Nd_d; ++i) {
+                double up2 = std::norm(psi_up[i]);
+                double dn2 = std::norm(psi_dn[i]);
+                Complex cross = std::conj(psi_up[i]) * psi_dn[i];
+
+                rho[i] += w * (up2 + dn2);
+                mx[i]  += w * 2.0 * cross.real();
+                my[i]  -= w * 2.0 * cross.imag();
+                mz[i]  += w * (up2 - dn2);
+            }
+        }
+    }
+
+    // Allreduce over band communicator
+    if (!bandcomm.is_null() && bandcomm.size() > 1) {
+        bandcomm.allreduce_sum(rho_total_.data(), Nd_d);
+        bandcomm.allreduce_sum(mag_x_.data(), Nd_d);
+        bandcomm.allreduce_sum(mag_y_.data(), Nd_d);
+        bandcomm.allreduce_sum(mag_z_.data(), Nd_d);
+    }
+
+    // Allreduce over kpt communicator
+    if (!kptcomm.is_null() && kptcomm.size() > 1) {
+        kptcomm.allreduce_sum(rho_total_.data(), Nd_d);
+        kptcomm.allreduce_sum(mag_x_.data(), Nd_d);
+        kptcomm.allreduce_sum(mag_y_.data(), Nd_d);
+        kptcomm.allreduce_sum(mag_z_.data(), Nd_d);
+    }
+
+    // Keep rho_[0] in sync with rho_total_
+    std::memcpy(rho_[0].data(), rho_total_.data(), Nd_d * sizeof(double));
+}
+
 double ElectronDensity::integrate(double dV) const {
     double sum = 0.0;
     const double* rt = rho_total_.data();

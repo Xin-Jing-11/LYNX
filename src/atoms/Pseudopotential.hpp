@@ -58,6 +58,13 @@ public:
     // = sum_{l != lloc} ppl[l] * (2*l + 1)
     int nproj_per_atom() const;
 
+    // Spin-orbit coupling (SOC) data — from psp8 extension_switch >= 2
+    bool has_soc() const { return has_soc_; }
+    const std::vector<int>& ppl_soc() const { return ppl_soc_; }
+    const std::vector<std::vector<double>>& Gamma_soc() const { return Gamma_soc_; }
+    const std::vector<std::vector<std::vector<double>>>& UdV_soc() const { return UdV_soc_; }
+    const std::vector<std::vector<std::vector<double>>>& UdV_soc_spline_d() const { return UdV_soc_d_; }
+
     // Compute spline derivatives for all radial functions
     void compute_splines();
 
@@ -96,6 +103,13 @@ private:
     double Zval_ = 0.0;
     int pspxc_ = 0;
     bool is_r_uniform_ = false;
+
+    // SOC data (psp8 extension_switch >= 2)
+    bool has_soc_ = false;
+    std::vector<int> ppl_soc_;                              // projectors per l for SOC (l=0..lmax)
+    std::vector<std::vector<double>> Gamma_soc_;            // Gamma_soc[l][p]
+    std::vector<std::vector<std::vector<double>>> UdV_soc_; // UdV_soc[l][p][r]
+    std::vector<std::vector<std::vector<double>>> UdV_soc_d_; // spline derivatives
 
     // Hermite cubic spline: compute first derivatives (matches reference LYNX getYD_gen)
     static void spline_deriv(const std::vector<double>& x,

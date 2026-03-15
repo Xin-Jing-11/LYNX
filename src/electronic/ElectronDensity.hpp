@@ -47,11 +47,32 @@ public:
     NDArray<double>& mag() { return mag_; }
     const NDArray<double>& mag() const { return mag_; }
 
+    // Vector magnetization components — for noncollinear/SOC
+    NDArray<double>& mag_x() { return mag_x_; }
+    const NDArray<double>& mag_x() const { return mag_x_; }
+    NDArray<double>& mag_y() { return mag_y_; }
+    const NDArray<double>& mag_y() const { return mag_y_; }
+    NDArray<double>& mag_z() { return mag_z_; }
+    const NDArray<double>& mag_z() const { return mag_z_; }
+
     int Nd_d() const { return Nd_d_; }
     int Nspin() const { return Nspin_; }
 
     // Integrate rho over domain (returns total electron count)
     double integrate(double dV) const;
+
+    // Allocate for noncollinear (spinor) — 1 spin channel + vector magnetization
+    void allocate_noncollinear(int Nd_d);
+
+    // Compute density from spinor wavefunctions (SOC/noncollinear)
+    // Each band is a 2-component spinor: [psi_up(Nd_d) | psi_dn(Nd_d)]
+    void compute_spinor(const Wavefunction& wfn,
+                        const std::vector<double>& kpt_weights,
+                        double dV,
+                        const MPIComm& bandcomm,
+                        const MPIComm& kptcomm,
+                        int kpt_start = 0,
+                        int band_start = 0);
 
 private:
     int Nd_d_ = 0;
@@ -60,6 +81,9 @@ private:
     std::vector<NDArray<double>> rho_;  // per-spin density
     NDArray<double> rho_total_;
     NDArray<double> mag_;
+    NDArray<double> mag_x_;  // noncollinear magnetization x
+    NDArray<double> mag_y_;  // noncollinear magnetization y
+    NDArray<double> mag_z_;  // noncollinear magnetization z
 };
 
 } // namespace lynx

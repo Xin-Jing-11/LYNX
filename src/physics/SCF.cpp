@@ -199,6 +199,120 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
 
 }
 
+void SCF::compute_Veff_spinor(const ElectronDensity& density,
+                                const double* rho_b, const double* Vloc) {
+    int Nd_d = domain_->Nd_d();
+
+    // Convert noncollinear (rho, mx, my, mz) to (rho_up_xc, rho_dn_xc) for XC
+    const double* rho = density.rho_total().data();
+    const double* mx = density.mag_x().data();
+    const double* my = density.mag_y().data();
+    const double* mz = density.mag_z().data();
+
+    // Build XC input: rho_xc = [rho_total | rho_up | rho_down] (3*Nd_d)
+    // rho_up = 0.5*(rho + |m|), rho_dn = 0.5*(rho - |m|)
+    std::vector<double> rho_xc(3 * Nd_d);
+    std::vector<double> m_mag(Nd_d);
+    constexpr double xc_rhotol = 1e-14;
+
+    for (int i = 0; i < Nd_d; ++i) {
+        double mm = std::sqrt(mx[i]*mx[i] + my[i]*my[i] + mz[i]*mz[i]);
+        m_mag[i] = mm;
+        double rt = rho[i];
+        if (rho_core_) rt += rho_core_[i];
+        if (rt < xc_rhotol) rt = xc_rhotol;
+        rho_xc[i] = rt;
+
+        double ru = 0.5 * (rt + mm);
+        double rd = 0.5 * (rt - mm);
+        if (rho_core_) {
+            // Already added to rt above; split NLCC equally
+        }
+        if (ru < xc_rhotol * 0.5) ru = xc_rhotol * 0.5;
+        if (rd < xc_rhotol * 0.5) rd = xc_rhotol * 0.5;
+        rho_xc[Nd_d + i] = ru;
+        rho_xc[2*Nd_d + i] = rd;
+    }
+
+    // Evaluate spin-polarized XC
+    // Vxc_ layout: [Vxc_up(Nd_d) | Vxc_dn(Nd_d)]
+    // We need Nspin_global_=2 for XC eval, even though actual Nspin=1 for noncollinear
+    NDArray<double> Vxc_spin(Nd_d * 2);
+    XCFunctional xc;
+    xc.setup(xc_type_, *domain_, *grid_, gradient_, halo_);
+
+    int dxc_ncol = xc.is_gga() ? 3 : 0;
+    if (xc.is_gga() && Dxcdgrho_.size() == 0) {
+        Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
+    }
+    double* dxc_ptr = xc.is_gga() ? Dxcdgrho_.data() : nullptr;
+
+    xc.evaluate_spin(rho_xc.data(), Vxc_spin.data(), exc_.data(), Nd_d, dxc_ptr);
+
+    // Solve Poisson: same as standard
+    std::vector<double> rhs(Nd_d);
+    for (int i = 0; i < Nd_d; ++i) {
+        rhs[i] = 4.0 * constants::PI * rho[i];
+        if (rho_b) rhs[i] += 4.0 * constants::PI * rho_b[i];
+    }
+    {
+        double rhs_sum = 0;
+        for (int i = 0; i < Nd_d; ++i) rhs_sum += rhs[i];
+        double rhs_mean = rhs_sum / grid_->Nd();
+        for (int i = 0; i < Nd_d; ++i) rhs[i] -= rhs_mean;
+    }
+
+    PoissonSolver poisson;
+    poisson.setup(*laplacian_, *stencil_, *domain_, *grid_, *halo_);
+    poisson.solve(rhs.data(), phi_.data(), params_.poisson_tol);
+    {
+        double sum = 0.0;
+        for (int i = 0; i < Nd_d; ++i) sum += phi_.data()[i];
+        double mean = sum / grid_->Nd();
+        for (int i = 0; i < Nd_d; ++i) phi_.data()[i] -= mean;
+    }
+
+    // Build spinor Veff: [V_uu | V_dd | Re(V_ud) | Im(V_ud)]
+    // V_avg = 0.5*(Vxc_up + Vxc_dn), V_diff = 0.5*(Vxc_up - Vxc_dn)
+    // V_uu = V_avg + V_diff * mz/|m| + phi
+    // V_dd = V_avg - V_diff * mz/|m| + phi
+    // V_ud = V_diff * (mx - i*my) / |m|
+    double* V_uu = Veff_spinor_.data();
+    double* V_dd = Veff_spinor_.data() + Nd_d;
+    double* V_ud_re = Veff_spinor_.data() + 2 * Nd_d;
+    double* V_ud_im = Veff_spinor_.data() + 3 * Nd_d;
+    const double* vxc_up = Vxc_spin.data();
+    const double* vxc_dn = Vxc_spin.data() + Nd_d;
+    const double* phi_ptr = phi_.data();
+
+    for (int i = 0; i < Nd_d; ++i) {
+        double v_avg = 0.5 * (vxc_up[i] + vxc_dn[i]);
+        double v_diff = 0.5 * (vxc_up[i] - vxc_dn[i]);
+        double phi_val = phi_ptr[i];
+
+        if (m_mag[i] > xc_rhotol) {
+            double inv_m = 1.0 / m_mag[i];
+            V_uu[i] = v_avg + v_diff * mz[i] * inv_m + phi_val;
+            V_dd[i] = v_avg - v_diff * mz[i] * inv_m + phi_val;
+            V_ud_re[i] = v_diff * mx[i] * inv_m;
+            V_ud_im[i] = -v_diff * my[i] * inv_m;
+        } else {
+            // Zero magnetization: purely diagonal
+            V_uu[i] = v_avg + phi_val;
+            V_dd[i] = v_avg + phi_val;
+            V_ud_re[i] = 0.0;
+            V_ud_im[i] = 0.0;
+        }
+    }
+
+    // Also store Vxc_ and Veff_ for energy calculation (using 1-component view)
+    // Vxc_ stores the average XC potential, Veff_ stores V_uu for energy purposes
+    for (int i = 0; i < Nd_d; ++i) {
+        Vxc_.data()[i] = 0.5 * (vxc_up[i] + vxc_dn[i]);
+        Veff_.data()[i] = V_uu[i];
+    }
+}
+
 double SCF::run(Wavefunction& wfn,
                  int Nelectron,
                  int Natom,
@@ -231,20 +345,21 @@ double SCF::run(Wavefunction& wfn,
     }
 #endif
 
+    // Detect SOC mode
+    is_soc_ = (wfn.Nspinor() == 2);
+
     // Compute default tolerances (reference: initialization.c:2655-2681)
     if (params_.poisson_tol < 0.0)
         params_.poisson_tol = params_.tol * 0.01;
 
     // Auto-compute electronic temperature (reference: initialization.c:1914-1923)
-    // Gaussian: smearing = 0.2 eV => Beta = CONST_EH / 0.2
-    // FermiDirac: smearing = 0.1 eV => Beta = CONST_EH / 0.1
     if (params_.elec_temp < 0.0) {
         double smearing_eV = (params_.smearing == SmearingType::GaussianSmearing) ? 0.2 : 0.1;
-        double beta_au = constants::EH / smearing_eV;  // 1/(kB*T) in atomic units
-        params_.elec_temp = 1.0 / (constants::KB * beta_au);  // T in Kelvin
+        double beta_au = constants::EH / smearing_eV;
+        params_.elec_temp = 1.0 / (constants::KB * beta_au);
     }
 
-    // Auto-compute Chebyshev degree from mesh spacing (reference: eigenSolver.c Mesh2ChebDegree)
+    // Auto-compute Chebyshev degree from mesh spacing
     if (params_.cheb_degree < 0) {
         double dx = grid_->dx(), dy = grid_->dy(), dz = grid_->dz();
         double h_eff;
@@ -254,7 +369,6 @@ double SCF::run(Wavefunction& wfn,
             double dx2i = 1.0/(dx*dx), dy2i = 1.0/(dy*dy), dz2i = 1.0/(dz*dz);
             h_eff = std::sqrt(3.0 / (dx2i + dy2i + dz2i));
         }
-        // Cubic polynomial fit: (0.1,50), (0.2,35), (0.4,20), (0.7,14)
         double p3 = -700.0 / 3.0, p2 = 1240.0 / 3.0, p1 = -773.0 / 3.0, p0 = 1078.0 / 15.0;
         double npl;
         if (h_eff > 0.7) {
@@ -267,8 +381,7 @@ double SCF::run(Wavefunction& wfn,
             std::printf("Auto Chebyshev degree: %d (h_eff=%.6f)\n", params_.cheb_degree, h_eff);
     }
 
-    // K-point weights: FULL GLOBAL array from KPoints object
-    // Access with kpt_weights[kpt_start_ + k_local]
+    // K-point weights
     std::vector<double> kpt_weights;
     Vec3 cell_lengths = grid_->lattice().lengths();
     int Nkpts_global = kpoints_ ? kpoints_->Nkpts() : Nkpts;
@@ -278,15 +391,44 @@ double SCF::run(Wavefunction& wfn,
         kpt_weights.assign(Nkpts_global, 1.0 / Nkpts_global);
     }
 
-    // Allocate work arrays (spin-resolved for Veff and Vxc — always use Nspin_global)
+    // Allocate work arrays
     Veff_ = NDArray<double>(Nd_d * Nspin);
     Vxc_ = NDArray<double>(Nd_d * Nspin);
     exc_ = NDArray<double>(Nd_d);
     phi_ = NDArray<double>(Nd_d);
+    if (is_soc_) {
+        Veff_spinor_ = NDArray<double>(4 * Nd_d);
+    }
 
     // Initialize density if not already set
-    if (density_.Nd_d() == 0) {
-        init_density(Nd_d, Nelectron);
+    if (is_soc_) {
+        // SOC: need noncollinear density format with mag_x/y/z
+        if (density_.Nd_d() == 0) {
+            // No density set at all — uniform init
+            density_.allocate_noncollinear(Nd_d);
+            double volume = grid_->Nd() * grid_->dV();
+            double rho0 = Nelectron / volume;
+            double* rho = density_.rho_total().data();
+            for (int i = 0; i < Nd_d; ++i) rho[i] = rho0;
+            std::memcpy(density_.rho(0).data(), rho, Nd_d * sizeof(double));
+            density_.mag_x().zero();
+            density_.mag_y().zero();
+            density_.mag_z().zero();
+        } else if (density_.mag_x().size() == 0) {
+            // Density was set (e.g., via set_initial_density) but not in noncollinear format
+            // Convert: keep total density, zero magnetization
+            NDArray<double> rho_save = density_.rho_total().clone();
+            density_.allocate_noncollinear(Nd_d);
+            std::memcpy(density_.rho_total().data(), rho_save.data(), Nd_d * sizeof(double));
+            std::memcpy(density_.rho(0).data(), rho_save.data(), Nd_d * sizeof(double));
+            density_.mag_x().zero();
+            density_.mag_y().zero();
+            density_.mag_z().zero();
+        }
+    } else {
+        if (density_.Nd_d() == 0) {
+            init_density(Nd_d, Nelectron);
+        }
     }
 
     // beta = 1/(kB*T) in atomic units
@@ -299,15 +441,19 @@ double SCF::run(Wavefunction& wfn,
                 params_.mixing_history, params_.mixing_param,
                 laplacian_, halo_, grid_);
 
-    // Setup eigensolver (pass Nband_global for band-parallel ScaLAPACK path)
+    // Setup eigensolver
     EigenSolver eigsolver;
     eigsolver.setup(*hamiltonian_, *halo_, *domain_, *bandcomm_, Nband);
 
-    // Estimate spectral bounds — per-spin (local spin channels only)
+    // Estimate spectral bounds
     std::vector<double> eigval_min(Nspin_local, 0.0), eigval_max(Nspin_local, 0.0);
 
-    // Initial Veff from initial density (uses Nspin_global internally)
-    compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+    // Initial Veff from initial density
+    if (is_soc_) {
+        compute_Veff_spinor(density_, rho_b, Vloc_);
+    } else {
+        compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+    }
 
     // Debug: dump initial state for comparison with reference
     if (rank_world == 0) {
@@ -340,16 +486,23 @@ double SCF::run(Wavefunction& wfn,
         }
     }
 
-    // Lanczos to estimate spectrum per local spin channel
-    for (int s = 0; s < Nspin_local; ++s) {
-        int s_glob = spin_start_ + s;  // global spin index for Veff lookup
-        if (is_kpt_) {
-            Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
-            eigsolver.lanczos_bounds_kpt(Veff_.data() + s_glob * Nd_d, Nd_d,
-                                          kpt0, cell_lengths,
-                                          eigval_min[s], eigval_max[s]);
-        } else {
-            eigsolver.lanczos_bounds(Veff_.data() + s_glob * Nd_d, Nd_d, eigval_min[s], eigval_max[s]);
+    // Lanczos to estimate spectrum
+    if (is_soc_) {
+        Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+        eigsolver.lanczos_bounds_spinor_kpt(Veff_spinor_.data(), Nd_d,
+                                             kpt0, cell_lengths,
+                                             eigval_min[0], eigval_max[0]);
+    } else {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start_ + s;
+            if (is_kpt_) {
+                Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+                eigsolver.lanczos_bounds_kpt(Veff_.data() + s_glob * Nd_d, Nd_d,
+                                              kpt0, cell_lengths,
+                                              eigval_min[s], eigval_max[s]);
+            } else {
+                eigsolver.lanczos_bounds(Veff_.data() + s_glob * Nd_d, Nd_d, eigval_min[s], eigval_max[s]);
+            }
         }
     }
     double lambda_cutoff = 0.5 * (eigval_min[0] + eigval_max[0]);  // initial guess
@@ -398,50 +551,65 @@ double SCF::run(Wavefunction& wfn,
 
         // 1. Solve eigenvalue problem (nchefsi passes)
         for (int chefsi_pass = 0; chefsi_pass < nchefsi; ++chefsi_pass) {
-            for (int s = 0; s < Nspin_local; ++s) {
-                // Pass spin-specific Veff (using global spin index) to eigensolver
-                int s_glob = spin_start_ + s;
-                double* Veff_s = Veff_.data() + s_glob * Nd_d;
+            if (is_soc_) {
+                // SOC: single spin channel (s=0), spinor solve
                 for (int k = 0; k < Nkpts; ++k) {
-                    double* eig = wfn.eigenvalues(s, k).data();
+                    double* eig = wfn.eigenvalues(0, k).data();
+                    Complex* psi_c = wfn.psi_kpt(0, k).data();
+                    int k_glob = kpt_start_ + k;
+                    Vec3 kpt = kpoints_->kpts_cart()[k_glob];
 
-                    if (is_kpt_) {
-                        Complex* psi_c = wfn.psi_kpt(s, k).data();
-                        int k_glob = kpt_start_ + k;
-                        Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+                    if (vnl_ && vnl_->is_setup()) {
+                        const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
+                        const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
+                    }
 
-                        // Set k-point on nonlocal projector for Bloch phase
-                        if (vnl_ && vnl_->is_setup()) {
-                            const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
-                            const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
-                        }
+                    eigsolver.solve_spinor_kpt(psi_c, eig, Veff_spinor_.data(),
+                                                Nd_d, Nband_loc,
+                                                lambda_cutoff, eigval_min[0], eigval_max[0],
+                                                kpt, cell_lengths,
+                                                params_.cheb_degree,
+                                                wfn.psi_kpt(0, k).ld());
+                }
+            } else {
+                // Standard: spin loop
+                for (int s = 0; s < Nspin_local; ++s) {
+                    int s_glob = spin_start_ + s;
+                    double* Veff_s = Veff_.data() + s_glob * Nd_d;
+                    for (int k = 0; k < Nkpts; ++k) {
+                        double* eig = wfn.eigenvalues(s, k).data();
 
-                        // solve_kpt takes Nband_loc (local columns) but writes
-                        // Nband eigenvalues (all global eigenvalues)
-                        eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband_loc,
+                        if (is_kpt_) {
+                            Complex* psi_c = wfn.psi_kpt(s, k).data();
+                            int k_glob = kpt_start_ + k;
+                            Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+
+                            if (vnl_ && vnl_->is_setup()) {
+                                const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
+                                const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
+                            }
+
+                            eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband_loc,
+                                                lambda_cutoff, eigval_min[s], eigval_max[s],
+                                                kpt, cell_lengths,
+                                                params_.cheb_degree,
+                                                wfn.psi_kpt(s, k).ld());
+                        } else {
+                            double* psi = wfn.psi(s, k).data();
+                            eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
                                             lambda_cutoff, eigval_min[s], eigval_max[s],
-                                            kpt, cell_lengths,
                                             params_.cheb_degree,
-                                            wfn.psi_kpt(s, k).ld());
-                    } else {
-                        double* psi = wfn.psi(s, k).data();
-                        eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
-                                        lambda_cutoff, eigval_min[s], eigval_max[s],
-                                        params_.cheb_degree,
-                                        wfn.psi(s, k).ld());
+                                            wfn.psi(s, k).ld());
+                        }
                     }
                 }
             }
 
-            // Update spectral bounds from eigenvalues (per-spin)
-            // Reference: Chebyshevfilter_constants()
-            //   count==0: Lanczos (already done), lambda_cutoff = 0.5*(eigmin+eigmax)
-            //   count>0:  lambda_cutoff = lambda_sorted[last] + 0.1
-            //   count>=rhoTrigger: eigmin = lambda_sorted[0]
+            // Update spectral bounds
             {
-                // lambda_cutoff: max of last eigenvalue across local spins + 0.1
                 double eig_last_max = -1e30;
-                for (int s = 0; s < Nspin_local; ++s) {
+                int n_spin_loop = is_soc_ ? 1 : Nspin_local;
+                for (int s = 0; s < n_spin_loop; ++s) {
                     const double* eigs = wfn.eigenvalues(s, 0).data();
                     if (scf_iter > 0) {
                         eigval_min[s] = eigs[0];
@@ -473,12 +641,16 @@ double SCF::run(Wavefunction& wfn,
         }
 
         // 2. Compute new electron density
-        // Each process computes density for its local spin channels.
-        // With spin parallelism, need to exchange densities to get full picture.
         ElectronDensity rho_new;
-        rho_new.allocate(Nd_d, Nspin);
-        rho_new.compute(wfn, kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
-                        Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
+        if (is_soc_) {
+            rho_new.allocate_noncollinear(Nd_d);
+            rho_new.compute_spinor(wfn, kpt_weights, grid_->dV(),
+                                    *bandcomm_, *kptcomm_, kpt_start_, band_start_);
+        } else {
+            rho_new.allocate(Nd_d, Nspin);
+            rho_new.compute(wfn, kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
+                            Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
+        }
 
         // Debug: dump new density for first 3 iterations
         if (rank_world == 0 && scf_iter < 3) {
@@ -557,10 +729,43 @@ double SCF::run(Wavefunction& wfn,
         E_prev = energy_.Etotal;
 
         // 5. Mix density
-        if (Nspin == 1) {
+        if (is_soc_) {
+            // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
+            std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);
+            std::memcpy(dens_in.data(), density_.rho_total().data(), Nd_d * sizeof(double));
+            std::memcpy(dens_in.data() + Nd_d, density_.mag_x().data(), Nd_d * sizeof(double));
+            std::memcpy(dens_in.data() + 2*Nd_d, density_.mag_y().data(), Nd_d * sizeof(double));
+            std::memcpy(dens_in.data() + 3*Nd_d, density_.mag_z().data(), Nd_d * sizeof(double));
+
+            std::memcpy(dens_out.data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
+            std::memcpy(dens_out.data() + Nd_d, rho_new.mag_x().data(), Nd_d * sizeof(double));
+            std::memcpy(dens_out.data() + 2*Nd_d, rho_new.mag_y().data(), Nd_d * sizeof(double));
+            std::memcpy(dens_out.data() + 3*Nd_d, rho_new.mag_z().data(), Nd_d * sizeof(double));
+
+            mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4);
+
+            // Unpack: clamp rho, keep magnetization
+            double* rho_mix = density_.rho_total().data();
+            for (int i = 0; i < Nd_d; ++i) {
+                rho_mix[i] = dens_in[i];
+                if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
+            }
+            {
+                double rho_sum = 0.0;
+                for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
+                double Ne_current = rho_sum * grid_->dV();
+                if (Ne_current > 1e-10) {
+                    double scale = static_cast<double>(Nelectron) / Ne_current;
+                    for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
+                }
+            }
+            std::memcpy(density_.rho(0).data(), rho_mix, Nd_d * sizeof(double));
+            std::memcpy(density_.mag_x().data(), dens_in.data() + Nd_d, Nd_d * sizeof(double));
+            std::memcpy(density_.mag_y().data(), dens_in.data() + 2*Nd_d, Nd_d * sizeof(double));
+            std::memcpy(density_.mag_z().data(), dens_in.data() + 3*Nd_d, Nd_d * sizeof(double));
+        } else if (Nspin == 1) {
             mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d);
 
-            // Reference: clamp negative density to 0, then renormalize
             double* rho_mix = density_.rho_total().data();
             for (int i = 0; i < Nd_d; ++i) {
                 if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
@@ -574,14 +779,11 @@ double SCF::run(Wavefunction& wfn,
                     for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
                 }
             }
-            // Keep rho(0) in sync with rho_total
             std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
         } else {
             // Spin-polarized: mix packed array [total | magnetization] (2*Nd_d)
-            // Reference LYNX: mixing variable is [rho, mag] where mag = rho_up - rho_down
             std::vector<double> dens_in(2 * Nd_d), dens_out(2 * Nd_d);
 
-            // Pack input: [rho_total | mag]
             const double* rho_up_in = density_.rho(0).data();
             const double* rho_dn_in = density_.rho(1).data();
             for (int i = 0; i < Nd_d; ++i) {
@@ -589,7 +791,6 @@ double SCF::run(Wavefunction& wfn,
                 dens_in[Nd_d + i] = rho_up_in[i] - rho_dn_in[i];
             }
 
-            // Pack output: [rho_total | mag]
             const double* rho_up_out = rho_new.rho(0).data();
             const double* rho_dn_out = rho_new.rho(1).data();
             for (int i = 0; i < Nd_d; ++i) {
@@ -599,7 +800,6 @@ double SCF::run(Wavefunction& wfn,
 
             mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
 
-            // Unpack: reconstruct rho_up = 0.5*(rho + mag), rho_dn = 0.5*(rho - mag)
             double* rho_tot = density_.rho_total().data();
             double* rho_up = density_.rho(0).data();
             double* rho_dn = density_.rho(1).data();
@@ -610,7 +810,6 @@ double SCF::run(Wavefunction& wfn,
                 rho_dn[i] = 0.5 * (rho_tot[i] - mag);
             }
 
-            // Clamp and renormalize
             for (int i = 0; i < Nd_d; ++i) {
                 if (rho_up[i] < 0.0) rho_up[i] = 0.0;
                 if (rho_dn[i] < 0.0) rho_dn[i] = 0.0;
@@ -632,7 +831,11 @@ double SCF::run(Wavefunction& wfn,
         }
 
         // 6. Compute new Veff from mixed density
-        compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+        if (is_soc_) {
+            compute_Veff_spinor(density_, rho_b, Vloc_);
+        } else {
+            compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+        }
     }
 
     if (!converged_ && rank_world == 0) {

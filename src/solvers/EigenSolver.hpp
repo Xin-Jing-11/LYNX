@@ -56,6 +56,19 @@ public:
                             double& eigval_min, double& eigval_max,
                             double tol_lanczos = 1e-2, int max_iter = 1000);
 
+    // --- Spinor (SOC) interface ---
+    // Solve for spinor wavefunctions (2*Nd_d rows per band)
+    void solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
+                          int Nd_d, int Nband,
+                          double lambda_cutoff, double eigval_min, double eigval_max,
+                          const Vec3& kpt_cart, const Vec3& cell_lengths,
+                          int cheb_degree = 20, int ld = 0);
+
+    void lanczos_bounds_spinor_kpt(const double* Veff_spinor, int Nd_d,
+                                    const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                    double& eigval_min, double& eigval_max,
+                                    double tol_lanczos = 1e-2, int max_iter = 1000);
+
     double lambda_cutoff() const { return lambda_cutoff_; }
     void set_lambda_cutoff(double lc) { lambda_cutoff_ = lc; }
 

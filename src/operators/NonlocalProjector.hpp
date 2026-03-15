@@ -55,6 +55,21 @@ public:
     // Access Chi for diagnostics
     const std::vector<std::vector<NDArray<double>>>& Chi() const { return Chi_; }
 
+    // --- SOC support ---
+    // Setup SOC projectors (Chi_soc arrays) from fully-relativistic pseudopotentials
+    void setup_soc(const Crystal& crystal,
+                   const std::vector<AtomNlocInfluence>& nloc_influence,
+                   const Domain& domain,
+                   const FDGrid& grid);
+
+    // Apply SOC contribution to spinor Hpsi
+    // psi layout: [spin-up(Nd_d) | spin-down(Nd_d)] per band, ncol bands
+    // Implements Term 1 (on-diagonal, m-dependent) and Term 2 (off-diagonal, ladder operators)
+    void apply_soc_kpt(const Complex* psi, Complex* Hpsi, int ncol,
+                       int Nd_d, double dV) const;
+
+    bool has_soc() const { return has_soc_; }
+
 private:
     bool is_setup_ = false;
     int total_nproj_ = 0;
@@ -76,6 +91,26 @@ private:
     const Crystal* crystal_ = nullptr;
     const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;
     const Domain* domain_ = nullptr;
+
+    // --- SOC data ---
+    bool has_soc_ = false;
+
+    // Chi_soc arrays per atom type and atom (following SPARC convention):
+    // Chi_soc_[ityp][iat] = NDArray<double>(ndc, nproj_soc) — SOC radial * Ylm
+    // nproj_soc per atom = sum_{l=1..lmax} ppl_soc[l] * (2*l+1)
+    std::vector<std::vector<NDArray<double>>> Chi_soc_;
+
+    // Gamma_soc_all_: SOC energy coefficients (flattened)
+    std::vector<double> Gamma_soc_all_;
+
+    // Per-projector metadata for SOC: l, m values for each projector column
+    // Stored per atom type (same for all atoms of that type)
+    struct SOCProjInfo {
+        int l;
+        int m;
+        int p;  // projector index within channel l
+    };
+    std::vector<std::vector<SOCProjInfo>> soc_proj_info_;  // [ityp][col]
 
 };
 

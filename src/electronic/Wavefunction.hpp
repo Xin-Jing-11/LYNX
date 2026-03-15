@@ -29,13 +29,15 @@ public:
     // Allocate storage for given domain size and number of bands.
     // Nband: local band count (psi columns). Eigenvalues/occupations also sized Nband.
     // If is_complex=true, allocates complex psi for k-point calculations.
-    void allocate(int Nd_d, int Nband, int Nspin, int Nkpts, bool is_complex = false);
+    // Nspinor: 1 (default) or 2 (SOC spinor — each band has 2*Nd_d complex entries).
+    void allocate(int Nd_d, int Nband, int Nspin, int Nkpts,
+                  bool is_complex = false, int Nspinor = 1);
 
     // Allocate with separate local/global band counts for band parallelism.
     // Nband_local: columns of psi on this process.
     // Nband_global: total bands across all band-parallel procs (for eigenvalues/occupations).
     void allocate(int Nd_d, int Nband_local, int Nband_global,
-                  int Nspin, int Nkpts, bool is_complex = false);
+                  int Nspin, int Nkpts, bool is_complex = false, int Nspinor = 1);
 
     // Real orbital access (Gamma-point)
     NDArray<double>& psi(int spin, int kpt) { return psi_[spin * Nkpts_ + kpt]; }
@@ -59,6 +61,9 @@ public:
     int Nspin() const { return Nspin_; }
     int Nkpts() const { return Nkpts_; }
     bool is_complex() const { return is_complex_; }
+    int Nspinor() const { return Nspinor_; }
+    // Effective row dimension: Nd_d * Nspinor for spinor wavefunctions
+    int Nd_d_spinor() const { return Nd_d_ * Nspinor_; }
 
     // Randomize orbitals (initial guess) — real version
     void randomize(int spin, int kpt, unsigned seed = 42);
@@ -73,6 +78,7 @@ private:
     int Nspin_ = 0;
     int Nkpts_ = 0;
     bool is_complex_ = false;
+    int Nspinor_ = 1;       // 1 = normal, 2 = SOC spinor
 
     // Indexed by [spin * Nkpts + kpt]
     std::vector<NDArray<double>> psi_;         // real orbitals (Gamma)

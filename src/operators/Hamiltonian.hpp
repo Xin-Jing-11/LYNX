@@ -52,6 +52,14 @@ public:
                          int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
                          double c = 0.0) const;
 
+    // --- Spinor (SOC) interface ---
+    // Apply H*psi for 2-component spinor wavefunctions.
+    // psi layout: [spin-up(Nd_d) | spin-down(Nd_d)] per band, ncol bands.
+    // Veff_spinor layout: [V_uu(Nd_d) | V_dd(Nd_d) | Re(V_ud)(Nd_d) | Im(V_ud)(Nd_d)]
+    void apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
+                          int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                          double c = 0.0) const;
+
     const FDStencil& stencil() const { return *stencil_; }
     const Domain& domain() const { return *domain_; }
 

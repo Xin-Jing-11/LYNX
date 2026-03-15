@@ -65,7 +65,12 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     }
 
     // Line 6: extension_switch
-    std::getline(ifs, line);
+    int extension_switch = 0;
+    {
+        std::getline(ifs, line);
+        std::istringstream ss(line);
+        ss >> extension_switch;
+    }
 
     // Initialize storage
     rc_.resize(lmax_ + 1, 0.0);
@@ -225,6 +230,63 @@ void Pseudopotential::load_psp8(const std::string& filename) {
         rho_iso_atom_[i] = rho_val / (4.0 * M_PI);
     }
 
+    // Read SOC projectors if extension_switch >= 2
+    if (extension_switch >= 2 && lmax_ >= 1) {
+        has_soc_ = true;
+        ppl_soc_.resize(lmax_ + 1, 0);
+        Gamma_soc_.resize(lmax_ + 1);
+        UdV_soc_.resize(lmax_ + 1);
+        UdV_soc_d_.resize(lmax_ + 1);
+
+        // SOC data: for each l from 1 to lmax, read header + mmax lines
+        // l=0 has no SOC (no spin-orbit for s orbitals)
+        for (int l = 1; l <= lmax_; ++l) {
+            int nprj = ppl_[l];  // same number of projectors as scalar-relativistic
+            ppl_soc_[l] = nprj;
+            Gamma_soc_[l].resize(nprj, 0.0);
+            UdV_soc_[l].resize(nprj);
+            UdV_soc_d_[l].resize(nprj);
+
+            if (nprj == 0) continue;
+
+            // Read SOC header line: l_value [ekb_soc values]
+            std::getline(ifs, line);
+            std::istringstream hdr(line);
+            int l_read;
+            hdr >> l_read;
+            for (int p = 0; p < nprj; ++p) {
+                hdr >> Gamma_soc_[l][p];
+            }
+
+            // Read mmax lines: index, r, soc_proj_0(r), soc_proj_1(r), ...
+            for (int i = 0; i < mmax; ++i) {
+                std::getline(ifs, line);
+                std::istringstream ss(line);
+                int idx;
+                double ri;
+                ss >> idx >> ri;
+
+                for (int p = 0; p < nprj; ++p) {
+                    double proj_val;
+                    ss >> proj_val;
+                    UdV_soc_[l][p].resize(mmax);
+                    // Divide by r (same convention as standard projectors)
+                    if (ri > 1e-10) {
+                        UdV_soc_[l][p][i] = proj_val / ri;
+                    } else {
+                        UdV_soc_[l][p][i] = 0.0;
+                    }
+                }
+            }
+            // Fix r=0 boundary
+            for (int p = 0; p < nprj; ++p) {
+                if (mmax > 1) {
+                    UdV_soc_[l][p][0] = UdV_soc_[l][p][1];
+                }
+            }
+        }
+    }
+
     // Check if radial grid is uniform
     if (r_.size() > 2) {
         double dr0 = r_[1] - r_[0];
@@ -249,6 +311,15 @@ void Pseudopotential::compute_splines() {
         if (l == lloc_) continue;
         for (int p = 0; p < ppl_[l]; ++p) {
             spline_deriv(r_, UdV_[l][p], UdV_d_[l][p]);
+        }
+    }
+
+    // Spline SOC projectors
+    if (has_soc_) {
+        for (int l = 1; l <= lmax_; ++l) {
+            for (int p = 0; p < ppl_soc_[l]; ++p) {
+                spline_deriv(r_, UdV_soc_[l][p], UdV_soc_d_[l][p]);
+            }
         }
     }
 

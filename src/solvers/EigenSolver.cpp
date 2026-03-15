@@ -1028,4 +1028,236 @@ void EigenSolver::lanczos_bounds_kpt(const double* Veff, int Nd_d,
     eigval_min -= 0.1;
 }
 
+// ===========================================================================
+// Spinor (SOC) implementations
+// ===========================================================================
+
+void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
+                                    int Nd_d, int Nband,
+                                    double lambda_cutoff, double eigval_min, double eigval_max,
+                                    const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                    int cheb_degree, int ld) {
+    int Nd_d_spinor = 2 * Nd_d;
+    if (ld == 0) ld = Nd_d_spinor;
+    double dV = domain_->global_grid().dV();
+    int Nband_loc = Nband;
+
+    // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d_spinor)
+    std::vector<Complex> psi_packed;
+    Complex* psi_work = psi;
+    if (ld != Nd_d_spinor) {
+        psi_packed.resize(Nd_d_spinor * Nband_loc);
+        for (int j = 0; j < Nband_loc; ++j)
+            std::memcpy(psi_packed.data() + j * Nd_d_spinor, psi + j * ld, Nd_d_spinor * sizeof(Complex));
+        psi_work = psi_packed.data();
+    }
+
+    // Step 1: Chebyshev filter using spinor H*psi
+    // Use the existing chebyshev_filter_kpt logic but with spinor Hamiltonian
+    std::vector<Complex> Y(Nd_d_spinor * Nband_loc);
+    {
+        // Chebyshev filter for spinor: same algorithm, different H*psi callback
+        double e = (eigval_max - lambda_cutoff) / 2.0;
+        double c_cheb = (eigval_max + lambda_cutoff) / 2.0;
+        double sigma_1 = e / (eigval_min - c_cheb);
+        double sigma = sigma_1;
+
+        std::vector<Complex> Xold(Nd_d_spinor * Nband_loc);
+        std::vector<Complex> Xnew(Nd_d_spinor * Nband_loc);
+        std::vector<Complex> HX(Nd_d_spinor * Nband_loc);
+
+        // Y = (H*X - c*X) * (sigma/e)
+        H_->apply_spinor_kpt(psi_work, Veff_spinor, HX.data(), Nband_loc, Nd_d,
+                              kpt_cart, cell_lengths);
+
+        double scale = sigma / e;
+        for (int j = 0; j < Nband_loc; ++j) {
+            for (int i = 0; i < Nd_d_spinor; ++i) {
+                int idx = i + j * Nd_d_spinor;
+                Y[idx] = scale * (HX[idx] - c_cheb * psi_work[idx]);
+            }
+        }
+
+        std::memcpy(Xold.data(), psi_work, Nd_d_spinor * Nband_loc * sizeof(Complex));
+
+        for (int k = 2; k <= cheb_degree; ++k) {
+            double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
+            double gamma = 2.0 * sigma_new / e;
+
+            H_->apply_spinor_kpt(Y.data(), Veff_spinor, HX.data(), Nband_loc, Nd_d,
+                                  kpt_cart, cell_lengths);
+
+            double ss = sigma * sigma_new;
+            for (int j = 0; j < Nband_loc; ++j) {
+                for (int i = 0; i < Nd_d_spinor; ++i) {
+                    int idx = i + j * Nd_d_spinor;
+                    Xnew[idx] = gamma * (HX[idx] - c_cheb * Y[idx]) - ss * Xold[idx];
+                }
+            }
+
+            std::memcpy(Xold.data(), Y.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
+            std::memcpy(Y.data(), Xnew.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
+            sigma = sigma_new;
+        }
+    }
+
+    // Steps 2-5: Orthogonalize, project, diag, rotate — all using Nd_d_spinor as row dim
+    // These use the standard complex routines, just with larger row dimension
+    orthogonalize_kpt(Y.data(), Nd_d_spinor, Nband_loc, dV);
+
+    std::vector<Complex> Hs(Nband_loc * Nband_loc);
+    // Project Hamiltonian: Hs = X^H * H * X * dV
+    {
+        std::vector<Complex> HX(Nd_d_spinor * Nband_loc);
+        H_->apply_spinor_kpt(Y.data(), Veff_spinor, HX.data(), Nband_loc, Nd_d,
+                              kpt_cart, cell_lengths);
+
+        char transC = 'C', transN = 'N';
+        Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+        zgemm_(&transC, &transN, &Nband_loc, &Nband_loc, &Nd_d_spinor,
+               &alpha_z, Y.data(), &Nd_d_spinor, HX.data(), &Nd_d_spinor,
+               &beta_z, Hs.data(), &Nband_loc);
+
+        // Hermitianize
+        for (int i = 0; i < Nband_loc; ++i) {
+            for (int j = i + 1; j < Nband_loc; ++j) {
+                Complex avg = 0.5 * (Hs[i + j * Nband_loc] + std::conj(Hs[j + i * Nband_loc]));
+                Hs[i + j * Nband_loc] = avg;
+                Hs[j + i * Nband_loc] = std::conj(avg);
+            }
+            Hs[i + i * Nband_loc] = Complex(Hs[i + i * Nband_loc].real(), 0.0);
+        }
+    }
+
+    std::vector<double> eigs(Nband_loc);
+    diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
+    rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d_spinor, Nband_loc);
+
+    std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
+
+    // Unpack
+    if (ld != Nd_d_spinor) {
+        for (int j = 0; j < Nband_loc; ++j)
+            std::memcpy(psi + j * ld, Y.data() + j * Nd_d_spinor, Nd_d_spinor * sizeof(Complex));
+    } else {
+        std::memcpy(psi, Y.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
+    }
+
+    int N_eig = Nband_loc;
+    lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
+}
+
+void EigenSolver::lanczos_bounds_spinor_kpt(const double* Veff_spinor, int Nd_d,
+                                              const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                              double& eigval_min, double& eigval_max,
+                                              double tol_lanczos, int max_iter) {
+    int Nd_d_spinor = 2 * Nd_d;
+    MPIComm self_comm(MPI_COMM_SELF);
+
+    std::vector<Complex> V_j(Nd_d_spinor), V_jm1(Nd_d_spinor), V_jp1(Nd_d_spinor);
+    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
+
+    // Initial random vector
+    std::srand(1);
+    for (int i = 0; i < Nd_d_spinor; ++i)
+        V_jm1[i] = Complex((double)std::rand() / RAND_MAX, (double)std::rand() / RAND_MAX);
+
+    // Normalize
+    double norm2 = 0.0;
+    for (int i = 0; i < Nd_d_spinor; ++i)
+        norm2 += std::norm(V_jm1[i]);
+    double vscal = 1.0 / std::sqrt(norm2);
+    for (int i = 0; i < Nd_d_spinor; ++i) V_jm1[i] *= vscal;
+
+    // H * v
+    H_->apply_spinor_kpt(V_jm1.data(), Veff_spinor, V_j.data(), 1, Nd_d,
+                          kpt_cart, cell_lengths);
+
+    // a[0] = Re(<V_jm1, V_j>)
+    Complex dot_val(0.0);
+    for (int i = 0; i < Nd_d_spinor; ++i)
+        dot_val += std::conj(V_jm1[i]) * V_j[i];
+    a[0] = dot_val.real();
+
+    for (int i = 0; i < Nd_d_spinor; ++i)
+        V_j[i] -= a[0] * V_jm1[i];
+
+    norm2 = 0.0;
+    for (int i = 0; i < Nd_d_spinor; ++i)
+        norm2 += std::norm(V_j[i]);
+    b[0] = std::sqrt(norm2);
+
+    if (b[0] == 0.0) {
+        for (int i = 0; i < Nd_d_spinor; ++i)
+            V_j[i] = Complex(-1.0 + 2.0 * ((double)std::rand() / RAND_MAX),
+                             -1.0 + 2.0 * ((double)std::rand() / RAND_MAX));
+        dot_val = Complex(0.0);
+        for (int i = 0; i < Nd_d_spinor; ++i)
+            dot_val += std::conj(V_j[i]) * V_jm1[i];
+        for (int i = 0; i < Nd_d_spinor; ++i)
+            V_j[i] -= dot_val * V_jm1[i];
+        norm2 = 0.0;
+        for (int i = 0; i < Nd_d_spinor; ++i)
+            norm2 += std::norm(V_j[i]);
+        b[0] = std::sqrt(norm2);
+    }
+
+    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
+    for (int i = 0; i < Nd_d_spinor; ++i) V_j[i] *= vscal;
+
+    eigval_min = 0.0;
+    eigval_max = 0.0;
+    double eigmin_pre = 0.0, eigmax_pre = 0.0;
+    double err_eigmin = tol_lanczos + 1.0;
+    double err_eigmax = tol_lanczos + 1.0;
+
+    int j = 0;
+    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
+        H_->apply_spinor_kpt(V_j.data(), Veff_spinor, V_jp1.data(), 1, Nd_d,
+                              kpt_cart, cell_lengths);
+
+        dot_val = Complex(0.0);
+        for (int i = 0; i < Nd_d_spinor; ++i)
+            dot_val += std::conj(V_j[i]) * V_jp1[i];
+        a[j + 1] = dot_val.real();
+
+        for (int i = 0; i < Nd_d_spinor; ++i) {
+            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
+            V_jm1[i] = V_j[i];
+        }
+
+        norm2 = 0.0;
+        for (int i = 0; i < Nd_d_spinor; ++i)
+            norm2 += std::norm(V_jp1[i]);
+        b[j + 1] = std::sqrt(norm2);
+        if (b[j + 1] == 0.0) break;
+
+        vscal = 1.0 / b[j + 1];
+        for (int i = 0; i < Nd_d_spinor; ++i) V_j[i] = V_jp1[i] * vscal;
+
+        int n = j + 2;
+        std::vector<double> d(n), e_vec(n);
+        for (int kk = 0; kk < n; ++kk) { d[kk] = a[kk]; e_vec[kk] = b[kk]; }
+
+        int info;
+        dsterf_(&n, d.data(), e_vec.data(), &info);
+        if (info == 0) {
+            eigval_min = d[0];
+            eigval_max = d[n - 1];
+        } else {
+            break;
+        }
+
+        err_eigmin = std::abs(eigval_min - eigmin_pre);
+        err_eigmax = std::abs(eigval_max - eigmax_pre);
+        eigmin_pre = eigval_min;
+        eigmax_pre = eigval_max;
+
+        j++;
+    }
+
+    eigval_max *= 1.01;
+    eigval_min -= 0.1;
+}
+
 } // namespace lynx

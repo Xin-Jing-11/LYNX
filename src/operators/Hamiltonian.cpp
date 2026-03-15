@@ -214,6 +214,60 @@ void Hamiltonian::lap_plus_diag_nonorth(const double* x_ex, const double* Veff,
     lap_plus_diag_nonorth_impl(x_ex, Veff, y, ncol, c);
 }
 
+// ---------------------------------------------------------------------------
+// Spinor (SOC) interface
+// ---------------------------------------------------------------------------
+
+void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
+                                    int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                    double c) const {
+    // Veff_spinor layout: [V_uu(Nd_d) | V_dd(Nd_d) | Re(V_ud)(Nd_d) | Im(V_ud)(Nd_d)]
+    const double* V_uu = Veff_spinor;
+    const double* V_dd = Veff_spinor + Nd_d;
+    const double* V_ud_re = Veff_spinor + 2 * Nd_d;
+    const double* V_ud_im = Veff_spinor + 3 * Nd_d;
+
+    int Nd_d_spinor = 2 * Nd_d;
+
+    for (int n = 0; n < ncol; ++n) {
+        const Complex* psi_n = psi + n * Nd_d_spinor;
+        const Complex* psi_up = psi_n;
+        const Complex* psi_dn = psi_n + Nd_d;
+        Complex* y_n = y + n * Nd_d_spinor;
+        Complex* y_up = y_n;
+        Complex* y_dn = y_n + Nd_d;
+
+        // Apply kinetic + diagonal Veff to each spinor component separately
+        // Reuse apply_local_kpt for each component
+        apply_local_kpt(psi_up, V_uu, y_up, 1, kpt_cart, cell_lengths, c);
+        apply_local_kpt(psi_dn, V_dd, y_dn, 1, kpt_cart, cell_lengths, c);
+
+        // Apply off-diagonal Veff: y_up += V_ud * psi_dn, y_dn += V_ud* * psi_up
+        for (int i = 0; i < Nd_d; ++i) {
+            Complex V_ud(V_ud_re[i], V_ud_im[i]);
+            y_up[i] += V_ud * psi_dn[i];
+            y_dn[i] += std::conj(V_ud) * psi_up[i];
+        }
+    }
+
+    // Apply scalar-relativistic Vnl per spinor component
+    if (vnl_kpt_ && vnl_kpt_->is_setup()) {
+        for (int n = 0; n < ncol; ++n) {
+            const Complex* psi_n = psi + n * Nd_d_spinor;
+            Complex* y_n = y + n * Nd_d_spinor;
+            // Apply Vnl to spin-up
+            vnl_kpt_->apply_kpt(psi_n, y_n, 1, grid_->dV());
+            // Apply Vnl to spin-down
+            vnl_kpt_->apply_kpt(psi_n + Nd_d, y_n + Nd_d, 1, grid_->dV());
+        }
+    }
+
+    // Apply SOC terms
+    if (vnl_kpt_ && vnl_kpt_->has_soc()) {
+        vnl_kpt_->apply_soc_kpt(psi, y, ncol, Nd_d, grid_->dV());
+    }
+}
+
 // Explicit template instantiations
 template void Hamiltonian::lap_plus_diag_orth_impl<double>(const double*, const double*,
                                                             double*, int, double) const;
