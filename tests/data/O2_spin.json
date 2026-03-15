@@ -11,7 +11,7 @@
   "atoms": [
     {
       "element": "O",
-      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/O/O.psp8",
       "fractional": false,
       "coordinates": [[9, 9, 9], [12, 9, 9]],
       "spin": [1.0, 1.0]

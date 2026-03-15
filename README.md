@@ -25,6 +25,28 @@ make -j
 
 Dependencies: MPI, BLAS/LAPACK (OpenBLAS or MKL), C++17 compiler. Optional: CUDA toolkit, ScaLAPACK, pybind11 (fetched automatically).
 
+### Pseudopotentials
+
+LYNX uses ONCV norm-conserving pseudopotentials from the [PseudoDojo](http://www.pseudo-dojo.org/) project, included as git submodules.
+
+After cloning, fetch the pseudopotential files:
+
+```bash
+git clone --recurse-submodules https://github.com/SMSHBSB/LYNX.git
+
+# Or if already cloned:
+git submodule update --init
+```
+
+This populates:
+
+| Directory | Functional | Source |
+|-----------|-----------|--------|
+| `psps/ONCVPSP-PBE-PDv0.4/` | GGA-PBE | [PseudoDojo](https://github.com/PseudoDojo/ONCVPSP-PBE-PDv0.4) |
+| `psps/ONCVPSP-LDA-PDv0.4/` | LDA | [PseudoDojo](https://github.com/PseudoDojo/ONCVPSP-LDA-PDv0.4) |
+
+Each element has a subdirectory with `.psp8` files, e.g. `psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8`.
+
 ### Run (C++)
 
 ```bash
@@ -41,7 +63,7 @@ config = DFTConfig(
     cell=[[10.26, 0, 0], [0, 10.26, 0], [0, 0, 10.26]],
     fractional=[[0, 0, 0], [0.25, 0.25, 0.25]],
     symbols=['Si', 'Si'],
-    pseudo_files={'Si': 'psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8'},
+    pseudo_files={'Si': 'psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8'},
     Nstates=10,
 )
 calc = config.create_calculator(auto_run=True)
@@ -121,7 +143,7 @@ config = DFTConfig(
     cell=[[10.26, 0, 0], [0, 10.26, 0], [0, 0, 10.26]],
     fractional=[[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]],
     symbols=['Si', 'Si'],
-    pseudo_files={'Si': 'psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8'},
+    pseudo_files={'Si': 'psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8'},
     Nx=24, Ny=24, Nz=24,
     Nstates=10,
     xc='GGA_PBE',

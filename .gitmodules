@@ -1,0 +1,6 @@
+[submodule "psps/ONCVPSP-PBE-PDv0.4"]
+	path = psps/ONCVPSP-PBE-PDv0.4
+	url = https://github.com/PseudoDojo/ONCVPSP-PBE-PDv0.4.git
+[submodule "psps/ONCVPSP-LDA-PDv0.4"]
+	path = psps/ONCVPSP-LDA-PDv0.4
+	url = https://github.com/PseudoDojo/ONCVPSP-LDA-PDv0.4.git

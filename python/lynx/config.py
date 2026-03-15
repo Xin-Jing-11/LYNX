@@ -31,6 +31,11 @@ def _find_psp(element, psp_dir=None):
     1. psp_dir (if provided)
     2. LYNX_PSP_PATH environment variable
     3. psps/ directory relative to package root
+
+    Within each base directory, searches:
+    - {base}/PBE/{element}/*.psp8
+    - {base}/LDA/{element}/*.psp8
+    - {base}/*.psp8 (flat fallback for old-style layout)
     """
     search_paths = []
     if psp_dir:
@@ -47,6 +52,14 @@ def _find_psp(element, psp_dir=None):
     for path in search_paths:
         if not os.path.isdir(path):
             continue
+        # Search in PseudoDojo-style subdirectories
+        for xc_dir in ['ONCVPSP-PBE-PDv0.4', 'ONCVPSP-LDA-PDv0.4']:
+            elem_dir = os.path.join(path, xc_dir, element)
+            if os.path.isdir(elem_dir):
+                for fname in sorted(os.listdir(elem_dir)):
+                    if fname.endswith('.psp8'):
+                        return os.path.join(elem_dir, fname)
+        # Fallback: flat directory with old naming convention
         for fname in os.listdir(path):
             if fname.endswith('.psp8') and f'_{element}_' in fname:
                 return os.path.join(path, fname)

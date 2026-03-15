@@ -19,7 +19,7 @@ config = DFTConfig(
     fractional=[[0.00, 0.00, 0.00],
                 [0.25, 0.25, 0.25]],
     symbols=['Si', 'Si'],
-    pseudo_files={'Si': 'psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8'},
+    pseudo_files={'Si': 'psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8'},
     Nx=20, Ny=20, Nz=20,
     Nstates=10,
     xc='GGA_PBE',

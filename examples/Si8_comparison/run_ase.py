@@ -61,7 +61,7 @@ print()
 # All other inputs/outputs are in ASE units (Angstrom, eV).
 #
 PSP_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'psps')
-si_psp = os.path.join(PSP_DIR, '14_Si_4_1.9_1.9_pbe_n_v1.0.psp8')
+si_psp = os.path.join(PSP_DIR, 'ONCVPSP-PBE-PDv0.4', 'Si', 'Si.psp8')
 
 calc = LynxCalculator(
     xc='GGA_PBE',

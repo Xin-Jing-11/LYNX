@@ -15,7 +15,7 @@
   "atoms": [
     {
       "element": "Mg",
-      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/12_Mg_10_1.9_2.0_pbe_v1.0.psp8",
+      "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/Mg/Mg.psp8",
       "fractional": true,
       "coordinates": [
         [0.646667, 0.313333, 0.500632],
@@ -24,7 +24,7 @@
     },
     {
       "element": "O",
-      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/O/O.psp8",
       "fractional": true,
       "coordinates": [
         [0.656667, 0.343333, 0.903968],

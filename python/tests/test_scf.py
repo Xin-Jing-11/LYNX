@@ -13,11 +13,17 @@ PSPS_DIR = os.path.join(PROJECT_ROOT, 'psps')
 
 def _find_psp(element):
     """Find pseudopotential file for element in psps/ directory."""
-    if not os.path.isdir(PSPS_DIR):
-        return None
-    for f in os.listdir(PSPS_DIR):
-        if f.endswith('.psp8') and f'_{element}_' in f:
-            return os.path.join(PSPS_DIR, f)
+    for xc_dir in ['ONCVPSP-PBE-PDv0.4', 'ONCVPSP-LDA-PDv0.4']:
+        elem_dir = os.path.join(PSPS_DIR, xc_dir, element)
+        if os.path.isdir(elem_dir):
+            for f in sorted(os.listdir(elem_dir)):
+                if f.endswith('.psp8'):
+                    return os.path.join(elem_dir, f)
+    # Fallback: flat directory search
+    if os.path.isdir(PSPS_DIR):
+        for f in os.listdir(PSPS_DIR):
+            if f.endswith('.psp8') and f'_{element}_' in f:
+                return os.path.join(PSPS_DIR, f)
     return None
 
 

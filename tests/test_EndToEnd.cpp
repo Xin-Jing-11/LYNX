@@ -237,7 +237,7 @@ static DFTResult run_single_point(const std::string& json_file) {
 // Test: Pseudopotential loading (quick, no SCF)
 // ============================================================
 TEST(EndToEnd, PseudopotentialLoad) {
-    std::string psp_file = "/home/xx/Desktop/dev_SPARC_GPU/psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8";
+    std::string psp_file = "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8";
 
     Pseudopotential psd;
     psd.load_psp8(psp_file);
@@ -261,7 +261,7 @@ TEST(EndToEnd, PseudochargeComputation) {
     DomainVertices verts = {0, 19, 0, 19, 0, 19};
     Domain domain(grid, verts);
 
-    std::string psp_file = "/home/xx/Desktop/dev_SPARC_GPU/psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8";
+    std::string psp_file = "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8";
     AtomType si("Si", 28.085, 4.0, 1);
     si.psd().load_psp8(psp_file);
 
@@ -304,7 +304,7 @@ TEST(EndToEnd, NonlocalProjectorSetup) {
     DomainVertices verts = {0, 19, 0, 19, 0, 19};
     Domain domain(grid, verts);
 
-    std::string psp_file = "/home/xx/Desktop/dev_SPARC_GPU/psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8";
+    std::string psp_file = "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8";
     AtomType si("Si", 28.085, 4.0, 1);
     si.psd().load_psp8(psp_file);
 

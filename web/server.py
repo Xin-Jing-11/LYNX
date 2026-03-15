@@ -92,15 +92,30 @@ def element_info(sym: str) -> dict:
 _PSP_CACHE: dict[str, str] = {}
 
 def _build_psp_cache():
-    """Scan PSEUDO_DIR and build element symbol → path mapping."""
+    """Scan PSEUDO_DIR and build element symbol → path mapping.
+
+    Searches PseudoDojo-style layout: psps/ONCVPSP-{PBE,LDA}-PDv0.4/{element}/*.psp8
+    Falls back to flat directory with old naming convention.
+    """
     if not PSEUDO_DIR.exists():
         return
+    # PseudoDojo-style: psps/ONCVPSP-PBE-PDv0.4/{element}/*.psp8
+    for xc_dir in ["ONCVPSP-PBE-PDv0.4", "ONCVPSP-LDA-PDv0.4"]:
+        xc_path = PSEUDO_DIR / xc_dir
+        if xc_path.is_dir():
+            for elem_dir in xc_path.iterdir():
+                if elem_dir.is_dir():
+                    sym = elem_dir.name
+                    for f in elem_dir.glob("*.psp8"):
+                        if sym not in _PSP_CACHE:
+                            _PSP_CACHE[sym] = str(f)
+    # Fallback: flat directory with old naming convention
     for f in PSEUDO_DIR.glob("*.psp8"):
-        # Filename like: 56_Ba_10_2.8_2.8_pbe_n_v1.0.psp8
         parts = f.stem.split("_")
         if len(parts) >= 2:
             sym = parts[1]  # e.g. "Ba"
-            _PSP_CACHE[sym] = str(f)
+            if sym not in _PSP_CACHE:
+                _PSP_CACHE[sym] = str(f)
 
 _build_psp_cache()
 

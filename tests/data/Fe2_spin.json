@@ -11,7 +11,7 @@
   "atoms": [
     {
       "element": "Fe",
-      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/26_Fe_16_2.0_2.5_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/Fe/Fe-sp.psp8",
       "fractional": false,
       "coordinates": [[0.0, 0.0, 0.0], [2.71, 2.71, 2.71]],
       "spin": [3.0, 3.0]

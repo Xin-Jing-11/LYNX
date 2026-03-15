@@ -11,7 +11,7 @@
   "atoms": [
     {
       "element": "Si",
-      "pseudo_file": "Si.psp8",
+      "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8",
       "fractional": true,
       "coordinates": [
         [0.00, 0.00, 0.00],
