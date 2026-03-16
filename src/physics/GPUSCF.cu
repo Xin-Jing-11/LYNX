@@ -2145,6 +2145,143 @@ double GPUSCFRunner::run(
         printf("SOC H*psi L+Vnl: max_err=%.3e, rel_err=%.3e %s\n",
                max_err_vnl, rel_err_vnl, rel_err_vnl < 1e-10 ? "[PASS]" : "[FAIL]");
 
+        // Stage 2b: Verify SOC data upload
+        if (has_soc_) {
+            // Download first few Chi_soc values from GPU and compare with CPU
+            int test_ndc = std::min(10, (int)nloc_influence[0].ndc[0]);
+            int test_nproj = std::min(5, (int)vnl->soc_proj_info()[0].size());
+            if (test_ndc > 0 && test_nproj > 0) {
+                std::vector<double> gpu_chi(test_ndc * test_nproj);
+                CUDA_CHECK(cudaMemcpy(gpu_chi.data(), gpu_soc_.d_Chi_soc_flat,
+                    test_ndc * test_nproj * sizeof(double), cudaMemcpyDeviceToHost));
+                const auto& cpu_chi = vnl->Chi_soc()[0][0];
+                printf("  Chi_soc[0][0..4]: GPU=[%.6e, %.6e, %.6e] CPU=[%.6e, %.6e, %.6e]\n",
+                       gpu_chi[0], gpu_chi[1], gpu_chi[2],
+                       cpu_chi(0,0), cpu_chi(1,0), cpu_chi(2,0));
+            }
+            // Download Gamma_soc
+            std::vector<double> gpu_gamma(std::min(5, gpu_soc_.total_soc_nproj));
+            CUDA_CHECK(cudaMemcpy(gpu_gamma.data(), gpu_soc_.d_Gamma_soc,
+                gpu_gamma.size() * sizeof(double), cudaMemcpyDeviceToHost));
+            printf("  Gamma_soc GPU[0..2]: %.6e %.6e %.6e  CPU: %.6e\n",
+                   gpu_gamma[0], gpu_gamma.size()>1?gpu_gamma[1]:0, gpu_gamma.size()>2?gpu_gamma[2]:0,
+                   vnl->Gamma_soc_all().size()>0 ? vnl->Gamma_soc_all()[0] : -999);
+            // proj_l, proj_m
+            std::vector<int> gpu_l(std::min(5, gpu_soc_.total_soc_nproj));
+            std::vector<int> gpu_m(std::min(5, gpu_soc_.total_soc_nproj));
+            CUDA_CHECK(cudaMemcpy(gpu_l.data(), gpu_soc_.d_proj_l, gpu_l.size()*sizeof(int), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(gpu_m.data(), gpu_soc_.d_proj_m, gpu_m.size()*sizeof(int), cudaMemcpyDeviceToHost));
+            printf("  proj_l GPU: %d %d %d %d %d\n", gpu_l[0], gpu_l.size()>1?gpu_l[1]:0, gpu_l.size()>2?gpu_l[2]:0, gpu_l.size()>3?gpu_l[3]:0, gpu_l.size()>4?gpu_l[4]:0);
+            printf("  proj_m GPU: %d %d %d %d %d\n", gpu_m[0], gpu_m.size()>1?gpu_m[1]:0, gpu_m.size()>2?gpu_m[2]:0, gpu_m.size()>3?gpu_m[3]:0, gpu_m.size()>4?gpu_m[4]:0);
+            const auto& pi = vnl->soc_proj_info()[0];
+            printf("  proj_l CPU: %d %d %d %d %d\n", pi[0].l, pi.size()>1?pi[1].l:0, pi.size()>2?pi[2].l:0, pi.size()>3?pi[3].l:0, pi.size()>4?pi[4].l:0);
+            printf("  proj_m CPU: %d %d %d %d %d\n", pi[0].m, pi.size()>1?pi[1].m:0, pi.size()>2?pi[2].m:0, pi.size()>3?pi[3].m:0, pi.size()>4?pi[4].m:0);
+        }
+
+        // Stage 2b: SOC alpha comparison
+        if (has_soc_ && gpu_soc_.total_soc_nproj > 0) {
+            // GPU: zero alpha, apply SOC gather
+            int total_soc = gpu_soc_.total_soc_nproj;
+            CUDA_CHECK(cudaMemset(gpu_soc_.d_alpha_soc_up, 0, total_soc * sizeof(cuDoubleComplex)));
+            CUDA_CHECK(cudaMemset(gpu_soc_.d_alpha_soc_dn, 0, total_soc * sizeof(cuDoubleComplex)));
+
+            gpu::soc_apply_z_gpu(d_psi_spinor, d_Hpsi_spinor,  // Hpsi is dummy here
+                gpu_soc_.d_Chi_soc_flat, gpu_vnl_.d_gpos_flat,
+                gpu_soc_.d_gpos_offsets_soc, gpu_soc_.d_chi_soc_offsets,
+                gpu_soc_.d_ndc_arr_soc, gpu_soc_.d_nproj_soc_arr,
+                gpu_soc_.d_IP_displ_soc, gpu_soc_.d_Gamma_soc,
+                gpu_soc_.d_proj_l, gpu_soc_.d_proj_m,
+                d_bloch_fac_,
+                static_cast<cuDoubleComplex*>(gpu_soc_.d_alpha_soc_up),
+                static_cast<cuDoubleComplex*>(gpu_soc_.d_alpha_soc_dn),
+                Nd_, 1, dV_,
+                gpu_soc_.n_influence_soc, total_soc,
+                gpu_soc_.max_ndc_soc, gpu_soc_.max_nproj_soc);
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Download GPU alpha
+            std::vector<Complex> gpu_alpha_up(total_soc), gpu_alpha_dn(total_soc);
+            CUDA_CHECK(cudaMemcpy(gpu_alpha_up.data(), gpu_soc_.d_alpha_soc_up,
+                total_soc * sizeof(Complex), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(gpu_alpha_dn.data(), gpu_soc_.d_alpha_soc_dn,
+                total_soc * sizeof(Complex), cudaMemcpyDeviceToHost));
+
+            // CPU alpha
+            std::vector<Complex> cpu_alpha_up(total_soc, Complex(0)), cpu_alpha_dn(total_soc, Complex(0));
+            vnl->apply_soc_kpt(psi_ptr, cpu_localvnl.data(), 1, Nd_, dV_);  // this adds SOC to cpu_localvnl
+            // Actually, apply_soc_kpt doesn't return alpha — it adds to Hpsi directly.
+            // Can't easily extract CPU alpha without modifying the CPU code.
+            // Instead, compare the SOC contribution: Hpsi_full - Hpsi_localvnl
+
+            // GPU SOC-only contribution = FULL - LOCAL_VNL
+            std::vector<Complex> gpu_soc_only(Nd_spinor);
+            hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaMemcpy(gpu_soc_only.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
+            for (int i = 0; i < Nd_spinor; i++)
+                gpu_soc_only[i] -= gpu_localvnl[i];  // subtract local+Vnl to get SOC+V_ud contribution
+
+            // Manual CPU alpha for first atom, first projector
+            {
+                const auto& inf0 = nloc_influence[0];
+                int ndc0 = inf0.ndc[0];
+                const auto& gpos0 = inf0.grid_pos[0];
+                const auto& chi_soc0 = vnl->Chi_soc()[0][0];
+                const Vec3& shift0 = inf0.image_shift[0];
+                double theta0 = -(kpt0v.x * shift0.x + kpt0v.y * shift0.y + kpt0v.z * shift0.z);
+                Complex bloch0(std::cos(theta0), std::sin(theta0));
+                Complex cpu_a_up(0), cpu_a_dn(0);
+                for (int ig = 0; ig < ndc0; ig++) {
+                    double chi_val = chi_soc0(ig, 0);
+                    cpu_a_up += chi_val * psi_ptr[gpos0[ig]];
+                    cpu_a_dn += chi_val * psi_ptr[Nd_ + gpos0[ig]];
+                }
+                cpu_a_up *= bloch0 * dV_;
+                cpu_a_dn *= bloch0 * dV_;
+                // Check gpos alignment
+                std::vector<int> gpu_goff(2);
+                CUDA_CHECK(cudaMemcpy(gpu_goff.data(), gpu_soc_.d_gpos_offsets_soc, 2*sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> gpu_gpos(std::min(5, ndc0));
+                CUDA_CHECK(cudaMemcpy(gpu_gpos.data(), gpu_vnl_.d_gpos_flat + gpu_goff[0], gpu_gpos.size()*sizeof(int), cudaMemcpyDeviceToHost));
+                printf("  gpos_off_soc[0]=%d gpos[0..2]=%d %d %d CPU=%d %d %d\n",
+                       gpu_goff[0], gpu_gpos[0], gpu_gpos[1], gpu_gpos[2],
+                       gpos0[0], gpos0[1], gpos0[2]);
+                printf("  CPU alpha_soc[0]: up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
+                       cpu_a_up.real(), cpu_a_up.imag(), cpu_a_dn.real(), cpu_a_dn.imag());
+                printf("  GPU alpha_soc[0]: up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
+                       gpu_alpha_up[0].real(), gpu_alpha_up[0].imag(),
+                       gpu_alpha_dn[0].real(), gpu_alpha_dn[0].imag());
+            }
+
+            // CPU SOC-only: full - localvnl
+            std::vector<Complex> cpu_full(Nd_spinor, Complex(0));
+            hamiltonian.apply_spinor_kpt(psi_ptr, h_Veff_sp.data(), cpu_full.data(), 1, Nd_,
+                                          kpt0v, cell_len_v);
+            std::vector<Complex> cpu_soc_only(Nd_spinor);
+            for (int i = 0; i < Nd_spinor; i++)
+                cpu_soc_only[i] = cpu_full[i] - cpu_localvnl[i];
+
+            double max_soc = 0, norm_soc = 0;
+            int worst_i = 0;
+            for (int i = 0; i < Nd_spinor; i++) {
+                double err = std::abs(gpu_soc_only[i] - cpu_soc_only[i]);
+                if (err > max_soc) { max_soc = err; worst_i = i; }
+                norm_soc += std::norm(cpu_soc_only[i]);
+            }
+            printf("SOC H*psi SOC-only: max_err=%.3e at i=%d, rel_err=%.3e, ||SOC_cpu||=%.3e, ||SOC_gpu||=%.3e\n",
+                   max_soc, worst_i, max_soc / std::sqrt(norm_soc / Nd_spinor),
+                   std::sqrt(norm_soc), std::sqrt([&]() { double s=0; for(auto& v:gpu_soc_only) s+=std::norm(v); return s; }()));
+            // Print first few elements
+            printf("  gpu_soc[0..2]: (%.3e,%.3e) (%.3e,%.3e) (%.3e,%.3e)\n",
+                   gpu_soc_only[0].real(), gpu_soc_only[0].imag(),
+                   gpu_soc_only[1].real(), gpu_soc_only[1].imag(),
+                   gpu_soc_only[2].real(), gpu_soc_only[2].imag());
+            printf("  cpu_soc[0..2]: (%.3e,%.3e) (%.3e,%.3e) (%.3e,%.3e)\n",
+                   cpu_soc_only[0].real(), cpu_soc_only[0].imag(),
+                   cpu_soc_only[1].real(), cpu_soc_only[1].imag(),
+                   cpu_soc_only[2].real(), cpu_soc_only[2].imag());
+        }
+
         // Stage 3: FULL H (local + Vnl + V_ud + SOC)
         hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
