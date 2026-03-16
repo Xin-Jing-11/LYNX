@@ -975,6 +975,47 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
 // Static callback: Spinor Hamiltonian (SOC) for 2-component spinors
 // psi/Hpsi layout: [spin-up(Nd_d) | spin-down(Nd_d)] per band
 // Veff layout: [V_uu(Nd_d) | V_dd(Nd_d) | Re(V_ud)(Nd_d) | Im(V_ud)(Nd_d)]
+// Strided extract/scatter kernels for spinor batching
+__global__ void spinor_extract_kernel(
+    const cuDoubleComplex* __restrict__ spinor,  // [up0|dn0|up1|dn1|...] stride 2*Nd per band
+    cuDoubleComplex* __restrict__ out,            // [col0|col1|...] stride Nd per band
+    int Nd, int ncol, int component)              // component: 0=up, 1=dn
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= Nd * ncol) return;
+    int ig = i % Nd;
+    int n = i / Nd;
+    out[n * Nd + ig] = spinor[n * 2 * Nd + component * Nd + ig];
+}
+
+__global__ void spinor_scatter_kernel(
+    const cuDoubleComplex* __restrict__ in,       // [col0|col1|...] stride Nd
+    cuDoubleComplex* __restrict__ spinor,          // [up0|dn0|up1|dn1|...] stride 2*Nd
+    int Nd, int ncol, int component)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= Nd * ncol) return;
+    int ig = i % Nd;
+    int n = i / Nd;
+    spinor[n * 2 * Nd + component * Nd + ig] = in[n * Nd + ig];
+}
+
+// Hpsi += src (add contiguous back into strided spinor layout)
+__global__ void spinor_scatter_add_kernel(
+    const cuDoubleComplex* __restrict__ in,
+    cuDoubleComplex* __restrict__ spinor,
+    int Nd, int ncol, int component)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= Nd * ncol) return;
+    int ig = i % Nd;
+    int n = i / Nd;
+    cuDoubleComplex val = in[n * Nd + ig];
+    cuDoubleComplex* dst = &spinor[n * 2 * Nd + component * Nd + ig];
+    dst->x += val.x;
+    dst->y += val.y;
+}
+
 // ============================================================
 void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     const cuDoubleComplex* d_psi, const double* d_Veff,
@@ -989,62 +1030,97 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     const double* V_ud_re = d_Veff + 2 * Nd_d;
     const double* V_ud_im = d_Veff + 3 * Nd_d;
 
-    // Process all bands at once per spinor component using strided layout.
-    // psi layout: [up0(Nd)|dn0(Nd)|up1(Nd)|dn1(Nd)|...] with stride Nd_d_spinor per band
-    // We need to apply H to all up components and all dn components separately.
-    // Since halo_exchange_z_gpu/laplacian handles multi-column with stride Nd,
-    // we need to extract up/dn into contiguous arrays, apply H, then scatter back.
-    // For efficiency, process per-band but WITHOUT debug syncs.
-    for (int n = 0; n < ncol; ++n) {
-        const cuDoubleComplex* psi_up = d_psi + n * Nd_d_spinor;
-        const cuDoubleComplex* psi_dn = psi_up + Nd_d;
-        cuDoubleComplex* Hpsi_up = d_Hpsi + n * Nd_d_spinor;
-        cuDoubleComplex* Hpsi_dn = Hpsi_up + Nd_d;
+    // Batched spinor H*psi: extract up/dn → contiguous → batch H → scatter back
+    // Process in chunks of batch_size bands to limit memory usage
+    // Each chunk needs: 4 * Nd * batch_size * 16 bytes (psi_up/dn + Hpsi_up/dn)
+    //                 + Nd_ex * batch_size * 16 bytes (x_ex for halo exchange)
+    auto& ctx = gpu::GPUContext::instance();
+    int batch_size = ncol;  // try all at once first
 
+    // Limit batch_size so total scratch < ~200MB
+    {
+        int nx_ex = s->nx_ + 2*s->FDn_, ny_ex = s->ny_ + 2*s->FDn_, nz_ex = s->nz_ + 2*s->FDn_;
+        size_t Nd_ex = (size_t)nx_ex * ny_ex * nz_ex;
+        size_t per_band = (4 * Nd_d + Nd_ex) * sizeof(cuDoubleComplex);
+        size_t max_scratch = 200ULL * 1024 * 1024;  // 200 MB
+        if (per_band * ncol > max_scratch)
+            batch_size = std::max(1, (int)(max_scratch / per_band));
+    }
+
+    for (int col_start = 0; col_start < ncol; col_start += batch_size) {
+        int cols = std::min(batch_size, ncol - col_start);
+        int total = Nd_d * cols;
+        int bs = 256;
+        int gs = gpu::ceildiv(total, bs);
+
+        size_t sp_cp = ctx.scratch_pool.checkpoint();
+        cuDoubleComplex* d_psi_up = ctx.scratch_pool.alloc<cuDoubleComplex>((size_t)Nd_d * cols);
+        cuDoubleComplex* d_psi_dn = ctx.scratch_pool.alloc<cuDoubleComplex>((size_t)Nd_d * cols);
+        cuDoubleComplex* d_Hp_up = ctx.scratch_pool.alloc<cuDoubleComplex>((size_t)Nd_d * cols);
+        cuDoubleComplex* d_Hp_dn = ctx.scratch_pool.alloc<cuDoubleComplex>((size_t)Nd_d * cols);
+        int nx_ex = s->nx_ + 2*s->FDn_, ny_ex = s->ny_ + 2*s->FDn_, nz_ex = s->nz_ + 2*s->FDn_;
+        size_t Nd_ex = (size_t)nx_ex * ny_ex * nz_ex;
+        cuDoubleComplex* d_xex_batch = ctx.scratch_pool.alloc<cuDoubleComplex>(Nd_ex * cols);
+
+        // Extract up/dn from spinor layout (offset by col_start)
+        const cuDoubleComplex* d_psi_batch = d_psi + col_start * Nd_d_spinor;
+        cuDoubleComplex* d_Hpsi_batch = d_Hpsi + col_start * Nd_d_spinor;
+        spinor_extract_kernel<<<gs, bs>>>(d_psi_batch, d_psi_up, Nd_d, cols, 0);
+        spinor_extract_kernel<<<gs, bs>>>(d_psi_batch, d_psi_dn, Nd_d, cols, 1);
+
+        // Batched local H
         gpu::hamiltonian_apply_local_z_gpu(
-            psi_up, V_uu, Hpsi_up, d_x_ex,
-            s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
+            d_psi_up, V_uu, d_Hp_up, d_xex_batch,
+            s->nx_, s->ny_, s->nz_, s->FDn_, cols, 0.0,
             s->is_orth_, true, true, true,
             s->diag_coeff_ham_,
             s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
             s->kxLx_, s->kyLy_, s->kzLz_);
 
         gpu::hamiltonian_apply_local_z_gpu(
-            psi_dn, V_dd, Hpsi_dn, d_x_ex,
-            s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
+            d_psi_dn, V_dd, d_Hp_dn, d_xex_batch,
+            s->nx_, s->ny_, s->nz_, s->FDn_, cols, 0.0,
             s->is_orth_, true, true, true,
             s->diag_coeff_ham_,
             s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
             s->kxLx_, s->kyLy_, s->kzLz_);
 
+        // Batched Vnl
         if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
             gpu::nonlocal_projector_apply_z_gpu(
-                psi_up, Hpsi_up,
+                d_psi_up, d_Hp_up,
                 s->gpu_vnl_.d_Chi_flat, s->gpu_vnl_.d_gpos_flat,
                 s->gpu_vnl_.d_gpos_offsets, s->gpu_vnl_.d_chi_offsets,
                 s->gpu_vnl_.d_ndc_arr, s->gpu_vnl_.d_nproj_arr,
                 s->gpu_vnl_.d_IP_displ, s->gpu_vnl_.d_Gamma,
                 static_cast<cuDoubleComplex*>(s->d_alpha_z_),
                 s->d_bloch_fac_,
-                Nd_d, 1, s->dV_,
+                Nd_d, cols, s->dV_,
                 s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
                 s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
 
             gpu::nonlocal_projector_apply_z_gpu(
-                psi_dn, Hpsi_dn,
+                d_psi_dn, d_Hp_dn,
                 s->gpu_vnl_.d_Chi_flat, s->gpu_vnl_.d_gpos_flat,
                 s->gpu_vnl_.d_gpos_offsets, s->gpu_vnl_.d_chi_offsets,
                 s->gpu_vnl_.d_ndc_arr, s->gpu_vnl_.d_nproj_arr,
                 s->gpu_vnl_.d_IP_displ, s->gpu_vnl_.d_Gamma,
                 static_cast<cuDoubleComplex*>(s->d_alpha_z_),
                 s->d_bloch_fac_,
-                Nd_d, 1, s->dV_,
+                Nd_d, cols, s->dV_,
                 s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
                 s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
         }
+
+        // Scatter back to spinor layout
+        spinor_scatter_kernel<<<gs, bs>>>(d_Hp_up, d_Hpsi_batch, Nd_d, cols, 0);
+        spinor_scatter_kernel<<<gs, bs>>>(d_Hp_dn, d_Hpsi_batch, Nd_d, cols, 1);
+
+        ctx.scratch_pool.restore(sp_cp);
     }
 
     // Off-diagonal Veff: Hpsi_up += V_ud * psi_dn, Hpsi_dn += conj(V_ud) * psi_up
+    // (operates directly on spinor layout)
     gpu::spinor_offdiag_veff_gpu(d_Hpsi, d_psi, V_ud_re, V_ud_im, Nd_d, ncol);
 
     // SOC terms (Term 1 + Term 2)
