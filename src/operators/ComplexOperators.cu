@@ -625,7 +625,8 @@ __global__ void fused_gather_chitpsi_z_kernel(
     int Nd, int ncol_this,
     int ncol_stride,
     int col_start,
-    double dV, int n_atoms)
+    double dV, int n_atoms,
+    int smem_available)  // 0 = no shared memory, >0 = bytes of shared memory allocated
 {
     int iat = blockIdx.x;
     if (iat >= n_atoms) return;
@@ -646,14 +647,17 @@ __global__ void fused_gather_chitpsi_z_kernel(
     extern __shared__ char smem_raw[];
     cuDoubleComplex* psi_sh = reinterpret_cast<cuDoubleComplex*>(smem_raw);
 
-    // Gather psi into shared memory: psi_sh[ig + n * ndc]
+    // Gather psi into shared memory if it fits; otherwise use global memory
     int total_gather = ndc * ncol_this;
-    for (int idx = threadIdx.x; idx < total_gather; idx += blockDim.x) {
-        int ig = idx % ndc;
-        int n = idx / ndc;
-        psi_sh[idx] = psi[gpos_flat[goff + ig] + (col_start + n) * Nd];
+    bool use_smem = (smem_available > 0 && total_gather * (int)sizeof(cuDoubleComplex) <= smem_available);
+    if (use_smem) {
+        for (int idx = threadIdx.x; idx < total_gather; idx += blockDim.x) {
+            int ig = idx % ndc;
+            int n = idx / ndc;
+            psi_sh[idx] = psi[gpos_flat[goff + ig] + (col_start + n) * Nd];
+        }
+        __syncthreads();
     }
-    __syncthreads();
 
     // Compute alpha = dV * bloch * Chi^T * psi_gathered
     int total_out = np * ncol_this;
@@ -664,9 +668,15 @@ __global__ void fused_gather_chitpsi_z_kernel(
         // Chi is REAL, psi is COMPLEX => dot is complex
         cuDoubleComplex dot = make_cuDoubleComplex(0.0, 0.0);
         const double* chi_col = Chi_flat + coff + jp * ndc;
-        const cuDoubleComplex* psi_col = psi_sh + n * ndc;
-        for (int ig = 0; ig < ndc; ++ig)
-            dot = cuCadd(dot, rcmul(chi_col[ig], psi_col[ig]));
+        if (use_smem) {
+            const cuDoubleComplex* psi_col = psi_sh + n * ndc;
+            for (int ig = 0; ig < ndc; ++ig)
+                dot = cuCadd(dot, rcmul(chi_col[ig], psi_col[ig]));
+        } else {
+            // Global memory fallback for large ndc
+            for (int ig = 0; ig < ndc; ++ig)
+                dot = cuCadd(dot, rcmul(chi_col[ig], psi[gpos_flat[goff + ig] + (col_start + n) * Nd]));
+        }
 
         // Apply dV and Bloch phase: alpha += bloch * dV * dot
         cuDoubleComplex contrib = cuCmul(bloch, rcmul(dV, dot));
@@ -788,19 +798,32 @@ void nonlocal_projector_apply_z_gpu(
     if (smem_per_col * ncol > (size_t)max_smem)
         ncol_batch1 = std::max(1, (int)(max_smem / smem_per_col));
 
+    // Check if max_ndc fits in shared memory for at least 1 column
+    bool smem_fits = (smem_per_col <= (size_t)max_smem);
+
     for (int col_start = 0; col_start < ncol; col_start += ncol_batch1) {
         int cols_this = std::min(ncol_batch1, ncol - col_start);
-        size_t smem1 = (size_t)max_ndc * cols_this * sizeof(cuDoubleComplex);
 
-        if (smem1 > 48 * 1024) {
-            cudaFuncSetAttribute(fused_gather_chitpsi_z_kernel,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem1);
+        if (smem_fits) {
+            size_t smem1 = (size_t)max_ndc * cols_this * sizeof(cuDoubleComplex);
+            if (smem1 > 48 * 1024)
+                cudaFuncSetAttribute(fused_gather_chitpsi_z_kernel,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem1);
+
+            fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, smem1>>>(
+                d_psi, d_Chi_flat, d_gpos_flat,
+                d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+                d_bloch_fac, d_alpha, Nd, cols_this, ncol, col_start, dV, n_atoms,
+                (int)smem1);
+        } else {
+            // Large ndc: use no-smem path. Pass smem_available=16 (1 element) to avoid
+            // NVCC zero-smem issues, but kernel won't use smem (ndc > 1)
+            fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, 16>>>(
+                d_psi, d_Chi_flat, d_gpos_flat,
+                d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+                d_bloch_fac, d_alpha, Nd, 1, ncol, col_start, dV, n_atoms,
+                16);
         }
-
-        fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, smem1>>>(
-            d_psi, d_Chi_flat, d_gpos_flat,
-            d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-            d_bloch_fac, d_alpha, Nd, cols_this, ncol, col_start, dV, n_atoms);
         CUDA_CHECK(cudaGetLastError());
     }
 

@@ -30,7 +30,7 @@
     "xc": "GGA_PBE",
     "smearing": "fermi-dirac",
     "temperature": 1160.45,
-    "Nstates": 42,
+    "Nstates": 52,
     "spin": "noncollinear"
   },
   "scf": {

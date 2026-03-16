@@ -989,17 +989,18 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     const double* V_ud_re = d_Veff + 2 * Nd_d;
     const double* V_ud_im = d_Veff + 3 * Nd_d;
 
-    static int call_count = 0;
-    // For each band: apply local H + standard Vnl per spinor component
+    // Process all bands at once per spinor component using strided layout.
+    // psi layout: [up0(Nd)|dn0(Nd)|up1(Nd)|dn1(Nd)|...] with stride Nd_d_spinor per band
+    // We need to apply H to all up components and all dn components separately.
+    // Since halo_exchange_z_gpu/laplacian handles multi-column with stride Nd,
+    // we need to extract up/dn into contiguous arrays, apply H, then scatter back.
+    // For efficiency, process per-band but WITHOUT debug syncs.
     for (int n = 0; n < ncol; ++n) {
-        const cuDoubleComplex* psi_n = d_psi + n * Nd_d_spinor;
-        cuDoubleComplex* Hpsi_n = d_Hpsi + n * Nd_d_spinor;
-        const cuDoubleComplex* psi_up = psi_n;
-        const cuDoubleComplex* psi_dn = psi_n + Nd_d;
-        cuDoubleComplex* Hpsi_up = Hpsi_n;
-        cuDoubleComplex* Hpsi_dn = Hpsi_n + Nd_d;
+        const cuDoubleComplex* psi_up = d_psi + n * Nd_d_spinor;
+        const cuDoubleComplex* psi_dn = psi_up + Nd_d;
+        cuDoubleComplex* Hpsi_up = d_Hpsi + n * Nd_d_spinor;
+        cuDoubleComplex* Hpsi_dn = Hpsi_up + Nd_d;
 
-        // Kinetic + V_uu for spin-up
         gpu::hamiltonian_apply_local_z_gpu(
             psi_up, V_uu, Hpsi_up, d_x_ex,
             s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
@@ -1008,16 +1009,6 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
             s->kxLx_, s->kyLy_, s->kzLz_);
 
-        if (call_count == 0 && n == 0) {
-            cudaDeviceSynchronize();
-            double nrm = 0, nrmx = 0;
-            cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d, (double*)Hpsi_up, 1, &nrm);
-            cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d, (double*)psi_up, 1, &nrmx);
-            printf("  [H dbg] after up local: ||psi_up||=%.6e ||Hpsi_up||=%.6e ratio=%.2f\n",
-                   nrmx, nrm, nrm/std::max(nrmx, 1e-30));
-        }
-
-        // Kinetic + V_dd for spin-down
         gpu::hamiltonian_apply_local_z_gpu(
             psi_dn, V_dd, Hpsi_dn, d_x_ex,
             s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
@@ -1026,7 +1017,6 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
             s->kxLx_, s->kyLy_, s->kzLz_);
 
-        // Standard scalar-relativistic Vnl per spinor component
         if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
             gpu::nonlocal_projector_apply_z_gpu(
                 psi_up, Hpsi_up,
@@ -1054,29 +1044,8 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
         }
     }
 
-    if (call_count == 0) {
-        cudaDeviceSynchronize();
-        double nrm = 0;
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_Hpsi, 1, &nrm);
-        printf("  [H dbg] after Vnl: ||Hpsi||=%.6e\n", nrm);
-    }
-
     // Off-diagonal Veff: Hpsi_up += V_ud * psi_dn, Hpsi_dn += conj(V_ud) * psi_up
     gpu::spinor_offdiag_veff_gpu(d_Hpsi, d_psi, V_ud_re, V_ud_im, Nd_d, ncol);
-
-    if (call_count == 0) {
-        cudaDeviceSynchronize();
-        double nrm = 0;
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor, (double*)d_Hpsi, 1, &nrm);
-        printf("  [H dbg] after V_ud: ||Hpsi||=%.6e\n", nrm);
-    }
-
-    // Save Hpsi before SOC for comparison
-    double nrm_pre_soc = 0;
-    if (call_count < 3 && s->has_soc_) {
-        cudaDeviceSynchronize();
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor*ncol, (double*)d_Hpsi, 1, &nrm_pre_soc);
-    }
 
     // SOC terms (Term 1 + Term 2)
     if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
@@ -1094,110 +1063,6 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             Nd_d, ncol, s->dV_,
             s->gpu_soc_.n_influence_soc, s->gpu_soc_.total_soc_nproj,
             s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc);
-    }
-
-    if (call_count < 3) {
-        cudaDeviceSynchronize();
-        //printf("  [H dbg] call_count=%d ncol=%d\n", call_count, ncol);
-        double nrm_soc = 0, nrmx_full = 0;
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor*ncol, (double*)d_Hpsi, 1, &nrm_soc);
-        cublasDnrm2(gpu::GPUContext::instance().cublas, 2*Nd_d_spinor*ncol, (double*)d_psi, 1, &nrmx_full);
-        double soc_contribution = std::sqrt(std::max(0.0, nrm_soc*nrm_soc - nrm_pre_soc*nrm_pre_soc));
-        printf("  [H dbg] after SOC: ||Hpsi||=%.6e ||pre_soc||=%.6e ||SOC_only||=%.6e ||psi||=%.6e ratio=%.2f ncol=%d\n",
-               nrm_soc, nrm_pre_soc, soc_contribution, nrmx_full,
-               nrm_soc / std::max(nrmx_full, 1e-30), ncol);
-
-        // CPU SOC comparison (only first band, ncol=1)
-        if (ncol == 1 && s->has_soc_ && s->vnl_ptr_ && s->vnl_ptr_->has_soc()) {
-            using Complex = std::complex<double>;
-            int Nd_spinor = 2 * Nd_d;
-            std::vector<Complex> h_psi_cpu(Nd_spinor);
-            std::vector<Complex> h_Hpsi_cpu(Nd_spinor, Complex(0));
-            CUDA_CHECK(cudaMemcpy(h_psi_cpu.data(), d_psi, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
-
-            // Run CPU SOC only
-            s->vnl_ptr_->apply_soc_kpt(h_psi_cpu.data(), h_Hpsi_cpu.data(), 1, Nd_d, s->dV_);
-
-            double cpu_soc_nrm = 0;
-            for (int i = 0; i < Nd_spinor; i++)
-                cpu_soc_nrm += std::norm(h_Hpsi_cpu[i]);
-            cpu_soc_nrm = std::sqrt(cpu_soc_nrm);
-            printf("  [H dbg] CPU SOC-only ||SOC_cpu||=%.6e  GPU ||SOC_gpu||=%.6e  ratio=%.3f\n",
-                   cpu_soc_nrm, soc_contribution, soc_contribution / std::max(cpu_soc_nrm, 1e-30));
-        }
-
-        // === Hermiticity test: <x|H|y> should equal conj(<y|H|x>) ===
-        // Use band 0 as x, band 1 as y (both 2*Nd_d complex spinors)
-        if (ncol >= 2) {
-            auto& ctxh = gpu::GPUContext::instance();
-            // H|x> is already computed (d_Hpsi band 0)
-            // Need H|y> — apply H to band 1
-            cuDoubleComplex* d_y = const_cast<cuDoubleComplex*>(d_psi) + Nd_d_spinor;
-            cuDoubleComplex* d_Hy;
-            CUDA_CHECK(cudaMallocAsync(&d_Hy, Nd_d_spinor * sizeof(cuDoubleComplex), 0));
-            CUDA_CHECK(cudaMemset(d_Hy, 0, Nd_d_spinor * sizeof(cuDoubleComplex)));
-
-            // Apply H to y (band 1) — reuse same Veff, single band
-            // Need temporary storage to avoid clobbering d_Hpsi
-            for (int spinor = 0; spinor < 2; spinor++) {
-                gpu::hamiltonian_apply_local_z_gpu(
-                    d_y + spinor * Nd_d,
-                    (spinor == 0) ? (d_Veff) : (d_Veff + Nd_d),
-                    d_Hy + spinor * Nd_d,
-                    d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, 0.0,
-                    s->is_orth_, true, true, true, s->diag_coeff_ham_,
-                    s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
-                    s->kxLx_, s->kyLy_, s->kzLz_);
-                if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
-                    gpu::nonlocal_projector_apply_z_gpu(
-                        d_y + spinor * Nd_d, d_Hy + spinor * Nd_d,
-                        s->gpu_vnl_.d_Chi_flat, s->gpu_vnl_.d_gpos_flat,
-                        s->gpu_vnl_.d_gpos_offsets, s->gpu_vnl_.d_chi_offsets,
-                        s->gpu_vnl_.d_ndc_arr, s->gpu_vnl_.d_nproj_arr,
-                        s->gpu_vnl_.d_IP_displ, s->gpu_vnl_.d_Gamma,
-                        static_cast<cuDoubleComplex*>(s->d_alpha_z_),
-                        s->d_bloch_fac_, Nd_d, 1, s->dV_,
-                        s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
-                        s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
-                }
-            }
-            gpu::spinor_offdiag_veff_gpu(d_Hy, d_y,
-                d_Veff + 2*Nd_d, d_Veff + 3*Nd_d, Nd_d, 1);
-            if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
-                gpu::soc_apply_z_gpu(d_y, d_Hy,
-                    s->gpu_soc_.d_Chi_soc_flat, s->gpu_vnl_.d_gpos_flat,
-                    s->gpu_soc_.d_gpos_offsets_soc, s->gpu_soc_.d_chi_soc_offsets,
-                    s->gpu_soc_.d_ndc_arr_soc, s->gpu_soc_.d_nproj_soc_arr,
-                    s->gpu_soc_.d_IP_displ_soc, s->gpu_soc_.d_Gamma_soc,
-                    s->gpu_soc_.d_proj_l, s->gpu_soc_.d_proj_m,
-                    s->d_bloch_fac_,
-                    static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_up),
-                    static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_dn),
-                    Nd_d, 1, s->dV_,
-                    s->gpu_soc_.n_influence_soc, s->gpu_soc_.total_soc_nproj,
-                    s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc);
-            }
-            cudaDeviceSynchronize();
-
-            // <x|Hy> = x^H * Hy
-            cuDoubleComplex xHy;
-            cublasZdotc(ctxh.cublas, Nd_d_spinor,
-                        d_psi, 1,   // x = band 0
-                        d_Hy, 1,    // Hy
-                        &xHy);
-            // <y|Hx> = y^H * Hx
-            cuDoubleComplex yHx;
-            cublasZdotc(ctxh.cublas, Nd_d_spinor,
-                        d_y, 1,     // y = band 1
-                        d_Hpsi, 1,  // Hx = band 0 of Hpsi
-                        &yHx);
-
-            printf("  [Hermit] <x|H|y>=(%.6e,%.6e)  <y|H|x>=(%.6e,%.6e)  diff=(%.3e,%.3e)\n",
-                   xHy.x, xHy.y, yHx.x, yHx.y,
-                   xHy.x - yHx.x, xHy.y + yHx.y);  // for Hermitian: xHy = conj(yHx), so diff.re=0, xHy.im+yHx.im=0
-            cudaFreeAsync(d_Hy, 0);
-        }
-        call_count++;
     }
 }
 
@@ -2109,29 +1974,14 @@ double GPUSCFRunner::run(
         }
         cuDoubleComplex* d_test = d_psi_spinor;
         cuDoubleComplex* d_Htest = d_Hpsi_spinor;
-        // Power iteration to estimate eigmax
-        double eigmax_est = eigval_max_s[0];
-        // 20 power iterations on first band
-        for (int iter = 0; iter < 20; iter++) {
-            hamiltonian_apply_spinor_z_cb(d_test, d_Veff_spinor, d_Htest, d_x_ex_spinor, 1);
-            cudaDeviceSynchronize();
-            double nrmH = 0, nrmX = 0;
-            cublasDnrm2(ctx.cublas, 2 * Nd_spinor, (double*)d_Htest, 1, &nrmH);
-            cublasDnrm2(ctx.cublas, 2 * Nd_spinor, (double*)d_test, 1, &nrmX);
-            double ratio = (nrmX > 1e-30) ? nrmH / nrmX : eigmax_est;
-            if (ratio > eigmax_est) eigmax_est = ratio;
-            // Normalize and iterate: x = H*x / ||H*x||
-            double scale = 1.0 / std::max(nrmH, 1e-30);
-            cublasZdscal(ctx.cublas, Nd_spinor, &scale, d_Htest, 1);
-            CUDA_CHECK(cudaMemcpy(d_test, d_Htest,
-                        (size_t)Nd_spinor * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
-        }
-        // Use the power-iteration estimate with generous margin.
-        // The true eigmax may be much larger than the power-iteration gives
-        // after only 20 steps. Use 2x as minimum safety.
-        double eigmax_safe = std::max(eigmax_est * 1.5, eigval_max_s[0] * 3.0);
-        printf("SOC eigmax: Lanczos=%.2f, power-iter(20)=%.2f, using=%.2f\n",
-               eigval_max_s[0], eigmax_est, eigmax_safe);
+        // For SOC, the Lanczos may significantly underestimate eigmax.
+        // Use a safe bound: compute from stencil coefficients + SOC Gamma.
+        // The kinetic eigmax ~ |diag_coeff_ham_| * 2, SOC adds Gamma_soc * ndc * dV
+        double kinetic_bound = std::abs(diag_coeff_ham_) * 2.0;
+        double soc_bound = 0.5 * 5.0 * 50.0;  // conservative: 0.5 * max_Gamma * max_factor
+        double eigmax_safe = std::max(kinetic_bound + soc_bound, eigval_max_s[0]) * 1.2;
+        printf("SOC eigmax: Lanczos=%.2f, kinetic=%.2f, using=%.2f\n",
+               eigval_max_s[0], kinetic_bound, eigmax_safe);
         eigval_max_s[0] = eigmax_safe;
     }
     double lambda_cutoff = 0.5 * (eigval_min_s[0] + eigval_max_s[0]);
@@ -2170,6 +2020,91 @@ double GPUSCFRunner::run(
     // Set static callback state
     // ============================================================
     s_instance_ = this;
+
+    // ============================================================
+    // H*psi validation for SOC spinor
+    // ============================================================
+    if (has_soc_ && d_psi_spinor && d_Hpsi_spinor && d_Veff_spinor) {
+        using Complex = std::complex<double>;
+        int Nd_spinor = 2 * Nd_;
+        Vec3 kpt0v = kpoints_->kpts_cart()[kpt_start_];
+        Vec3 cell_len_v = grid.lattice().lengths();
+        kxLx_ = kpt0v.x * cell_len_v.x;
+        kyLy_ = kpt0v.y * cell_len_v.y;
+        kzLz_ = kpt0v.z * cell_len_v.z;
+        setup_bloch_factors(nloc_influence, crystal, kpt0v);
+
+        // Upload random spinor psi
+        wfn.randomize_kpt(0, 0, 99);
+        {
+            size_t bytes = 2 * (size_t)Nd_spinor * sizeof(double);
+            std::vector<double> h_psi(2 * Nd_spinor);
+            auto* pc = wfn.psi_kpt(0, 0).col(0);
+            std::memcpy(h_psi.data(), pc, bytes);
+            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi.data(), bytes, cudaMemcpyHostToDevice));
+        }
+
+        // === Staged GPU vs CPU comparison ===
+        const double* V_uu = d_Veff_spinor;
+        const double* V_dd = d_Veff_spinor + Nd_;
+
+        // Stage 1: LOCAL only (kinetic + Veff per spinor)
+        {
+            cuDoubleComplex* psi_up = d_psi_spinor;
+            cuDoubleComplex* psi_dn = d_psi_spinor + Nd_;
+            cuDoubleComplex* Hpsi_up = d_Hpsi_spinor;
+            cuDoubleComplex* Hpsi_dn = d_Hpsi_spinor + Nd_;
+            gpu::hamiltonian_apply_local_z_gpu(psi_up, V_uu, Hpsi_up, d_x_ex_spinor,
+                nx_, ny_, nz_, FDn_, 1, 0.0, is_orth_, true, true, true,
+                diag_coeff_ham_, has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_,
+                kxLx_, kyLy_, kzLz_);
+            gpu::hamiltonian_apply_local_z_gpu(psi_dn, V_dd, Hpsi_dn, d_x_ex_spinor,
+                nx_, ny_, nz_, FDn_, 1, 0.0, is_orth_, true, true, true,
+                diag_coeff_ham_, has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_,
+                kxLx_, kyLy_, kzLz_);
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+        std::vector<Complex> gpu_local(Nd_spinor);
+        CUDA_CHECK(cudaMemcpy(gpu_local.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
+
+        // CPU local only
+        std::vector<double> h_Veff_sp(4 * Nd_);
+        CUDA_CHECK(cudaMemcpy(h_Veff_sp.data(), d_Veff_spinor, 4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+        const Complex* psi_ptr = reinterpret_cast<const Complex*>(wfn.psi_kpt(0, 0).col(0));
+        std::vector<Complex> cpu_local(Nd_spinor, Complex(0));
+        // Use CPU Hamiltonian for local only (apply_local_kpt per spinor)
+        hamiltonian.apply_local_kpt(psi_ptr, h_Veff_sp.data(), cpu_local.data(), 1, kpt0v, cell_len_v);
+        hamiltonian.apply_local_kpt(psi_ptr + Nd_, h_Veff_sp.data() + Nd_, cpu_local.data() + Nd_, 1, kpt0v, cell_len_v);
+
+        double max_err_local = 0, norm_local = 0;
+        for (int i = 0; i < Nd_spinor; i++) {
+            max_err_local = std::max(max_err_local, std::abs(gpu_local[i] - cpu_local[i]));
+            norm_local += std::norm(cpu_local[i]);
+        }
+        double rel_err_local = max_err_local / std::sqrt(norm_local / Nd_spinor);
+        printf("SOC H*psi LOCAL: max_err=%.3e, rel_err=%.3e %s\n",
+               max_err_local, rel_err_local, rel_err_local < 1e-10 ? "[PASS]" : "[FAIL]");
+
+        // Stage 2: FULL H (local + Vnl + V_ud + SOC)
+        hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        std::vector<Complex> gpu_Hpsi(Nd_spinor);
+        CUDA_CHECK(cudaMemcpy(gpu_Hpsi.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
+
+        std::vector<Complex> cpu_Hpsi(Nd_spinor, Complex(0));
+        const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
+        hamiltonian.apply_spinor_kpt(psi_ptr, h_Veff_sp.data(), cpu_Hpsi.data(), 1, Nd_,
+                                      kpt0v, cell_len_v);
+
+        double max_err = 0, norm_cpu = 0;
+        for (int i = 0; i < Nd_spinor; i++) {
+            max_err = std::max(max_err, std::abs(gpu_Hpsi[i] - cpu_Hpsi[i]));
+            norm_cpu += std::norm(cpu_Hpsi[i]);
+        }
+        double rel_err = max_err / std::sqrt(norm_cpu / Nd_spinor);
+        printf("SOC H*psi FULL:  max_err=%.3e, rel_err=%.3e %s\n",
+               max_err, rel_err, rel_err < 1e-10 ? "[PASS]" : "[FAIL]");
+    }
 
     // ============================================================
     // GPU SCF Loop
