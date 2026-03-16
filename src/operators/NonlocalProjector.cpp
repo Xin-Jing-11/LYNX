@@ -585,8 +585,6 @@ void NonlocalProjector::apply_soc_kpt(const Complex* psi, Complex* Hpsi, int nco
                     }
 
                     // Term 2: L+ S- (raises m, acts on spin-down -> spin-up)
-                    // Hpsi_up += 0.5 * sqrt(l(l+1)-m(m+1)) * gamma_soc * alpha_dn[m+1] * Chi_soc[m]
-                    // Need projector column for (l, m+1, p)
                     if (m + 1 <= l) {
                         double ladder = std::sqrt(static_cast<double>(l*(l+1) - m*(m+1)));
                         // Find the column index for (l, m+1, p)
@@ -599,7 +597,6 @@ void NonlocalProjector::apply_soc_kpt(const Complex* psi, Complex* Hpsi, int nco
                     }
 
                     // Term 2: L- S+ (lowers m, acts on spin-up -> spin-down)
-                    // Hpsi_dn += 0.5 * sqrt(l(l+1)-m(m-1)) * gamma_soc * alpha_up[m-1] * Chi_soc[m]
                     if (m - 1 >= -l) {
                         double ladder = std::sqrt(static_cast<double>(l*(l+1) - m*(m-1)));
                         int jp_shifted = jp - 1;  // column for (l, m-1, p)
