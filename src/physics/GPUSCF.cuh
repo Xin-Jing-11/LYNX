@@ -82,6 +82,19 @@ public:
         double* stress_nl,            // [6] nonlocal stress (Voigt)
         double* energy_nl);           // scalar nonlocal energy
 
+    // Compute SOC nonlocal forces on GPU.
+    // Psi is uploaded from wfn (spinor complex), SOC data already on device.
+    void compute_soc_force(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const Domain& domain,
+        const FDGrid& grid,
+        const std::vector<double>& kpt_weights,
+        const KPoints* kpoints,
+        int kpt_start,
+        double* f_soc);  // [3 * n_atoms]
+
     const EnergyComponents& energy() const { return energy_; }
     bool converged() const { return converged_; }
     double fermi_energy() const { return Ef_; }
