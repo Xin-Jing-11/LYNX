@@ -1,0 +1,40 @@
+{
+  "lattice": {
+    "vectors": [
+      [0.0, 3.85, 3.85],
+      [3.85, 0.0, 3.85],
+      [3.85, 3.85, 0.0]
+    ],
+    "cell_type": "nonorthogonal"
+  },
+  "grid": {
+    "Nx": 15, "Ny": 15, "Nz": 15,
+    "fd_order": 12,
+    "boundary_conditions": ["periodic", "periodic", "periodic"]
+  },
+  "atoms": [
+    {
+      "element": "Au",
+      "fractional": true,
+      "coordinates": [[0.0, 0.0, 0.0]]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "smearing": "fermi-dirac",
+    "spin": "noncollinear",
+    "Nstates": 30
+  },
+  "scf": {
+    "max_iter": 100,
+    "scf_tol": 1e-5,
+    "mixing_param": 0.3
+  },
+  "kpoints": {
+    "grid": [3, 3, 3],
+    "shift": [0.5, 0.5, 0.5]
+  },
+  "output": {
+    "print_forces": true
+  }
+}

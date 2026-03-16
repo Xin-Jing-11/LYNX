@@ -7,3 +7,9 @@
 [submodule "external/libxc"]
 	path = external/libxc
 	url = https://gitlab.com/libxc/libxc.git
+[submodule "psps/ONCVPSP-PBE-FR-PDv0.4"]
+	path = psps/ONCVPSP-PBE-FR-PDv0.4
+	url = https://github.com/PseudoDojo/ONCVPSP-PBE-FR-PDv0.4.git
+[submodule "psps/ONCVPSP-LDA-FR-PDv0.4"]
+	path = psps/ONCVPSP-LDA-FR-PDv0.4
+	url = https://github.com/PseudoDojo/ONCVPSP-LDA-FR-PDv0.4.git

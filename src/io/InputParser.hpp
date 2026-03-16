@@ -78,6 +78,12 @@ class InputParser {
 public:
     static SystemConfig parse(const std::string& json_file);
     static void validate(const SystemConfig& config);
+
+    // Auto-resolve missing pseudo_file paths from PseudoDojo submodules.
+    // Uses XC type and spin type to select SR or FR pseudopotentials.
+    // psps_root: path to the psps/ directory (default: "psps" relative to executable).
+    static void resolve_pseudopotentials(SystemConfig& config,
+                                          const std::string& psps_root = "psps");
 };
 
 } // namespace lynx

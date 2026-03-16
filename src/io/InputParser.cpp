@@ -3,6 +3,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
+#include <map>
 
 using json = nlohmann::json;
 
@@ -211,6 +212,83 @@ SystemConfig InputParser::parse(const std::string& json_file) {
     }
 
     return config;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-resolve pseudopotential paths from PseudoDojo submodules.
+//
+// Directory structure:
+//   psps/ONCVPSP-PBE-PDv0.4/standard.txt       (SR, GGA_PBE)
+//   psps/ONCVPSP-LDA-PDv0.4/standard.txt       (SR, LDA)
+//   psps/ONCVPSP-PBE-FR-PDv0.4/standard.txt    (FR, GGA_PBE, SOC)
+//   psps/ONCVPSP-LDA-FR-PDv0.4/standard.txt    (FR, LDA, SOC)
+//
+// standard.txt contains one line per element: "Element/Element[-suffix][_r].psp8"
+// ---------------------------------------------------------------------------
+void InputParser::resolve_pseudopotentials(SystemConfig& config,
+                                            const std::string& psps_root) {
+    // Check if any atom type needs auto-resolution
+    bool need_resolve = false;
+    for (const auto& at : config.atom_types) {
+        if (at.pseudo_file.empty()) { need_resolve = true; break; }
+    }
+    if (!need_resolve) return;
+
+    // Determine which PSP table to use based on XC and spin type
+    bool is_soc = (config.spin_type == SpinType::NonCollinear);
+    bool is_lda = (config.xc == XCType::LDA_PZ || config.xc == XCType::LDA_PW);
+
+    std::string table_dir;
+    if (is_lda) {
+        table_dir = psps_root + (is_soc ? "/ONCVPSP-LDA-FR-PDv0.4" : "/ONCVPSP-LDA-PDv0.4");
+    } else {
+        // GGA (PBE, PBEsol, RPBE) — use PBE table
+        table_dir = psps_root + (is_soc ? "/ONCVPSP-PBE-FR-PDv0.4" : "/ONCVPSP-PBE-PDv0.4");
+    }
+
+    // Read standard.txt mapping: each line is "Element/filename.psp8"
+    std::string standard_file = table_dir + "/standard.txt";
+    std::ifstream ifs(standard_file);
+    if (!ifs.is_open()) {
+        // Try with ../ prefix (running from build/ directory)
+        standard_file = "../" + table_dir + "/standard.txt";
+        table_dir = "../" + table_dir;
+        ifs.open(standard_file);
+    }
+    if (!ifs.is_open()) {
+        throw std::runtime_error(
+            "Cannot find pseudopotential table: " + standard_file +
+            "\nRun 'git submodule update --init' to fetch PseudoDojo pseudopotentials.");
+    }
+
+    // Parse standard.txt into element -> relative_path map
+    std::map<std::string, std::string> elem_to_psp;
+    std::string line;
+    while (std::getline(ifs, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        // Line format: "Si/Si_r.psp8" or "Au/Au-sp.psp8"
+        // Extract element name from directory part
+        auto slash = line.find('/');
+        if (slash != std::string::npos) {
+            std::string elem = line.substr(0, slash);
+            elem_to_psp[elem] = table_dir + "/" + line;
+        }
+    }
+
+    // Resolve each atom type that has no pseudo_file
+    for (auto& at : config.atom_types) {
+        if (!at.pseudo_file.empty()) continue;
+
+        auto it = elem_to_psp.find(at.element);
+        if (it != elem_to_psp.end()) {
+            at.pseudo_file = it->second;
+        } else {
+            throw std::runtime_error(
+                "No pseudopotential found for element '" + at.element +
+                "' in " + standard_file +
+                (is_soc ? " (FR/SOC table)" : " (SR table)"));
+        }
+    }
 }
 
 void InputParser::validate(const SystemConfig& config) {

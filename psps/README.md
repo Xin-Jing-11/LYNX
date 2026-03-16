@@ -12,38 +12,58 @@ git submodule update --init
 
 This populates:
 
-| Directory   | Functional | Source |
-|-------------|-----------|--------|
-| `psps/ONCVPSP-PBE-PDv0.4/` | GGA-PBE   | [ONCVPSP-PBE-PDv0.4](https://github.com/PseudoDojo/ONCVPSP-PBE-PDv0.4) |
-| `psps/ONCVPSP-LDA-PDv0.4/` | LDA       | [ONCVPSP-LDA-PDv0.4](https://github.com/PseudoDojo/ONCVPSP-LDA-PDv0.4) |
+| Directory | Functional | Relativistic | Use case |
+|-----------|-----------|-------------|----------|
+| `psps/ONCVPSP-PBE-PDv0.4/` | GGA-PBE | Scalar (SR) | Standard calculations |
+| `psps/ONCVPSP-LDA-PDv0.4/` | LDA | Scalar (SR) | LDA calculations |
+| `psps/ONCVPSP-PBE-FR-PDv0.4/` | GGA-PBE | Fully relativistic (FR) | SOC calculations |
+| `psps/ONCVPSP-LDA-FR-PDv0.4/` | LDA | Fully relativistic (FR) | SOC + LDA |
+
+## Auto-selection
+
+When `pseudo_file` is omitted from the input JSON, LYNX automatically selects the correct pseudopotential based on the XC functional and spin type:
+
+```json
+{
+  "atoms": [
+    {
+      "element": "Au",
+      "fractional": true,
+      "coordinates": [[0.0, 0.0, 0.0]]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "spin": "noncollinear"
+  }
+}
+```
+
+This auto-selects `psps/ONCVPSP-PBE-FR-PDv0.4/Au/Au-sp_r.psp8` (FR for SOC).
+
+For non-SOC: `"spin": "none"` selects `psps/ONCVPSP-PBE-PDv0.4/Au/Au-sp.psp8` (SR).
 
 ## File layout
 
 Each element has a subdirectory containing `.psp8` files:
 
 ```
-psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8        # standard PBE pseudopotential for Si
-psps/ONCVPSP-PBE-PDv0.4/Si/Si-sp.psp8     # with semicore states
-psps/ONCVPSP-LDA-PDv0.4/Si/Si.psp8        # LDA version
+psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8         # SR PBE for Si
+psps/ONCVPSP-PBE-FR-PDv0.4/Si/Si_r.psp8    # FR PBE for Si (SOC)
+psps/ONCVPSP-LDA-PDv0.4/Si/Si.psp8         # SR LDA for Si
+psps/ONCVPSP-LDA-FR-PDv0.4/Si/Si_r.psp8    # FR LDA for Si (SOC)
 ```
 
-## Usage
+FR files use the `_r` suffix convention (e.g., `Si_r.psp8`, `Au-sp_r.psp8`).
 
-Point LYNX to the appropriate `.psp8` file:
+The recommended pseudopotential for each element is listed in `standard.txt` within each table directory.
+
+## Manual override
+
+You can always specify an explicit path:
 
 ```json
-"pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8"
-```
-
-Or in Python:
-
-```python
-from lynx.config import DFTConfig
-
-config = DFTConfig(
-    ...,
-    pseudo_files={'Si': 'psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8'},
-)
+"pseudo_file": "/path/to/custom/Pt_fr.psp8"
 ```
 
 ## Reference

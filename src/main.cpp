@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
 
         // ===== Parse input =====
         auto config = lynx::InputParser::parse(input_file);
+        lynx::InputParser::resolve_pseudopotentials(config);
         lynx::InputParser::validate(config);
 
         // ===== Create lattice and grid =====
