@@ -219,8 +219,14 @@ void soc_scatter_z_kernel(
                 for (int ig = threadIdx.x; ig < ndc; ig += blockDim.x) {
                     int grid_idx = gpos_flat[gpos_off + ig];
                     double chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
-                    atomicAddComplex(&Hpsi_up[grid_idx], cmul_rc(bc_cu, chi_val));
-                    atomicAddComplex(&Hpsi_dn[grid_idx], cmul_rc(bc_cd, chi_val));
+                    cuDoubleComplex val_up = cmul_rc(bc_cu, chi_val);
+                    cuDoubleComplex val_dn = cmul_rc(bc_cd, chi_val);
+                    if (grid_idx == 6608 && col == 0 && fabs(val_dn.x) > 0.01) {
+                        printf("  [scatter T1] iat=%d jp=%d m=%d ig=%d gidx=%d chi=%.4e bc_cd=(%.4e,%.4e) val_dn=(%.4e,%.4e)\n",
+                               iat, jp, m, ig, grid_idx, chi_val, bc_cd.x, bc_cd.y, val_dn.x, val_dn.y);
+                    }
+                    atomicAddComplex(&Hpsi_up[grid_idx], val_up);
+                    atomicAddComplex(&Hpsi_dn[grid_idx], val_dn);
                 }
             }
 

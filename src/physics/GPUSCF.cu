@@ -2429,6 +2429,7 @@ double GPUSCFRunner::run(
             std::vector<Complex> cpu_soc_only(Nd_spinor);
             for (int i = 0; i < Nd_spinor; i++)
                 cpu_soc_only[i] = cpu_full[i] - cpu_localvnl[i];
+            // Will compare with gpu_soc_direct after Stage 3
 
             double max_soc = 0, norm_soc = 0;
             int worst_i = 0;
