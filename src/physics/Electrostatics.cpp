@@ -194,12 +194,14 @@ void Electrostatics::compute_pseudocharge(
             int k_s = inf.zs[iat], k_e = inf.ze[iat];
 
             // Extended grid dimensions for Laplacian computation
+            // Non-orthogonal cells: mixed derivatives need 2*FDn halo
             int nx_loc = i_e - i_s + 1;
             int ny_loc = j_e - j_s + 1;
             int nz_loc = k_e - k_s + 1;
-            int nxp = nx_loc + 2 * FDn;
-            int nyp = ny_loc + 2 * FDn;
-            int nzp = nz_loc + 2 * FDn;
+            int halo = is_orth ? FDn : 2 * FDn;
+            int nxp = nx_loc + 2 * halo;
+            int nyp = ny_loc + 2 * halo;
+            int nzp = nz_loc + 2 * halo;
             int ndp = nxp * nyp * nzp;
             if (iat % 10 == 0) {
                 std::printf("    img %d/%d: box=[%d:%d,%d:%d,%d:%d] ext=%dx%dx%d=%d\n",
@@ -212,13 +214,13 @@ void Electrostatics::compute_pseudocharge(
             std::vector<double> VJ_ref(ndp, 0.0);
 
             for (int kk = 0; kk < nzp; ++kk) {
-                int gk = (k_s - FDn + kk);
+                int gk = (k_s - halo + kk);
                 double rz = gk * dz - pos.z;
                 for (int jj = 0; jj < nyp; ++jj) {
-                    int gj = (j_s - FDn + jj);
+                    int gj = (j_s - halo + jj);
                     double ry = gj * dy - pos.y;
                     for (int ii = 0; ii < nxp; ++ii) {
-                        int gi = (i_s - FDn + ii);
+                        int gi = (i_s - halo + ii);
                         double rx = gi * dx - pos.x;
                         double r = compute_distance(rx, ry, rz, is_orth, lattice);
 

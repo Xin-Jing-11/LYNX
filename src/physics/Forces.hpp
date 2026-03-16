@@ -98,6 +98,7 @@ private:
         int kpt_start = 0,
         int band_start = 0);
 
+public:
     // SOC nonlocal force from spin-orbit coupling projectors
     void compute_nonlocal_soc(
         const Wavefunction& wfn,

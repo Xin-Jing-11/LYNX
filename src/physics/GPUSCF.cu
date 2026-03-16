@@ -2258,10 +2258,36 @@ double GPUSCFRunner::run(
             compute_soc_force(wfn, crystal, nloc_influence, domain, grid,
                               kpt_weights_in, kpoints_, kpt_start_, gpu_f_soc.data());
 
-            printf("SOC force (GPU, random psi):\n");
+            // --- CPU SOC force (call compute_nonlocal_soc directly) ---
+            std::vector<double> cpu_f_soc(3 * n_phys, 0.0);
+            {
+                const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
+                Gradient grad_tmp(stencil, domain);
+                MPIComm comm_self(MPI_COMM_SELF);
+                Forces forces_cpu;
+                forces_cpu.compute_nonlocal_soc(wfn, crystal, nloc_influence, *vnl,
+                                                 grad_tmp, halo, domain, grid,
+                                                 kpt_weights_in, comm_self, comm_self,
+                                                 kpoints_, kpt_start_, 0);
+                const auto& cf = forces_cpu.soc_forces();
+                for (int i = 0; i < 3 * n_phys; i++)
+                    cpu_f_soc[i] = cf[i];
+            }
+
+            // Compare
+            double max_f_err = 0, f_norm = 0;
+            for (int i = 0; i < 3 * n_phys; i++) {
+                max_f_err = std::max(max_f_err, std::abs(gpu_f_soc[i] - cpu_f_soc[i]));
+                f_norm += cpu_f_soc[i] * cpu_f_soc[i];
+            }
+            f_norm = std::sqrt(f_norm);
+            double f_rel = (f_norm > 1e-30) ? max_f_err / f_norm : max_f_err;
+            printf("SOC force validation: max_err=%.3e, rel_err=%.3e %s\n",
+                   max_f_err, f_rel, f_rel < 1e-8 ? "[PASS]" : "[FAIL]");
             for (int ia = 0; ia < n_phys; ia++)
-                printf("  atom %d: [%.6e, %.6e, %.6e]\n", ia,
-                       gpu_f_soc[ia*3], gpu_f_soc[ia*3+1], gpu_f_soc[ia*3+2]);
+                printf("  atom %d: GPU=[%.6e, %.6e, %.6e] CPU=[%.6e, %.6e, %.6e]\n", ia,
+                       gpu_f_soc[ia*3], gpu_f_soc[ia*3+1], gpu_f_soc[ia*3+2],
+                       cpu_f_soc[ia*3], cpu_f_soc[ia*3+1], cpu_f_soc[ia*3+2]);
 
             // --- GPU SOC stress ---
             std::array<double, 6> gpu_stress_soc = {};
