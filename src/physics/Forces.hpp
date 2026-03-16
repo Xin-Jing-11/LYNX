@@ -55,12 +55,14 @@ public:
 
     const std::vector<double>& local_forces() const { return f_local_; }
     const std::vector<double>& nonlocal_forces() const { return f_nloc_; }
+    const std::vector<double>& soc_forces() const { return f_soc_; }
     const std::vector<double>& xc_forces() const { return f_xc_; }
     const std::vector<double>& total_forces() const { return f_total_; }
 
 private:
     std::vector<double> f_local_;
     std::vector<double> f_nloc_;
+    std::vector<double> f_soc_;
     std::vector<double> f_xc_;
     std::vector<double> f_total_;
 
@@ -92,6 +94,23 @@ private:
         const MPIComm& bandcomm,
         const MPIComm& kptcomm,
         const MPIComm& spincomm,
+        const KPoints* kpoints = nullptr,
+        int kpt_start = 0,
+        int band_start = 0);
+
+    // SOC nonlocal force from spin-orbit coupling projectors
+    void compute_nonlocal_soc(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const Gradient& gradient,
+        const HaloExchange& halo,
+        const Domain& domain,
+        const FDGrid& grid,
+        const std::vector<double>& kpt_weights,
+        const MPIComm& bandcomm,
+        const MPIComm& kptcomm,
         const KPoints* kpoints = nullptr,
         int kpt_start = 0,
         int band_start = 0);

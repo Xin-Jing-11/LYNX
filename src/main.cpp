@@ -497,6 +497,14 @@ int main(int argc, char** argv) {
                     std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
                                 i + 1, fn[3*i], fn[3*i+1], fn[3*i+2]);
                 }
+                if (is_soc) {
+                    std::printf("\nSOC forces (Ha/Bohr):\n");
+                    const auto& fs = forces.soc_forces();
+                    for (int i = 0; i < Natom; ++i) {
+                        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                                    i + 1, fs[3*i], fs[3*i+1], fs[3*i+2]);
+                    }
+                }
                 if (has_nlcc) {
                     std::printf("\nNLCC XC forces (Ha/Bohr):\n");
                     const auto& fxc = forces.xc_forces();

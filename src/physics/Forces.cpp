@@ -42,6 +42,7 @@ std::vector<double> Forces::compute(
     int n_atom = crystal.n_atom_total();
     f_local_.assign(3 * n_atom, 0.0);
     f_nloc_.assign(3 * n_atom, 0.0);
+    f_soc_.assign(3 * n_atom, 0.0);
     f_xc_.assign(3 * n_atom, 0.0);
     f_total_.assign(3 * n_atom, 0.0);
 
@@ -53,9 +54,15 @@ std::vector<double> Forces::compute(
     compute_nonlocal(wfn, crystal, nloc_influence, vnl, gradient, halo,
                      domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
 
-    // Sum local + nonlocal
+    // SOC nonlocal force from spin-orbit coupling projectors
+    if (vnl.has_soc() && wfn.Nspinor() == 2) {
+        compute_nonlocal_soc(wfn, crystal, nloc_influence, vnl, gradient, halo,
+                             domain, grid, kpt_weights, bandcomm, kptcomm, kpoints, kpt_start, band_start);
+    }
+
+    // Sum local + nonlocal + SOC
     for (int i = 0; i < 3 * n_atom; ++i) {
-        f_total_[i] = f_local_[i] + f_nloc_[i];
+        f_total_[i] = f_local_[i] + f_nloc_[i] + f_soc_[i];
     }
 
     // NLCC XC force correction
@@ -90,6 +97,10 @@ std::vector<double> Forces::compute(
             f_nloc_[ia*3+0] = uvec_inv(0,0)*fx + uvec_inv(0,1)*fy + uvec_inv(0,2)*fz;
             f_nloc_[ia*3+1] = uvec_inv(1,0)*fx + uvec_inv(1,1)*fy + uvec_inv(1,2)*fz;
             f_nloc_[ia*3+2] = uvec_inv(2,0)*fx + uvec_inv(2,1)*fy + uvec_inv(2,2)*fz;
+            fx = f_soc_[ia*3+0]; fy = f_soc_[ia*3+1]; fz = f_soc_[ia*3+2];
+            f_soc_[ia*3+0] = uvec_inv(0,0)*fx + uvec_inv(0,1)*fy + uvec_inv(0,2)*fz;
+            f_soc_[ia*3+1] = uvec_inv(1,0)*fx + uvec_inv(1,1)*fy + uvec_inv(1,2)*fz;
+            f_soc_[ia*3+2] = uvec_inv(2,0)*fx + uvec_inv(2,1)*fy + uvec_inv(2,2)*fz;
             fx = f_xc_[ia*3+0]; fy = f_xc_[ia*3+1]; fz = f_xc_[ia*3+2];
             f_xc_[ia*3+0] = uvec_inv(0,0)*fx + uvec_inv(0,1)*fy + uvec_inv(0,2)*fz;
             f_xc_[ia*3+1] = uvec_inv(1,0)*fx + uvec_inv(1,1)*fy + uvec_inv(1,2)*fz;
@@ -623,6 +634,256 @@ void Forces::compute_nonlocal(
         MPI_Allreduce(MPI_IN_PLACE, f_nloc_.data(), 3 * n_atom,
                       MPI_DOUBLE, MPI_SUM, spincomm.comm());
     }
+}
+
+// ---------------------------------------------------------------------------
+// SOC nonlocal force from spin-orbit coupling projectors.
+//
+// Mirrors compute_nonlocal's k-point path but uses Chi_soc, Gamma_soc,
+// and the SOC coupling terms (Term 1: on-diagonal Lz·Sz, Term 2: ladder
+// operators L+S-/L-S+) matching the apply_soc_kpt structure.
+// ---------------------------------------------------------------------------
+void Forces::compute_nonlocal_soc(
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const Gradient& gradient,
+    const HaloExchange& halo,
+    const Domain& domain,
+    const FDGrid& grid,
+    const std::vector<double>& kpt_weights,
+    const MPIComm& bandcomm,
+    const MPIComm& kptcomm,
+    const KPoints* kpoints,
+    int kpt_start,
+    int band_start) {
+
+    int n_atom = crystal.n_atom_total();
+    int Nkpts = wfn.Nkpts();
+    int Nband = wfn.Nband();
+    int Nd_d = domain.Nd_d();
+    double dV = grid.dV();
+    int ntypes = crystal.n_types();
+    int FDn = gradient.stencil().FDn();
+
+    // SOC spinor: both spin components present, so occfac = 1.0; spn_fac = occfac * 2.0 = 2.0
+    double spn_fac = 2.0;
+
+    f_soc_.assign(3 * n_atom, 0.0);
+
+    // Extended grid dimensions for gradient
+    int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
+    int nx_ex = nx + 2 * FDn;
+    int ny_ex = ny + 2 * FDn;
+    int nz_ex = nz + 2 * FDn;
+    int Nd_ex = nx_ex * ny_ex * nz_ex;
+
+    Vec3 cell_lengths = grid.lattice().lengths();
+
+    // Build per-unique-atom SOC projector displacement
+    std::vector<int> IP_displ(n_atom + 1, 0);
+    {
+        int atom_idx = 0;
+        for (int it = 0; it < ntypes; ++it) {
+            const auto& psd = crystal.types()[it].psd();
+            int nproj_soc = 0;
+            if (psd.has_soc()) {
+                for (int l = 1; l <= psd.lmax(); ++l)
+                    nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+            }
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ++ia) {
+                IP_displ[atom_idx + 1] = IP_displ[atom_idx] + nproj_soc;
+                atom_idx++;
+            }
+        }
+    }
+    int total_soc_nproj = IP_displ[n_atom];
+    if (total_soc_nproj == 0) return;
+
+    const auto& Chi_soc = vnl.Chi_soc();
+    const auto& soc_proj_info = vnl.soc_proj_info();
+
+    // SOC is always k-point (spinor wavefunctions are complex)
+    for (int k = 0; k < Nkpts; ++k) {
+        int k_glob = kpt_start + k;
+        double wk = kpt_weights[k_glob];
+        // SOC: single spin channel (s=0), both components in spinor
+        const NDArray<double>& occ_k = wfn.occupations(0, k);
+        const NDArray<Complex>& psi_sk = wfn.psi_kpt(0, k);
+        Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
+        int Nd_d_spinor = 2 * Nd_d;
+
+        for (int n = 0; n < Nband; ++n) {
+            double g_n = occ_k(band_start + n);
+            if (std::abs(g_n) < 1e-15) continue;
+
+            const Complex* psi_n = psi_sk.col(n);
+            const Complex* psi_up = psi_n;
+            const Complex* psi_dn = psi_n + Nd_d;
+
+            // Compute alpha_up/dn = bloch_fac * dV * Chi_soc^T * psi_up/dn
+            std::vector<Complex> alpha_up(total_soc_nproj, Complex(0.0));
+            std::vector<Complex> alpha_dn(total_soc_nproj, Complex(0.0));
+
+            for (int it = 0; it < ntypes; ++it) {
+                const auto& psd = crystal.types()[it].psd();
+                if (!psd.has_soc()) continue;
+                const auto& inf = nloc_influence[it];
+                int nproj_soc = 0;
+                for (int l = 1; l <= psd.lmax(); ++l)
+                    nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+                if (nproj_soc == 0) continue;
+
+                for (int iat = 0; iat < inf.n_atom; ++iat) {
+                    int ndc = inf.ndc[iat];
+                    if (ndc == 0) continue;
+                    int orig_atom = inf.atom_index[iat];
+                    int offset = IP_displ[orig_atom];
+                    const auto& gpos = inf.grid_pos[iat];
+                    const auto& chi_iat = Chi_soc[it][iat];
+
+                    const Vec3& shift = inf.image_shift[iat];
+                    double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                    Complex bloch_fac(std::cos(theta), std::sin(theta));
+                    Complex alpha_scale = bloch_fac * dV;
+
+                    for (int jp = 0; jp < nproj_soc; ++jp) {
+                        Complex dot_up(0.0), dot_dn(0.0);
+                        for (int ig = 0; ig < ndc; ++ig) {
+                            double chi_val = chi_iat(ig, jp);
+                            dot_up += chi_val * psi_up[gpos[ig]];
+                            dot_dn += chi_val * psi_dn[gpos[ig]];
+                        }
+                        alpha_up[offset + jp] += alpha_scale * dot_up;
+                        alpha_dn[offset + jp] += alpha_scale * dot_dn;
+                    }
+                }
+            }
+
+            // For each direction, compute beta_up/dn and accumulate SOC force
+            for (int dim = 0; dim < 3; ++dim) {
+                // Gradient of psi_up
+                std::vector<Complex> psi_up_ex(Nd_ex, Complex(0.0));
+                halo.execute_kpt(psi_up, psi_up_ex.data(), 1, kpt_cart, cell_lengths);
+                std::vector<Complex> Dpsi_up(Nd_d, Complex(0.0));
+                gradient.apply(psi_up_ex.data(), Dpsi_up.data(), dim);
+
+                // Gradient of psi_dn
+                std::vector<Complex> psi_dn_ex(Nd_ex, Complex(0.0));
+                halo.execute_kpt(psi_dn, psi_dn_ex.data(), 1, kpt_cart, cell_lengths);
+                std::vector<Complex> Dpsi_dn(Nd_d, Complex(0.0));
+                gradient.apply(psi_dn_ex.data(), Dpsi_dn.data(), dim);
+
+                // Compute beta_up/dn = bloch_fac * dV * Chi_soc^T * Dpsi_up/dn
+                std::vector<Complex> beta_up(total_soc_nproj, Complex(0.0));
+                std::vector<Complex> beta_dn(total_soc_nproj, Complex(0.0));
+
+                for (int it = 0; it < ntypes; ++it) {
+                    const auto& psd = crystal.types()[it].psd();
+                    if (!psd.has_soc()) continue;
+                    const auto& inf = nloc_influence[it];
+                    int nproj_soc = 0;
+                    for (int l = 1; l <= psd.lmax(); ++l)
+                        nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+                    if (nproj_soc == 0) continue;
+
+                    for (int iat = 0; iat < inf.n_atom; ++iat) {
+                        int ndc = inf.ndc[iat];
+                        if (ndc == 0) continue;
+                        int orig_atom = inf.atom_index[iat];
+                        int offset = IP_displ[orig_atom];
+                        const auto& gpos = inf.grid_pos[iat];
+                        const auto& chi_iat = Chi_soc[it][iat];
+
+                        const Vec3& shift = inf.image_shift[iat];
+                        double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                        Complex bloch_fac(std::cos(theta), std::sin(theta));
+                        Complex beta_scale = bloch_fac * dV;
+
+                        for (int jp = 0; jp < nproj_soc; ++jp) {
+                            Complex dot_up(0.0), dot_dn(0.0);
+                            for (int ig = 0; ig < ndc; ++ig) {
+                                double chi_val = chi_iat(ig, jp);
+                                dot_up += chi_val * Dpsi_up[gpos[ig]];
+                                dot_dn += chi_val * Dpsi_dn[gpos[ig]];
+                            }
+                            beta_up[offset + jp] += beta_scale * dot_up;
+                            beta_dn[offset + jp] += beta_scale * dot_dn;
+                        }
+                    }
+                }
+
+                // Accumulate SOC force per unique atom using Term 1 and Term 2
+                for (int it = 0; it < ntypes; ++it) {
+                    const auto& psd = crystal.types()[it].psd();
+                    if (!psd.has_soc()) continue;
+                    const auto& proj_info = soc_proj_info[it];
+                    int nproj_soc = static_cast<int>(proj_info.size());
+                    if (nproj_soc == 0) continue;
+
+                    int nat = crystal.types()[it].n_atoms();
+                    // Get the first global atom index for this type
+                    int first_atom = 0;
+                    for (int jt = 0; jt < it; ++jt)
+                        first_atom += crystal.types()[jt].n_atoms();
+
+                    for (int ia_local = 0; ia_local < nat; ++ia_local) {
+                        int ia = first_atom + ia_local;
+                        int offset = IP_displ[ia];
+                        double fJ = 0.0;
+
+                        for (int jp = 0; jp < nproj_soc; ++jp) {
+                            int l = proj_info[jp].l;
+                            int m = proj_info[jp].m;
+                            int p = proj_info[jp].p;
+                            double gamma_soc = psd.Gamma_soc()[l][p];
+
+                            // Term 1: on-diagonal (Lz·Sz)
+                            // F -= 0.5 * m * gamma_soc * [Re(conj(alpha_up)*beta_up) - Re(conj(alpha_dn)*beta_dn)]
+                            if (m != 0) {
+                                fJ += 0.5 * static_cast<double>(m) * gamma_soc *
+                                    (std::real(std::conj(alpha_up[offset + jp]) * beta_up[offset + jp]) -
+                                     std::real(std::conj(alpha_dn[offset + jp]) * beta_dn[offset + jp]));
+                            }
+
+                            // Term 2: L+S- (m -> m+1)
+                            if (m + 1 <= l) {
+                                double ladder = std::sqrt(static_cast<double>(l*(l+1) - m*(m+1)));
+                                int jp_shifted = jp + 1;  // column for (l, m+1, p)
+                                fJ += 0.5 * ladder * gamma_soc *
+                                    std::real(std::conj(alpha_dn[offset + jp_shifted]) * beta_up[offset + jp] +
+                                              std::conj(alpha_up[offset + jp]) * beta_dn[offset + jp_shifted]);
+                            }
+
+                            // Term 2: L-S+ (m -> m-1)
+                            if (m - 1 >= -l) {
+                                double ladder = std::sqrt(static_cast<double>(l*(l+1) - m*(m-1)));
+                                int jp_shifted = jp - 1;  // column for (l, m-1, p)
+                                fJ += 0.5 * ladder * gamma_soc *
+                                    std::real(std::conj(alpha_up[offset + jp_shifted]) * beta_dn[offset + jp] +
+                                              std::conj(alpha_dn[offset + jp]) * beta_up[offset + jp_shifted]);
+                            }
+                        }
+
+                        f_soc_[ia * 3 + dim] -= spn_fac * wk * g_n * fJ;
+                    }
+                }
+            }
+        }
+    }
+
+    // MPI reductions across band and kpt comms
+    if (!bandcomm.is_null() && bandcomm.size() > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, f_soc_.data(), 3 * n_atom,
+                      MPI_DOUBLE, MPI_SUM, bandcomm.comm());
+    }
+    if (!kptcomm.is_null() && kptcomm.size() > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, f_soc_.data(), 3 * n_atom,
+                      MPI_DOUBLE, MPI_SUM, kptcomm.comm());
+    }
+    // No spincomm reduction needed for SOC (single spin channel with spinor)
 }
 
 // ---------------------------------------------------------------------------
