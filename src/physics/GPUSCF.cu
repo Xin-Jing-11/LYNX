@@ -2086,14 +2086,72 @@ double GPUSCFRunner::run(
         printf("SOC H*psi LOCAL: max_err=%.3e, rel_err=%.3e %s\n",
                max_err_local, rel_err_local, rel_err_local < 1e-10 ? "[PASS]" : "[FAIL]");
 
-        // Stage 2: FULL H (local + Vnl + V_ud + SOC)
+        // Stage 2: LOCAL+VNL (no SOC, no V_ud) — apply local + Vnl per spinor on GPU
+        {
+            cuDoubleComplex* psi_up = d_psi_spinor;
+            cuDoubleComplex* psi_dn = d_psi_spinor + Nd_;
+            cuDoubleComplex* Hpsi_up = d_Hpsi_spinor;
+            cuDoubleComplex* Hpsi_dn = d_Hpsi_spinor + Nd_;
+            gpu::hamiltonian_apply_local_z_gpu(psi_up, V_uu, Hpsi_up, d_x_ex_spinor,
+                nx_, ny_, nz_, FDn_, 1, 0.0, is_orth_, true, true, true,
+                diag_coeff_ham_, has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_,
+                kxLx_, kyLy_, kzLz_);
+            gpu::hamiltonian_apply_local_z_gpu(psi_dn, V_dd, Hpsi_dn, d_x_ex_spinor,
+                nx_, ny_, nz_, FDn_, 1, 0.0, is_orth_, true, true, true,
+                diag_coeff_ham_, has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_,
+                kxLx_, kyLy_, kzLz_);
+            if (gpu_vnl_.total_phys_nproj > 0 && d_bloch_fac_) {
+                gpu::nonlocal_projector_apply_z_gpu(
+                    psi_up, Hpsi_up,
+                    gpu_vnl_.d_Chi_flat, gpu_vnl_.d_gpos_flat,
+                    gpu_vnl_.d_gpos_offsets, gpu_vnl_.d_chi_offsets,
+                    gpu_vnl_.d_ndc_arr, gpu_vnl_.d_nproj_arr,
+                    gpu_vnl_.d_IP_displ, gpu_vnl_.d_Gamma,
+                    static_cast<cuDoubleComplex*>(d_alpha_z_),
+                    d_bloch_fac_, Nd_, 1, dV_,
+                    gpu_vnl_.n_influence, gpu_vnl_.total_phys_nproj,
+                    gpu_vnl_.max_ndc, gpu_vnl_.max_nproj);
+                gpu::nonlocal_projector_apply_z_gpu(
+                    psi_dn, Hpsi_dn,
+                    gpu_vnl_.d_Chi_flat, gpu_vnl_.d_gpos_flat,
+                    gpu_vnl_.d_gpos_offsets, gpu_vnl_.d_chi_offsets,
+                    gpu_vnl_.d_ndc_arr, gpu_vnl_.d_nproj_arr,
+                    gpu_vnl_.d_IP_displ, gpu_vnl_.d_Gamma,
+                    static_cast<cuDoubleComplex*>(d_alpha_z_),
+                    d_bloch_fac_, Nd_, 1, dV_,
+                    gpu_vnl_.n_influence, gpu_vnl_.total_phys_nproj,
+                    gpu_vnl_.max_ndc, gpu_vnl_.max_nproj);
+            }
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+        std::vector<Complex> gpu_localvnl(Nd_spinor);
+        CUDA_CHECK(cudaMemcpy(gpu_localvnl.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
+
+        // CPU: local + Vnl per spinor (no SOC, no V_ud)
+        std::vector<Complex> cpu_localvnl(Nd_spinor, Complex(0));
+        hamiltonian.apply_local_kpt(psi_ptr, h_Veff_sp.data(), cpu_localvnl.data(), 1, kpt0v, cell_len_v);
+        hamiltonian.apply_local_kpt(psi_ptr + Nd_, h_Veff_sp.data() + Nd_, cpu_localvnl.data() + Nd_, 1, kpt0v, cell_len_v);
+        // Add Vnl per spinor on CPU
+        const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
+        vnl->apply_kpt(psi_ptr, cpu_localvnl.data(), 1, dV_);
+        vnl->apply_kpt(psi_ptr + Nd_, cpu_localvnl.data() + Nd_, 1, dV_);
+
+        double max_err_vnl = 0, norm_vnl = 0;
+        for (int i = 0; i < Nd_spinor; i++) {
+            max_err_vnl = std::max(max_err_vnl, std::abs(gpu_localvnl[i] - cpu_localvnl[i]));
+            norm_vnl += std::norm(cpu_localvnl[i]);
+        }
+        double rel_err_vnl = max_err_vnl / std::sqrt(norm_vnl / Nd_spinor);
+        printf("SOC H*psi L+Vnl: max_err=%.3e, rel_err=%.3e %s\n",
+               max_err_vnl, rel_err_vnl, rel_err_vnl < 1e-10 ? "[PASS]" : "[FAIL]");
+
+        // Stage 3: FULL H (local + Vnl + V_ud + SOC)
         hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
         std::vector<Complex> gpu_Hpsi(Nd_spinor);
         CUDA_CHECK(cudaMemcpy(gpu_Hpsi.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
 
         std::vector<Complex> cpu_Hpsi(Nd_spinor, Complex(0));
-        const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
         hamiltonian.apply_spinor_kpt(psi_ptr, h_Veff_sp.data(), cpu_Hpsi.data(), 1, Nd_,
                                       kpt0v, cell_len_v);
 
