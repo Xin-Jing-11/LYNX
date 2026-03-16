@@ -8,7 +8,7 @@
     "cell_type": "nonorthogonal"
   },
   "grid": {
-    "Nx": 55, "Ny": 55, "Nz": 95,
+    "Nx": 20, "Ny": 20, "Nz": 35,
     "fd_order": 12,
     "boundary_conditions": ["periodic", "periodic", "periodic"]
   },
