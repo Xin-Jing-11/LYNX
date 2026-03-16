@@ -39,7 +39,9 @@ static double compute_distance(double rx, double ry, double rz, bool is_orth, co
     if (is_orth) {
         return std::sqrt(rx * rx + ry * ry + rz * rz);
     } else {
-        return lattice->metric_distance(rx, ry, rz);
+        double d = lattice->metric_distance(rx, ry, rz);
+        if (std::isnan(d)) d = 0.0;  // guard against NaN from metric
+        return d;
     }
 }
 
@@ -225,7 +227,7 @@ void Electrostatics::compute_pseudocharge(
                         int idx = ii + jj * nxp + kk * nxp * nyp;
 
                         // Local pseudopotential
-                        if (r < 1e-10) {
+                        if (r < 1e-10 || std::isnan(r)) {
                             VJ[idx] = psd.Vloc_0();
                         } else if (r < r_grid.back()) {
                             VJ[idx] = Pseudopotential::spline_interp_single(
@@ -236,6 +238,10 @@ void Electrostatics::compute_pseudocharge(
 
                         // Reference potential
                         VJ_ref[idx] = V_ref(r, rc_ref, Znucl);
+
+                        // Guard against any NaN
+                        if (std::isnan(VJ[idx])) VJ[idx] = psd.Vloc_0();
+                        if (std::isnan(VJ_ref[idx])) VJ_ref[idx] = V_ref(0.0, rc_ref, Znucl);
                     }
                 }
             }
