@@ -72,6 +72,19 @@ void Pseudopotential::load_psp8(const std::string& filename) {
         ss >> extension_switch;
     }
 
+    // Line 7 (if extension_switch >= 2): nproj_soc per l channel
+    // This line exists in FR pseudopotentials and must be consumed before channel data
+    std::vector<int> nprojso;
+    if (extension_switch >= 2) {
+        std::getline(ifs, line);
+        std::istringstream ss(line);
+        nprojso.resize(lmax_ + 1, 0);
+        // nprojso values are for l=1..lmax (l=0 has no SOC)
+        for (int l = 1; l <= lmax_; ++l) {
+            if (!(ss >> nprojso[l])) break;
+        }
+    }
+
     // Initialize storage
     rc_.resize(lmax_ + 1, 0.0);
     Gamma_.resize(lmax_ + 1);
@@ -241,7 +254,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
         // SOC data: for each l from 1 to lmax, read header + mmax lines
         // l=0 has no SOC (no spin-orbit for s orbitals)
         for (int l = 1; l <= lmax_; ++l) {
-            int nprj = ppl_[l];  // same number of projectors as scalar-relativistic
+            int nprj = nprojso[l];  // SOC projectors per l from the nprojso line
             ppl_soc_[l] = nprj;
             Gamma_soc_[l].resize(nprj, 0.0);
             UdV_soc_[l].resize(nprj);

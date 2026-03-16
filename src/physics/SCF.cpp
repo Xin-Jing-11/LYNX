@@ -507,7 +507,7 @@ double SCF::run(Wavefunction& wfn,
             }
         }
     }
-    double lambda_cutoff = 0.5 * (eigval_min[0] + eigval_max[0]);  // initial guess
+    double lambda_cutoff = 0.5 * (eigval_min[0] + eigval_max[0]);
     if (rank_world == 0) {
         for (int s = 0; s < Nspin_local; ++s)
             std::printf("Lanczos bounds (spin %d): eigmin=%.6e, eigmax=%.6e\n",

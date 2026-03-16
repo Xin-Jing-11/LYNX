@@ -39,9 +39,7 @@ static double compute_distance(double rx, double ry, double rz, bool is_orth, co
     if (is_orth) {
         return std::sqrt(rx * rx + ry * ry + rz * rz);
     } else {
-        double d = lattice->metric_distance(rx, ry, rz);
-        if (std::isnan(d)) d = 0.0;  // guard against NaN from metric
-        return d;
+        return lattice->metric_distance(rx, ry, rz);
     }
 }
 
@@ -239,25 +237,13 @@ void Electrostatics::compute_pseudocharge(
                         // Reference potential
                         VJ_ref[idx] = V_ref(r, rc_ref, Znucl);
 
-                        // Guard against any NaN
+                        // Guard against any NaN (can occur near atom centers in non-orth cells)
                         if (std::isnan(VJ[idx])) VJ[idx] = psd.Vloc_0();
                         if (std::isnan(VJ_ref[idx])) VJ_ref[idx] = V_ref(0.0, rc_ref, Znucl);
                     }
                 }
             }
 
-            // Debug: check for NaN in VJ and bJ
-            auto check_nan = [](const std::vector<double>& v, const char* name, int iat) {
-                int nan_count = 0;
-                for (size_t idx = 0; idx < v.size(); ++idx) {
-                    if (std::isnan(v[idx])) nan_count++;
-                }
-                if (nan_count > 0) {
-                    std::printf("  WARNING: %s has %d NaN out of %zu for img %d\n", name, nan_count, v.size(), iat);
-                }
-            };
-            check_nan(VJ, "VJ", iat);
-            check_nan(VJ_ref, "VJ_ref", iat);
 
             // Compute b_J = -1/(4π) * Lap(V_J) on the inner grid
             std::vector<double> bJ(nx_loc * ny_loc * nz_loc, 0.0);
@@ -274,9 +260,6 @@ void Electrostatics::compute_pseudocharge(
                 calc_lapV_nonorth(VJ_ref.data(), bJ_ref.data(), nx_loc, ny_loc, nz_loc,
                                   nxp, nyp, nzp, FDn, stencil, inv_4PI);
             }
-
-            check_nan(bJ, "bJ", iat);
-            check_nan(bJ_ref, "bJ_ref", iat);
 
             // Accumulate into global arrays and compute Eself
             for (int kk = 0; kk < nz_loc; ++kk) {

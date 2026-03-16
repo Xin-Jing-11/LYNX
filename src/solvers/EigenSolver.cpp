@@ -780,12 +780,23 @@ void EigenSolver::orthogonalize_kpt(Complex* X, int Nd_d, int Nband, double dV) 
     zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
            &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
 
-    // Cholesky
+    // Cholesky with regularization fallback
     char uplo = 'U';
     int info;
     zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
     if (info != 0) {
-        throw std::runtime_error("zpotrf failed in orthogonalize_kpt");
+        // Regularize: add small positive shift to diagonal and retry
+        // Recompute S since zpotrf may have corrupted it
+        std::fill(S.begin(), S.end(), Complex(0.0));
+        zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
+               &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
+        double shift = 1e-12 * std::abs(S[0].real());
+        for (int i = 0; i < Nband; ++i)
+            S[i + i * Nband] += Complex(shift, 0.0);
+        zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
+        if (info != 0) {
+            throw std::runtime_error("zpotrf failed in orthogonalize_kpt even after regularization");
+        }
     }
 
     // X <- X * R^{-1}
