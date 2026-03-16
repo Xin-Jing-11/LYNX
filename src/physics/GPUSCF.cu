@@ -1980,7 +1980,7 @@ double GPUSCFRunner::run(
         // The kinetic eigmax ~ |diag_coeff_ham_| * 2, SOC adds Gamma_soc * ndc * dV
         double kinetic_bound = std::abs(diag_coeff_ham_) * 2.0;
         double soc_bound = 0.5 * 5.0 * 50.0;  // conservative: 0.5 * max_Gamma * max_factor
-        double eigmax_safe = std::max(kinetic_bound + soc_bound, eigval_max_s[0]) * 1.2;
+        double eigmax_safe = std::max(kinetic_bound + soc_bound, eigval_max_s[0]) * 3.0;
         printf("SOC eigmax: Lanczos=%.2f, kinetic=%.2f, using=%.2f\n",
                eigval_max_s[0], kinetic_bound, eigmax_safe);
         eigval_max_s[0] = eigmax_safe;
