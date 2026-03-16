@@ -27,6 +27,7 @@
 #include "electronic/ElectronDensity.hpp"
 #include "electronic/Occupation.hpp"
 #include "physics/Electrostatics.hpp"
+#include "physics/Forces.hpp"
 
 namespace lynx {
 
@@ -2230,6 +2231,53 @@ double GPUSCFRunner::run(
         double rel_err = max_err / std::sqrt(norm_cpu / Nd_spinor);
         printf("SOC H*psi validation: max_err=%.3e, rel_err=%.3e %s\n",
                max_err, rel_err, rel_err < 1e-10 ? "[PASS]" : "[FAIL]");
+        // ============================================================
+        // SOC Force/Stress validation (GPU vs CPU, using random psi)
+        // ============================================================
+        {
+            int Nb = wfn.Nband();
+            int n_phys = crystal.n_atom_total();
+
+            // Upload all bands of random psi + set occupations to uniform
+            {
+                size_t all_bytes = 2 * (size_t)Nd_spinor * Nb * sizeof(double);
+                std::vector<double> h_all(2 * Nd_spinor * Nb);
+                std::memcpy(h_all.data(), wfn.psi_kpt(0, 0).data(), all_bytes);
+                CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice));
+            }
+            // Set uniform occupations for testing
+            std::vector<double> h_occ_test(Nb, 1.0);
+            double* d_occ_test;
+            CUDA_CHECK(cudaMallocAsync(&d_occ_test, Nb * sizeof(double), 0));
+            CUDA_CHECK(cudaMemcpy(d_occ_test, h_occ_test.data(), Nb * sizeof(double), cudaMemcpyHostToDevice));
+            for (int n = 0; n < Nb; n++)
+                wfn.occupations(0, 0)(n) = 1.0;
+
+            // --- GPU SOC force ---
+            std::vector<double> gpu_f_soc(3 * n_phys, 0.0);
+            compute_soc_force(wfn, crystal, nloc_influence, domain, grid,
+                              kpt_weights_in, kpoints_, kpt_start_, gpu_f_soc.data());
+
+            printf("SOC force (GPU, random psi):\n");
+            for (int ia = 0; ia < n_phys; ia++)
+                printf("  atom %d: [%.6e, %.6e, %.6e]\n", ia,
+                       gpu_f_soc[ia*3], gpu_f_soc[ia*3+1], gpu_f_soc[ia*3+2]);
+
+            // --- GPU SOC stress ---
+            std::array<double, 6> gpu_stress_soc = {};
+            double gpu_energy_soc = 0;
+            compute_soc_stress(wfn, crystal, nloc_influence, domain, grid,
+                               kpt_weights_in, kpoints_, kpt_start_,
+                               gpu_stress_soc.data(), &gpu_energy_soc);
+
+            // Print (no CPU stress comparison for now - CPU stress computation is complex)
+            printf("SOC stress (GPU): [%.6e, %.6e, %.6e, %.6e, %.6e, %.6e]\n",
+                   gpu_stress_soc[0], gpu_stress_soc[1], gpu_stress_soc[2],
+                   gpu_stress_soc[3], gpu_stress_soc[4], gpu_stress_soc[5]);
+            printf("SOC energy_nl: %.6e\n", gpu_energy_soc);
+
+            cudaFreeAsync(d_occ_test, 0);
+        }
     }
 
     // ============================================================

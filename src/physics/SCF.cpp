@@ -337,6 +337,7 @@ double SCF::run(Wavefunction& wfn,
 
     // Detect SOC mode (before GPU dispatch)
     is_soc_ = (wfn.Nspinor() == 2);
+    if (is_soc_) is_kpt_ = true;  // spinor always complex, even at Gamma
 
 #ifdef USE_CUDA
     // GPU dispatch: gamma-point or k-point, any Nspin, orthogonal or non-orthogonal
