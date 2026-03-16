@@ -1639,7 +1639,8 @@ double GPUSCFRunner::run(
     gpu::upload_stencil_coefficients(
         stencil.D2_coeff_x(), stencil.D2_coeff_y(), stencil.D2_coeff_z(),
         stencil.D1_coeff_x(), stencil.D1_coeff_y(), stencil.D1_coeff_z(),
-        nullptr, nullptr, nullptr, FDn_);
+        stencil.D2_coeff_xy(), stencil.D2_coeff_xz(), stencil.D2_coeff_yz(),
+        FDn_);
 
     // ============================================================
     // GPU memory allocation + data upload
