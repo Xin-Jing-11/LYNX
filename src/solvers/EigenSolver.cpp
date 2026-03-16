@@ -780,17 +780,21 @@ void EigenSolver::orthogonalize_kpt(Complex* X, int Nd_d, int Nband, double dV) 
     zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
            &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
 
-    // Cholesky with regularization fallback
+    // Cholesky (with shift fallback for near-singular overlap)
     char uplo = 'U';
     int info;
     zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
     if (info != 0) {
-        // Regularize: add small positive shift to diagonal and retry
-        // Recompute S since zpotrf may have corrupted it
+        // Overlap is near-singular (rank-deficient filtered vectors).
+        // Recompute S and add diagonal shift to regularize.
         std::fill(S.begin(), S.end(), Complex(0.0));
         zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
                &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
-        double shift = 1e-12 * std::abs(S[0].real());
+        // Shift = small fraction of average diagonal
+        double avg_diag = 0.0;
+        for (int i = 0; i < Nband; ++i) avg_diag += S[i + i * Nband].real();
+        avg_diag /= Nband;
+        double shift = 1e-8 * avg_diag;
         for (int i = 0; i < Nband; ++i)
             S[i + i * Nband] += Complex(shift, 0.0);
         zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
@@ -1109,6 +1113,18 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
             std::memcpy(Xold.data(), Y.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
             std::memcpy(Y.data(), Xnew.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
             sigma = sigma_new;
+        }
+    }
+
+    // Normalize columns of Y before orthogonalization to prevent overflow
+    // in the overlap matrix (Chebyshev filter can amplify norms by 10^30+)
+    for (int j = 0; j < Nband_loc; ++j) {
+        Complex* col = Y.data() + j * Nd_d_spinor;
+        double norm2 = 0.0;
+        for (int i = 0; i < Nd_d_spinor; ++i) norm2 += std::norm(col[i]);
+        if (norm2 > 0.0) {
+            double inv_norm = 1.0 / std::sqrt(norm2);
+            for (int i = 0; i < Nd_d_spinor; ++i) col[i] *= inv_norm;
         }
     }
 
