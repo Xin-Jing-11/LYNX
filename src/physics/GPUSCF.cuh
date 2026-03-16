@@ -95,6 +95,20 @@ public:
         int kpt_start,
         double* f_soc);  // [3 * n_atoms]
 
+    // Compute SOC nonlocal stress tensor on GPU.
+    // GPU computes gradients; position-weighted beta and reduction done on CPU.
+    void compute_soc_stress(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const Domain& domain,
+        const FDGrid& grid,
+        const std::vector<double>& kpt_weights,
+        const KPoints* kpoints,
+        int kpt_start,
+        double* stress_soc,   // [6] Voigt stress
+        double* energy_soc);  // scalar SOC energy
+
     const EnergyComponents& energy() const { return energy_; }
     bool converged() const { return converged_; }
     double fermi_energy() const { return Ef_; }

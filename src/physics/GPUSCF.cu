@@ -145,6 +145,36 @@ void compute_soc_force_gpu(
     double spn_fac, double wk,
     double* h_f_soc);
 
+void compute_soc_stress_gpu(
+    const cuDoubleComplex* d_psi_spinor, const double* d_occ,
+    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets_soc, const int* d_chi_soc_offsets,
+    const int* d_ndc_arr_soc, const int* d_nproj_soc_arr,
+    const int* d_IP_displ_soc, const double* d_Gamma_soc,
+    const int* d_proj_l, const int* d_proj_m,
+    const double* d_bloch_fac,
+    int n_influence_soc, int total_soc_nproj,
+    int max_ndc_soc, int max_nproj_soc,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys_soc,
+    const double* h_atom_pos_soc,
+    int nx, int ny, int nz, int FDn, int Nd_d, int Nband,
+    double dV, double dx, double dy, double dz,
+    int xs, int ys, int zs,
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    const int* h_proj_l, const int* h_proj_m,
+    const double* h_Gamma_soc,
+    const double* h_Chi_soc_flat,
+    const int* h_gpos_flat,
+    const int* h_gpos_offsets_soc,
+    const int* h_chi_soc_offsets,
+    const int* h_ndc_arr_soc,
+    const int* h_nproj_soc_arr,
+    const int* h_IP_displ_soc_inf,
+    const double* h_bloch_fac,
+    double spn_fac, double wk,
+    double* h_stress_soc, double* h_energy_soc);
+
 // Complex eigensolver (k-point)
 void eigensolver_solve_z_gpu(
     cuDoubleComplex* d_psi_z, double* d_eigvals, const double* d_Veff,
@@ -3116,6 +3146,253 @@ void GPUSCFRunner::compute_soc_force(
         cudaFreeAsync(d_psi_spinor, 0);
         cudaFreeAsync(d_occ, 0);
     }
+}
+
+// ============================================================
+// GPU SOC Stress computation
+// ============================================================
+void GPUSCFRunner::compute_soc_stress(
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const Domain& domain,
+    const FDGrid& grid,
+    const std::vector<double>& kpt_weights,
+    const KPoints* kpoints,
+    int kpt_start,
+    double* stress_soc,
+    double* energy_soc)
+{
+    int n_phys = crystal.n_atom_total();
+    int Nband = wfn.Nband();
+    int Nkpts = wfn.Nkpts();
+    int ntypes = crystal.n_types();
+    int Nd_d = domain.Nd_d();
+    double dV = grid.dV();
+
+    // SOC spinor: spn_fac = 2.0 (occfac=1.0 for spinor, *2)
+    double spn_fac = 2.0;
+
+    std::memset(stress_soc, 0, 6 * sizeof(double));
+    *energy_soc = 0.0;
+
+    if (!has_soc_ || gpu_soc_.total_soc_nproj == 0) return;
+
+    // Build physical atom SOC IP_displ (host)
+    std::vector<int> IP_displ_phys_soc(n_phys + 1, 0);
+    {
+        int idx = 0;
+        for (int it = 0; it < ntypes; it++) {
+            const auto& psd = crystal.types()[it].psd();
+            int nproj_soc = 0;
+            if (psd.has_soc()) {
+                for (int l = 1; l <= psd.lmax(); ++l)
+                    nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+            }
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ia++) {
+                IP_displ_phys_soc[idx + 1] = IP_displ_phys_soc[idx] + nproj_soc;
+                idx++;
+            }
+        }
+    }
+
+    // Build host proj_l, proj_m, Gamma_soc arrays
+    int total_soc_nproj = gpu_soc_.total_soc_nproj;
+    std::vector<int> h_proj_l(total_soc_nproj, 0);
+    std::vector<int> h_proj_m(total_soc_nproj, 0);
+    std::vector<double> h_Gamma_soc(total_soc_nproj, 0.0);
+    {
+        const auto& soc_proj_info = vnl_ptr_->soc_proj_info();
+        int phys_idx = 0;
+        for (int it = 0; it < ntypes; it++) {
+            const auto& psd = crystal.types()[it].psd();
+            const auto& spi = soc_proj_info[it];
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ia++) {
+                int ip_off = IP_displ_phys_soc[phys_idx];
+                for (int jp = 0; jp < (int)spi.size(); jp++) {
+                    h_proj_l[ip_off + jp] = spi[jp].l;
+                    h_proj_m[ip_off + jp] = spi[jp].m;
+                }
+                if (psd.has_soc()) {
+                    int jp = 0;
+                    for (int l = 1; l <= psd.lmax(); ++l) {
+                        for (int p = 0; p < psd.ppl_soc()[l]; ++p) {
+                            double gamma = psd.Gamma_soc()[l][p];
+                            for (int m = -l; m <= l; ++m) {
+                                h_Gamma_soc[ip_off + jp] = gamma;
+                                jp++;
+                            }
+                        }
+                    }
+                }
+                phys_idx++;
+            }
+        }
+    }
+
+    // Build host-side SOC projector data for CPU position-weighted beta
+    // (reconstruct the same flattened arrays as setup_soc)
+    int n_influence_soc = gpu_soc_.n_influence_soc;
+    std::vector<int> h_ndc_arr_soc, h_nproj_soc_arr, h_IP_displ_soc_inf;
+    std::vector<int> h_gpos_offsets_soc(1, 0), h_chi_soc_offsets(1, 0);
+    std::vector<int> h_gpos_flat;
+    std::vector<double> h_Chi_soc_flat;
+    std::vector<double> h_atom_pos_soc;
+
+    const auto& Chi_soc = vnl_ptr_->Chi_soc();
+
+    // Build IP_displ_global for mapping influence atom -> projector offset
+    std::vector<int> IP_displ_global(n_phys + 1, 0);
+    {
+        int idx = 0;
+        for (int it = 0; it < ntypes; it++) {
+            const auto& psd = crystal.types()[it].psd();
+            int nproj_soc = 0;
+            if (psd.has_soc()) {
+                for (int l = 1; l <= psd.lmax(); ++l)
+                    nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+            }
+            int nat = crystal.types()[it].n_atoms();
+            for (int ia = 0; ia < nat; ia++) {
+                IP_displ_global[idx + 1] = IP_displ_global[idx] + nproj_soc;
+                idx++;
+            }
+        }
+    }
+
+    for (int it = 0; it < ntypes; it++) {
+        const auto& inf = nloc_influence[it];
+        const auto& psd = crystal.types()[it].psd();
+
+        int nproj_soc = 0;
+        if (psd.has_soc()) {
+            for (int l = 1; l <= psd.lmax(); ++l)
+                nproj_soc += psd.ppl_soc()[l] * (2 * l + 1);
+        }
+
+        for (int iat = 0; iat < inf.n_atom; iat++) {
+            int ndc = inf.ndc[iat];
+            int global_atom = inf.atom_index[iat];
+
+            h_ndc_arr_soc.push_back(ndc);
+            h_nproj_soc_arr.push_back(nproj_soc);
+            h_IP_displ_soc_inf.push_back(IP_displ_global[global_atom]);
+
+            h_gpos_offsets_soc.push_back(h_gpos_offsets_soc.back() + ndc);
+            h_chi_soc_offsets.push_back(h_chi_soc_offsets.back() + ndc * nproj_soc);
+
+            for (int ig = 0; ig < ndc; ig++)
+                h_gpos_flat.push_back(inf.grid_pos[iat][ig]);
+
+            if (ndc > 0 && nproj_soc > 0 && psd.has_soc()) {
+                const double* chi_data = Chi_soc[it][iat].data();
+                int chi_ld = Chi_soc[it][iat].ld();
+                for (int jp = 0; jp < nproj_soc; jp++)
+                    for (int ig = 0; ig < ndc; ig++)
+                        h_Chi_soc_flat.push_back(chi_data[ig + jp * chi_ld]);
+            } else {
+                for (int jp = 0; jp < nproj_soc; jp++)
+                    for (int ig = 0; ig < ndc; ig++)
+                        h_Chi_soc_flat.push_back(0.0);
+            }
+
+            // Atom positions for position-weighted gather
+            h_atom_pos_soc.push_back(inf.coords[iat].x);
+            h_atom_pos_soc.push_back(inf.coords[iat].y);
+            h_atom_pos_soc.push_back(inf.coords[iat].z);
+        }
+    }
+
+    Vec3 cell_lengths = grid.lattice().lengths();
+
+    // Loop over k-points
+    for (int k = 0; k < Nkpts; ++k) {
+        int k_glob = kpt_start + k;
+        double wk = kpt_weights[k_glob];
+        Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
+
+        // Compute Bloch phase: kx*Lx, ky*Ly, kz*Lz
+        double kxLx = kpt_cart.x * cell_lengths.x;
+        double kyLy = kpt_cart.y * cell_lengths.y;
+        double kzLz = kpt_cart.z * cell_lengths.z;
+
+        // Set up bloch factors for influence atoms
+        setup_bloch_factors(nloc_influence, crystal, kpt_cart);
+
+        // Download bloch factors to host for CPU beta computation
+        std::vector<double> h_bloch_fac(n_influence_soc * 2);
+        CUDA_CHECK(cudaMemcpy(h_bloch_fac.data(), d_bloch_fac_,
+                              n_influence_soc * 2 * sizeof(double), cudaMemcpyDeviceToHost));
+
+        // Upload psi spinor to GPU
+        const NDArray<Complex>& psi_sk = wfn.psi_kpt(0, k);
+        int Nd_d_spinor = 2 * Nd_d;
+        size_t psi_bytes = (size_t)Nd_d_spinor * Nband * sizeof(cuDoubleComplex);
+        cuDoubleComplex* d_psi_spinor = nullptr;
+        CUDA_CHECK(cudaMallocAsync(&d_psi_spinor, psi_bytes, 0));
+        CUDA_CHECK(cudaMemcpy(d_psi_spinor, psi_sk.data(), psi_bytes, cudaMemcpyHostToDevice));
+
+        // Upload occupations
+        const NDArray<double>& occ_k = wfn.occupations(0, k);
+        double* d_occ = nullptr;
+        CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), 0));
+        CUDA_CHECK(cudaMemcpy(d_occ, occ_k.data(), Nband * sizeof(double), cudaMemcpyHostToDevice));
+
+        // SOC stress for this k-point
+        double stress_soc_k[6] = {0.0};
+        double energy_soc_k = 0.0;
+
+        gpu::compute_soc_stress_gpu(
+            d_psi_spinor, d_occ,
+            gpu_soc_.d_Chi_soc_flat, gpu_vnl_.d_gpos_flat,
+            gpu_soc_.d_gpos_offsets_soc, gpu_soc_.d_chi_soc_offsets,
+            gpu_soc_.d_ndc_arr_soc, gpu_soc_.d_nproj_soc_arr,
+            gpu_soc_.d_IP_displ_soc,
+            gpu_soc_.d_Gamma_soc,
+            gpu_soc_.d_proj_l, gpu_soc_.d_proj_m,
+            d_bloch_fac_,
+            gpu_soc_.n_influence_soc, gpu_soc_.total_soc_nproj,
+            gpu_soc_.max_ndc_soc, gpu_soc_.max_nproj_soc,
+            n_phys,
+            IP_displ_phys_soc.data(),
+            h_atom_pos_soc.data(),
+            nx_, ny_, nz_, FDn_, Nd_d, Nband,
+            dV, grid.dx(), grid.dy(), grid.dz(),
+            domain.vertices().xs, domain.vertices().ys, domain.vertices().zs,
+            kxLx, kyLy, kzLz,
+            h_proj_l.data(), h_proj_m.data(), h_Gamma_soc.data(),
+            h_Chi_soc_flat.data(),
+            h_gpos_flat.data(),
+            h_gpos_offsets_soc.data(),
+            h_chi_soc_offsets.data(),
+            h_ndc_arr_soc.data(),
+            h_nproj_soc_arr.data(),
+            h_IP_displ_soc_inf.data(),
+            h_bloch_fac.data(),
+            spn_fac, wk,
+            stress_soc_k, &energy_soc_k);
+
+        // Accumulate across k-points
+        for (int i = 0; i < 6; ++i)
+            stress_soc[i] += stress_soc_k[i];
+        *energy_soc += energy_soc_k;
+
+        cudaFreeAsync(d_psi_spinor, 0);
+        cudaFreeAsync(d_occ, 0);
+    }
+
+    // Normalize stress by cell volume (matching CPU Stress.cpp)
+    const auto& lat = grid.lattice();
+    Vec3 L = lat.lengths();
+    double Jacbdet = lat.jacobian() / (L.x * L.y * L.z);
+    double cell_measure = Jacbdet;
+    if (grid.bcx() == BCType::Periodic) cell_measure *= L.x;
+    if (grid.bcy() == BCType::Periodic) cell_measure *= L.y;
+    if (grid.bcz() == BCType::Periodic) cell_measure *= L.z;
+    for (int i = 0; i < 6; i++)
+        stress_soc[i] /= cell_measure;
 }
 
 // ============================================================

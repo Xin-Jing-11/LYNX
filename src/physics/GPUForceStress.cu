@@ -937,6 +937,381 @@ void compute_soc_force_gpu(
     cudaFreeAsync(d_x_ex, 0);
 }
 
+// ============================================================
+// Host function: compute_soc_stress_gpu
+//
+// SOC nonlocal stress using spinor wavefunctions.
+// Algorithm:
+//   1. Extract psi_up/dn from spinor layout
+//   2. Compute alpha_up/dn = bloch * dV * Chi_soc^T * psi_up/dn
+//   3. Download alpha to host, compute SOC energy_nl on CPU
+//   4. For each Voigt pair (dim, dim2):
+//      a. Complex halo exchange + gradient for psi_up/dn in direction dim
+//      b. Download gradient to host
+//      c. Compute position-weighted beta on CPU
+//      d. Accumulate stress reduction on CPU
+//   5. Apply spn_fac, subtract energy_soc from diagonal
+// ============================================================
+void compute_soc_stress_gpu(
+    const cuDoubleComplex* d_psi_spinor,  // (2*Nd_d, Nband)
+    const double* d_occ,
+    // SOC data (all on device)
+    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets_soc, const int* d_chi_soc_offsets,
+    const int* d_ndc_arr_soc, const int* d_nproj_soc_arr,
+    const int* d_IP_displ_soc, const double* d_Gamma_soc,
+    const int* d_proj_l, const int* d_proj_m,
+    const double* d_bloch_fac,
+    int n_influence_soc, int total_soc_nproj,
+    int max_ndc_soc, int max_nproj_soc,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys_soc,
+    // Atom positions for position-weighted gather (host)
+    const double* h_atom_pos_soc,  // [n_influence_soc * 3]
+    // Grid parameters
+    int nx, int ny, int nz, int FDn, int Nd_d, int Nband,
+    double dV, double dx, double dy, double dz,
+    int xs, int ys, int zs,
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    // Host-side proj info for reduction
+    const int* h_proj_l, const int* h_proj_m,
+    const double* h_Gamma_soc,
+    // Host-side SOC projector data for position-weighted beta
+    const double* h_Chi_soc_flat,
+    const int* h_gpos_flat,
+    const int* h_gpos_offsets_soc,
+    const int* h_chi_soc_offsets,
+    const int* h_ndc_arr_soc,
+    const int* h_nproj_soc_arr,
+    const int* h_IP_displ_soc_inf,  // per-influence-atom IP displ
+    const double* h_bloch_fac,      // [n_influence_soc * 2] (cos, sin)
+    double spn_fac, double wk,
+    // Output (host)
+    double* h_stress_soc,   // [6] Voigt stress
+    double* h_energy_soc)   // scalar SOC energy for diagonal
+{
+    if (n_influence_soc == 0 || total_soc_nproj == 0) {
+        std::memset(h_stress_soc, 0, 6 * sizeof(double));
+        *h_energy_soc = 0.0;
+        return;
+    }
+
+    int nx_ex = nx + 2 * FDn;
+    int ny_ex = ny + 2 * FDn;
+    int nz_ex = nz + 2 * FDn;
+    int Nd_ex = nx_ex * ny_ex * nz_ex;
+    // ----------------------------------------------------------------
+    // Allocate GPU scratch buffers
+    // ----------------------------------------------------------------
+    size_t alpha_elems = (size_t)total_soc_nproj * Nband;
+    size_t alpha_bytes = alpha_elems * sizeof(cuDoubleComplex);
+
+    cuDoubleComplex* d_alpha_up = nullptr;
+    cuDoubleComplex* d_alpha_dn = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_up, alpha_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_dn, alpha_bytes, 0));
+
+    // Extracted psi_up/dn (Nd_d * Nband complex each)
+    size_t psi_comp_bytes = (size_t)Nd_d * Nband * sizeof(cuDoubleComplex);
+    cuDoubleComplex* d_psi_up = nullptr;
+    cuDoubleComplex* d_psi_dn = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_psi_up, psi_comp_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_psi_dn, psi_comp_bytes, 0));
+
+    // Gradient output buffers
+    cuDoubleComplex* d_Dpsi_up = nullptr;
+    cuDoubleComplex* d_Dpsi_dn = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_up, psi_comp_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_dn, psi_comp_bytes, 0));
+
+    // Halo exchange buffer
+    size_t ex_bytes = (size_t)Nd_ex * Nband * sizeof(cuDoubleComplex);
+    cuDoubleComplex* d_x_ex = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_x_ex, ex_bytes, 0));
+
+    // ----------------------------------------------------------------
+    // Step 1: Extract up/dn from spinor layout
+    // ----------------------------------------------------------------
+    {
+        int total_elems = Nd_d * Nband;
+        int bs = 256;
+        int gs = (total_elems + bs - 1) / bs;
+        soc_force_spinor_extract_kernel<<<gs, bs>>>(d_psi_spinor, d_psi_up, Nd_d, Nband, 0);
+        CUDA_CHECK(cudaGetLastError());
+        soc_force_spinor_extract_kernel<<<gs, bs>>>(d_psi_spinor, d_psi_dn, Nd_d, Nband, 1);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // ----------------------------------------------------------------
+    // Step 2: Compute alpha_up/dn = bloch * dV * Chi_soc^T * psi_up/dn
+    // ----------------------------------------------------------------
+    CUDA_CHECK(cudaMemset(d_alpha_up, 0, alpha_bytes));
+    CUDA_CHECK(cudaMemset(d_alpha_dn, 0, alpha_bytes));
+
+    {
+        int threads = 256;
+        if (max_nproj_soc * Nband < threads)
+            threads = ((max_nproj_soc * Nband + 31) / 32) * 32;
+        if (threads < 32) threads = 32;
+
+        soc_gather_alpha_z_kernel<<<n_influence_soc, threads>>>(
+            d_psi_spinor, d_Chi_soc_flat, d_gpos_flat,
+            d_gpos_offsets_soc, d_chi_soc_offsets,
+            d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
+            d_bloch_fac,
+            d_alpha_up, d_alpha_dn,
+            Nd_d, Nband, Nband, 0, dV, n_influence_soc);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Download alpha and occupations to host
+    std::vector<cuDoubleComplex> h_alpha_up(alpha_elems);
+    std::vector<cuDoubleComplex> h_alpha_dn(alpha_elems);
+    std::vector<double> h_occ(Nband);
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost));
+
+    // ----------------------------------------------------------------
+    // Step 3: Compute SOC energy_nl on CPU
+    // ----------------------------------------------------------------
+    double energy_soc = 0.0;
+    for (int ia = 0; ia < n_phys_atoms; ++ia) {
+        int off = h_IP_displ_phys_soc[ia];
+        int nproj = h_IP_displ_phys_soc[ia + 1] - off;
+        if (nproj == 0) continue;
+
+        for (int n = 0; n < Nband; ++n) {
+            double g_n = h_occ[n];
+            if (fabs(g_n) < 1e-15) continue;
+
+            for (int jp = 0; jp < nproj; ++jp) {
+                int glob_jp = off + jp;
+                int l = h_proj_l[glob_jp];
+                int m = h_proj_m[glob_jp];
+                double gamma_soc = h_Gamma_soc[glob_jp];
+                int idx = glob_jp * Nband + n;
+
+                // Term 1: 0.5 * m * gamma_soc * (|alpha_up|^2 - |alpha_dn|^2)
+                if (m != 0) {
+                    double norm_up = h_alpha_up[idx].x * h_alpha_up[idx].x
+                                   + h_alpha_up[idx].y * h_alpha_up[idx].y;
+                    double norm_dn = h_alpha_dn[idx].x * h_alpha_dn[idx].x
+                                   + h_alpha_dn[idx].y * h_alpha_dn[idx].y;
+                    energy_soc += wk * g_n * 0.5 * (double)m * gamma_soc * (norm_up - norm_dn);
+                }
+
+                // Term 2: L+S- (m -> m+1)
+                if (m + 1 <= l) {
+                    double ladder = sqrt((double)(l * (l + 1) - m * (m + 1)));
+                    int idx_s = (off + jp + 1) * Nband + n;
+                    // Re(conj(alpha_up[m]) * alpha_dn[m+1])
+                    double re_val = h_alpha_up[idx].x * h_alpha_dn[idx_s].x
+                                  + h_alpha_up[idx].y * h_alpha_dn[idx_s].y;
+                    energy_soc += wk * g_n * 0.5 * ladder * gamma_soc * re_val;
+                }
+
+                // Term 2: L-S+ (m -> m-1)
+                if (m - 1 >= -l) {
+                    double ladder = sqrt((double)(l * (l + 1) - m * (m - 1)));
+                    int idx_s = (off + jp - 1) * Nband + n;
+                    // Re(conj(alpha_dn[m]) * alpha_up[m-1])
+                    double re_val = h_alpha_dn[idx].x * h_alpha_up[idx_s].x
+                                  + h_alpha_dn[idx].y * h_alpha_up[idx_s].y;
+                    energy_soc += wk * g_n * 0.5 * ladder * gamma_soc * re_val;
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Step 4: For each Voigt pair, compute gradient on GPU, then
+    //         position-weighted beta and stress reduction on CPU
+    // ----------------------------------------------------------------
+    double snl[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+
+    // We need the gradient for each direction (0,1,2). To avoid recomputing,
+    // cache gradients: compute all 3 directions once, download, then do
+    // all 6 Voigt pairs on CPU.
+    // Each gradient: Nd_d * Nband * sizeof(cuDoubleComplex) = Nd_d * Nband * 16 bytes
+    std::vector<cuDoubleComplex> h_Dpsi_up_all[3];
+    std::vector<cuDoubleComplex> h_Dpsi_dn_all[3];
+
+    for (int dim = 0; dim < 3; ++dim) {
+        // Complex halo exchange + gradient for psi_up
+        halo_exchange_z_gpu(d_psi_up, d_x_ex, nx, ny, nz, FDn, Nband,
+                            true, true, true, kx_Lx, ky_Ly, kz_Lz);
+        gradient_z_gpu(d_x_ex, d_Dpsi_up, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband);
+
+        // Complex halo exchange + gradient for psi_dn
+        halo_exchange_z_gpu(d_psi_dn, d_x_ex, nx, ny, nz, FDn, Nband,
+                            true, true, true, kx_Lx, ky_Ly, kz_Lz);
+        gradient_z_gpu(d_x_ex, d_Dpsi_dn, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband);
+
+        // Download gradients to host
+        h_Dpsi_up_all[dim].resize((size_t)Nd_d * Nband);
+        h_Dpsi_dn_all[dim].resize((size_t)Nd_d * Nband);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaMemcpy(h_Dpsi_up_all[dim].data(), d_Dpsi_up, psi_comp_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(h_Dpsi_dn_all[dim].data(), d_Dpsi_dn, psi_comp_bytes, cudaMemcpyDeviceToHost));
+    }
+
+    // CPU: for each Voigt pair (dim, dim2), compute position-weighted beta and reduce
+    int cnt = 0;
+    for (int dim = 0; dim < 3; ++dim) {
+        for (int dim2 = dim; dim2 < 3; ++dim2) {
+            const cuDoubleComplex* h_dpsi_up = h_Dpsi_up_all[dim].data();
+            const cuDoubleComplex* h_dpsi_dn = h_Dpsi_dn_all[dim].data();
+
+            // Compute beta_soc_up/dn: bloch * dV * Chi_soc^T * (xR_dim2 * dpsi_dim)
+            std::vector<cuDoubleComplex> beta_soc_up(alpha_elems, make_cuDoubleComplex(0.0, 0.0));
+            std::vector<cuDoubleComplex> beta_soc_dn(alpha_elems, make_cuDoubleComplex(0.0, 0.0));
+
+            for (int iat = 0; iat < n_influence_soc; ++iat) {
+                int ndc = h_ndc_arr_soc[iat];
+                int np = h_nproj_soc_arr[iat];
+                if (ndc == 0 || np == 0) continue;
+
+                int goff = h_gpos_offsets_soc[iat];
+                int coff = h_chi_soc_offsets[iat];
+                int abase = h_IP_displ_soc_inf[iat];
+
+                double ap_x = h_atom_pos_soc[iat * 3 + 0];
+                double ap_y = h_atom_pos_soc[iat * 3 + 1];
+                double ap_z = h_atom_pos_soc[iat * 3 + 2];
+
+                // Bloch factor for this influence atom
+                double bloch_cos = h_bloch_fac[iat * 2 + 0];
+                double bloch_sin = h_bloch_fac[iat * 2 + 1];
+                // beta_scale = bloch * dV
+                double bs_re = bloch_cos * dV;
+                double bs_im = bloch_sin * dV;
+
+                for (int jp = 0; jp < np; ++jp) {
+                    for (int n = 0; n < Nband; ++n) {
+                        double dot_up_re = 0.0, dot_up_im = 0.0;
+                        double dot_dn_re = 0.0, dot_dn_im = 0.0;
+
+                        for (int ig = 0; ig < ndc; ++ig) {
+                            int flat = h_gpos_flat[goff + ig];
+                            int li = flat % nx;
+                            int lj = (flat / nx) % ny;
+
+                            double xR;
+                            if (dim2 == 0) {
+                                xR = (li + xs) * dx - ap_x;
+                            } else if (dim2 == 1) {
+                                xR = (lj + ys) * dy - ap_y;
+                            } else {
+                                int lk = flat / (nx * ny);
+                                xR = (lk + zs) * dz - ap_z;
+                            }
+
+                            double chi_val = h_Chi_soc_flat[coff + jp * ndc + ig];
+                            double w = chi_val * xR;
+
+                            // dpsi_up[gpos[ig] + n * Nd_d]
+                            int psi_idx = n * Nd_d + flat;
+                            cuDoubleComplex dp_up = h_dpsi_up[psi_idx];
+                            cuDoubleComplex dp_dn = h_dpsi_dn[psi_idx];
+
+                            dot_up_re += w * dp_up.x;
+                            dot_up_im += w * dp_up.y;
+                            dot_dn_re += w * dp_dn.x;
+                            dot_dn_im += w * dp_dn.y;
+                        }
+
+                        // Multiply by beta_scale = bloch * dV (complex)
+                        int out_idx = (abase + jp) * Nband + n;
+                        beta_soc_up[out_idx].x += bs_re * dot_up_re - bs_im * dot_up_im;
+                        beta_soc_up[out_idx].y += bs_re * dot_up_im + bs_im * dot_up_re;
+                        beta_soc_dn[out_idx].x += bs_re * dot_dn_re - bs_im * dot_dn_im;
+                        beta_soc_dn[out_idx].y += bs_re * dot_dn_im + bs_im * dot_dn_re;
+                    }
+                }
+            }
+
+            // Accumulate SOC nonlocal stress for this Voigt pair
+            for (int ia = 0; ia < n_phys_atoms; ++ia) {
+                int off = h_IP_displ_phys_soc[ia];
+                int nproj = h_IP_displ_phys_soc[ia + 1] - off;
+                if (nproj == 0) continue;
+
+                for (int n = 0; n < Nband; ++n) {
+                    double g_n = h_occ[n];
+                    if (fabs(g_n) < 1e-15) continue;
+
+                    for (int jp = 0; jp < nproj; ++jp) {
+                        int glob_jp = off + jp;
+                        int l = h_proj_l[glob_jp];
+                        int m = h_proj_m[glob_jp];
+                        double gamma_soc = h_Gamma_soc[glob_jp];
+                        int idx = glob_jp * Nband + n;
+
+                        // Term 1: on-diagonal (Lz*Sz)
+                        if (m != 0) {
+                            double re_au_bu = h_alpha_up[idx].x * beta_soc_up[idx].x
+                                            + h_alpha_up[idx].y * beta_soc_up[idx].y;
+                            double re_ad_bd = h_alpha_dn[idx].x * beta_soc_dn[idx].x
+                                            + h_alpha_dn[idx].y * beta_soc_dn[idx].y;
+                            snl[cnt] -= 0.5 * (double)m * gamma_soc * (re_au_bu - re_ad_bd) * wk * g_n;
+                        }
+
+                        // Term 2: L+S- (m -> m+1)
+                        if (m + 1 <= l) {
+                            double ladder = sqrt((double)(l * (l + 1) - m * (m + 1)));
+                            int idx_s = (off + jp + 1) * Nband + n;
+                            double re_val = h_alpha_up[idx].x * beta_soc_dn[idx_s].x
+                                          + h_alpha_up[idx].y * beta_soc_dn[idx_s].y;
+                            snl[cnt] -= 0.5 * ladder * gamma_soc * re_val * wk * g_n;
+                        }
+
+                        // Term 2: L-S+ (m -> m-1)
+                        if (m - 1 >= -l) {
+                            double ladder = sqrt((double)(l * (l + 1) - m * (m - 1)));
+                            int idx_s = (off + jp - 1) * Nband + n;
+                            double re_val = h_alpha_dn[idx].x * beta_soc_up[idx_s].x
+                                          + h_alpha_dn[idx].y * beta_soc_up[idx_s].y;
+                            snl[cnt] -= 0.5 * ladder * gamma_soc * re_val * wk * g_n;
+                        }
+                    }
+                }
+            }
+            cnt++;
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Step 5: Apply spn_fac, output results
+    // ----------------------------------------------------------------
+    for (int i = 0; i < 6; ++i)
+        snl[i] *= spn_fac;
+
+    // energy_soc scaled by spn_fac (=2.0 for SOC spinor)
+    energy_soc *= spn_fac;
+
+    // Subtract energy_soc from diagonal: xx(0), yy(3), zz(5)
+    h_stress_soc[0] = snl[0] - energy_soc;
+    h_stress_soc[1] = snl[1];
+    h_stress_soc[2] = snl[2];
+    h_stress_soc[3] = snl[3] - energy_soc;
+    h_stress_soc[4] = snl[4];
+    h_stress_soc[5] = snl[5] - energy_soc;
+
+    *h_energy_soc = energy_soc;
+
+    // Free GPU scratch
+    cudaFreeAsync(d_alpha_up, 0);
+    cudaFreeAsync(d_alpha_dn, 0);
+    cudaFreeAsync(d_psi_up, 0);
+    cudaFreeAsync(d_psi_dn, 0);
+    cudaFreeAsync(d_Dpsi_up, 0);
+    cudaFreeAsync(d_Dpsi_dn, 0);
+    cudaFreeAsync(d_x_ex, 0);
+}
+
 } // namespace gpu
 } // namespace lynx
 
