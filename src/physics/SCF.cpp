@@ -491,9 +491,24 @@ double SCF::run(Wavefunction& wfn,
     // Lanczos to estimate spectrum
     if (is_soc_) {
         Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+        // Set k-point on nonlocal projector BEFORE Lanczos (required for SOC)
+        if (vnl_ && vnl_->is_setup()) {
+            const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt0);
+            const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
+        }
+        // For SOC: use spinor Lanczos for eigmin (needs to capture deep core states
+        // from SOC splitting at ~-2500 Ha) but scalar Lanczos for eigmax (the high-energy
+        // SOC states at ~+2000 Ha are not needed). The Chebyshev filter then brackets
+        // the full occupied spectrum [eigmin_spinor, eigmax_scalar].
+        double eigmin_spinor, eigmax_spinor;
         eigsolver.lanczos_bounds_spinor_kpt(Veff_spinor_.data(), Nd_d,
                                              kpt0, cell_lengths,
-                                             eigval_min[0], eigval_max[0]);
+                                             eigmin_spinor, eigmax_spinor);
+        double eigmin_scalar, eigmax_scalar;
+        eigsolver.lanczos_bounds_kpt(Veff_.data(), Nd_d, kpt0, cell_lengths,
+                                      eigmin_scalar, eigmax_scalar);
+        eigval_min[0] = eigmin_spinor;   // deep core from SOC
+        eigval_max[0] = eigmax_scalar;   // kinetic energy upper bound (no SOC)
     } else {
         for (int s = 0; s < Nspin_local; ++s) {
             int s_glob = spin_start_ + s;
@@ -507,7 +522,19 @@ double SCF::run(Wavefunction& wfn,
             }
         }
     }
-    double lambda_cutoff = 0.5 * (eigval_min[0] + eigval_max[0]);
+    double lambda_cutoff;
+    if (is_soc_) {
+        // For SOC: the eigmin is from deep core states (-2530 Ha) but the occupied
+        // valence states are near 0 Ha. Use scalar midpoint for the cutoff so it's
+        // above the Fermi level, not below.
+        double eigmin_scalar, eigmax_scalar;
+        Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+        eigsolver.lanczos_bounds_kpt(Veff_.data(), Nd_d, kpt0, cell_lengths,
+                                      eigmin_scalar, eigmax_scalar);
+        lambda_cutoff = 0.5 * (eigmin_scalar + eigval_max[0]);
+    } else {
+        lambda_cutoff = 0.5 * (eigval_min[0] + eigval_max[0]);
+    }
     if (rank_world == 0) {
         for (int s = 0; s < Nspin_local; ++s)
             std::printf("Lanczos bounds (spin %d): eigmin=%.6e, eigmax=%.6e\n",

@@ -214,36 +214,8 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     // Line 1 format: "Si    ONCVPSP-4.0.1  r_core=   1.91059   1.91059   1.91059"
     // We saved it in the first read
 
-    // Try to read NLCC data (model core charge)
-    if (fchrg_ > 1e-10) {
-        rho_c_.resize(mmax, 0.0);
-        for (int i = 0; i < mmax; ++i) {
-            if (!std::getline(ifs, line)) break;
-            std::istringstream ss(line);
-            int idx;
-            double ri;
-            ss >> idx >> ri;
-            double rho_c_val;
-            ss >> rho_c_val;
-            rho_c_[i] = rho_c_val / (4.0 * M_PI);
-        }
-    }
-
-    // Try to read isolated atom density
-    rho_iso_atom_.resize(mmax, 0.0);
-    for (int i = 0; i < mmax; ++i) {
-        if (!std::getline(ifs, line)) break;
-        if (line.empty()) break;
-        std::istringstream ss(line);
-        int idx;
-        double ri;
-        ss >> idx >> ri;
-        double rho_val;
-        ss >> rho_val;
-        rho_iso_atom_[i] = rho_val / (4.0 * M_PI);
-    }
-
     // Read SOC projectors if extension_switch >= 2
+    // NOTE: in psp8 format, SOC data comes BEFORE NLCC and isolated atom density
     if (extension_switch >= 2 && lmax_ >= 1) {
         has_soc_ = true;
         ppl_soc_.resize(lmax_ + 1, 0);
@@ -298,6 +270,35 @@ void Pseudopotential::load_psp8(const std::string& filename) {
                 }
             }
         }
+    }
+
+    // Read NLCC data (model core charge) — comes after SOC in psp8 format
+    if (fchrg_ > 1e-10) {
+        rho_c_.resize(mmax, 0.0);
+        for (int i = 0; i < mmax; ++i) {
+            if (!std::getline(ifs, line)) break;
+            std::istringstream ss(line);
+            int idx;
+            double ri;
+            ss >> idx >> ri;
+            double rho_c_val;
+            ss >> rho_c_val;
+            rho_c_[i] = rho_c_val / (4.0 * M_PI);
+        }
+    }
+
+    // Read isolated atom density — comes after NLCC in psp8 format
+    rho_iso_atom_.resize(mmax, 0.0);
+    for (int i = 0; i < mmax; ++i) {
+        if (!std::getline(ifs, line)) break;
+        if (line.empty()) break;
+        std::istringstream ss(line);
+        int idx;
+        double ri;
+        ss >> idx >> ri;
+        double rho_val;
+        ss >> rho_val;
+        rho_iso_atom_[i] = rho_val / (4.0 * M_PI);
     }
 
     // Check if radial grid is uniform

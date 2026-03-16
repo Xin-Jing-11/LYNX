@@ -780,27 +780,12 @@ void EigenSolver::orthogonalize_kpt(Complex* X, int Nd_d, int Nband, double dV) 
     zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
            &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
 
-    // Cholesky (with shift fallback for near-singular overlap)
+    // Cholesky
     char uplo = 'U';
     int info;
     zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
     if (info != 0) {
-        // Overlap is near-singular (rank-deficient filtered vectors).
-        // Recompute S and add diagonal shift to regularize.
-        std::fill(S.begin(), S.end(), Complex(0.0));
-        zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
-               &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
-        // Shift = small fraction of average diagonal
-        double avg_diag = 0.0;
-        for (int i = 0; i < Nband; ++i) avg_diag += S[i + i * Nband].real();
-        avg_diag /= Nband;
-        double shift = 1e-8 * avg_diag;
-        for (int i = 0; i < Nband; ++i)
-            S[i + i * Nband] += Complex(shift, 0.0);
-        zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
-        if (info != 0) {
-            throw std::runtime_error("zpotrf failed in orthogonalize_kpt even after regularization");
-        }
+        throw std::runtime_error("zpotrf failed in orthogonalize_kpt (info=" + std::to_string(info) + ", Nd_d=" + std::to_string(Nd_d) + ", Nband=" + std::to_string(Nband) + ")");
     }
 
     // X <- X * R^{-1}
@@ -1113,6 +1098,7 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
             std::memcpy(Xold.data(), Y.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
             std::memcpy(Y.data(), Xnew.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
             sigma = sigma_new;
+
         }
     }
 
