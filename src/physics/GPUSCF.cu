@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include <numeric>
+#include <chrono>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cusolverDn.h>
@@ -1035,7 +1036,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     // Each chunk needs: 4 * Nd * batch_size * 16 bytes (psi_up/dn + Hpsi_up/dn)
     //                 + Nd_ex * batch_size * 16 bytes (x_ex for halo exchange)
     auto& ctx = gpu::GPUContext::instance();
-    int batch_size = ncol;  // try all at once first
+    int batch_size = ncol;  // process all at once
 
     // Limit batch_size so total scratch < ~200MB
     {
@@ -2117,7 +2118,27 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi.data(), bytes, cudaMemcpyHostToDevice));
         }
 
-        // 3. GPU: apply full spinor H*psi via callback (1 band)
+        // 3. GPU: benchmark H*psi with all bands
+        {
+            int Nb = wfn.Nband();
+            // Upload all bands
+            size_t all_bytes = 2 * (size_t)Nd_spinor * Nb * sizeof(double);
+            std::vector<double> h_all(2 * Nd_spinor * Nb);
+            std::memcpy(h_all.data(), wfn.psi_kpt(0, 0).data(), all_bytes);
+            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaDeviceSynchronize());
+            auto t0 = std::chrono::high_resolution_clock::now();
+            hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, Nb);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            printf("SOC H*psi benchmark: %d bands, Nd=%d, %.2f ms total (%.3f ms/band)\n",
+                   Nb, Nd_, ms, ms / Nb);
+            // Re-upload single band for validation
+            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), 2*(size_t)Nd_spinor*sizeof(double), cudaMemcpyHostToDevice));
+        }
+
+        // GPU: apply full spinor H*psi via callback (1 band for validation)
         hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
         std::vector<Complex> gpu_Hpsi(Nd_spinor);
