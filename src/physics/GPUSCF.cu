@@ -2243,14 +2243,183 @@ double GPUSCFRunner::run(
                 CUDA_CHECK(cudaMemcpy(gpu_goff.data(), gpu_soc_.d_gpos_offsets_soc, 2*sizeof(int), cudaMemcpyDeviceToHost));
                 std::vector<int> gpu_gpos(std::min(5, ndc0));
                 CUDA_CHECK(cudaMemcpy(gpu_gpos.data(), gpu_vnl_.d_gpos_flat + gpu_goff[0], gpu_gpos.size()*sizeof(int), cudaMemcpyDeviceToHost));
+                // Compare first few gpos offsets between SOC and Vnl
+                int n_check = std::min(5, gpu_soc_.n_influence_soc);
+                std::vector<int> soc_goffs(n_check+1), vnl_goffs(n_check+1);
+                std::vector<int> soc_ndc(n_check), vnl_ndc(n_check);
+                CUDA_CHECK(cudaMemcpy(soc_goffs.data(), gpu_soc_.d_gpos_offsets_soc, (n_check+1)*sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(vnl_goffs.data(), gpu_vnl_.d_gpos_offsets, (n_check+1)*sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(soc_ndc.data(), gpu_soc_.d_ndc_arr_soc, n_check*sizeof(int), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(vnl_ndc.data(), gpu_vnl_.d_ndc_arr, n_check*sizeof(int), cudaMemcpyDeviceToHost));
+                std::vector<int> soc_coffs(n_check+1);
+                CUDA_CHECK(cudaMemcpy(soc_coffs.data(), gpu_soc_.d_chi_soc_offsets, (n_check+1)*sizeof(int), cudaMemcpyDeviceToHost));
+                printf("  gpos_off SOC vs VNL (chi_soc_offs):\n");
+                for (int i = 0; i < n_check; i++)
+                    printf("    iat=%d: gpos_off=%d/%d ndc=%d/%d chi_off=%d np=%d\n",
+                           i, soc_goffs[i], vnl_goffs[i], soc_ndc[i], vnl_ndc[i],
+                           soc_coffs[i], soc_ndc[i] > 0 ? soc_coffs[i+1]-soc_coffs[i] : 0);
                 printf("  gpos_off_soc[0]=%d gpos[0..2]=%d %d %d CPU=%d %d %d\n",
                        gpu_goff[0], gpu_gpos[0], gpu_gpos[1], gpu_gpos[2],
                        gpos0[0], gpos0[1], gpos0[2]);
-                printf("  CPU alpha_soc[0]: up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
+                printf("  CPU alpha_soc[0] (1 image): up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
                        cpu_a_up.real(), cpu_a_up.imag(), cpu_a_dn.real(), cpu_a_dn.imag());
-                printf("  GPU alpha_soc[0]: up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
+                printf("  GPU alpha_soc[0] (all images): up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
                        gpu_alpha_up[0].real(), gpu_alpha_up[0].imag(),
                        gpu_alpha_dn[0].real(), gpu_alpha_dn[0].imag());
+                // Now compute CPU alpha summing ALL influence atoms for the same physical atom
+                int phys_atom_0 = inf0.atom_index[0];
+                Complex full_cpu_up(0), full_cpu_dn(0);
+                int iat_global = 0;
+                for (int it2 = 0; it2 < (int)nloc_influence.size(); it2++) {
+                    const auto& inf2 = nloc_influence[it2];
+                    const auto& psd2 = crystal.types()[it2].psd();
+                    int nproj_soc2 = 0;
+                    if (psd2.has_soc()) for (int l=1; l<=psd2.lmax(); l++) nproj_soc2 += psd2.ppl_soc()[l]*(2*l+1);
+                    for (int ia2 = 0; ia2 < inf2.n_atom; ia2++) {
+                        if (inf2.atom_index[ia2] == phys_atom_0 && nproj_soc2 > 0) {
+                            const auto& gp2 = inf2.grid_pos[ia2];
+                            int ndc2 = inf2.ndc[ia2];
+                            const Vec3& sh2 = inf2.image_shift[ia2];
+                            double th2 = -(kpt0v.x*sh2.x + kpt0v.y*sh2.y + kpt0v.z*sh2.z);
+                            Complex bl2(std::cos(th2), std::sin(th2));
+                            Complex au2(0), ad2(0);
+                            for (int ig = 0; ig < ndc2; ig++) {
+                                double cv = vnl->Chi_soc()[it2][ia2](ig, 0);
+                                au2 += cv * psi_ptr[gp2[ig]];
+                                ad2 += cv * psi_ptr[Nd_ + gp2[ig]];
+                            }
+                            full_cpu_up += bl2 * dV_ * au2;
+                            full_cpu_dn += bl2 * dV_ * ad2;
+                        }
+                        iat_global++;
+                    }
+                }
+                // IP_displ check
+                {
+                    int n_ip = std::min(5, gpu_soc_.n_influence_soc);
+                    std::vector<int> gpu_ip(n_ip), gpu_np(n_ip);
+                    CUDA_CHECK(cudaMemcpy(gpu_ip.data(), gpu_soc_.d_IP_displ_soc, n_ip*sizeof(int), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(gpu_np.data(), gpu_soc_.d_nproj_soc_arr, n_ip*sizeof(int), cudaMemcpyDeviceToHost));
+                    printf("  IP_displ_soc: ");
+                    for (int i=0;i<n_ip;i++) printf("%d(np=%d) ", gpu_ip[i], gpu_np[i]);
+                    printf("\n");
+                }
+                printf("  CPU alpha_soc[0] (all images): up=(%.6e,%.6e) dn=(%.6e,%.6e)\n",
+                       full_cpu_up.real(), full_cpu_up.imag(), full_cpu_dn.real(), full_cpu_dn.imag());
+            }
+
+            // === CPU reimplementation of SOC scatter using GPU alpha ===
+            // This eliminates all data/address questions — uses exact same alpha
+            {
+                std::vector<Complex> cpu_scatter(Nd_spinor, Complex(0));
+                int iat_global = 0;
+                for (int it2 = 0; it2 < (int)nloc_influence.size(); it2++) {
+                    const auto& inf2 = nloc_influence[it2];
+                    const auto& psd2 = crystal.types()[it2].psd();
+                    const auto& pi2 = vnl->soc_proj_info()[it2];
+                    int nproj_soc2 = (int)pi2.size();
+                    for (int ia2 = 0; ia2 < inf2.n_atom; ia2++) {
+                        int ndc2 = inf2.ndc[ia2];
+                        int global_atom2 = inf2.atom_index[ia2];
+                        const auto& gp2 = inf2.grid_pos[ia2];
+                        const Vec3& sh2 = inf2.image_shift[ia2];
+                        double th2 = -(kpt0v.x*sh2.x + kpt0v.y*sh2.y + kpt0v.z*sh2.z);
+                        Complex bloch_conj2(std::cos(th2), -std::sin(th2));
+                        // Compute IP_displ for this physical atom
+                        int ip_off2 = 0;
+                        { int pa=0; for (int jt=0; jt<crystal.n_types(); jt++) {
+                            const auto& ps=crystal.types()[jt].psd();
+                            int nps=0; if(ps.has_soc()) for(int l=1;l<=ps.lmax();l++) nps+=ps.ppl_soc()[l]*(2*l+1);
+                            for(int ja=0;ja<crystal.types()[jt].n_atoms();ja++){if(pa==global_atom2){ip_off2=0;goto found2;}ip_off2+=nps;pa++;}
+                        } found2:; }
+                        for (int jp = 0; jp < nproj_soc2; jp++) {
+                            int l2 = pi2[jp].l, m2 = pi2[jp].m;
+                            double g2 = psd2.Gamma_soc()[l2][pi2[jp].p];
+                            Complex au = gpu_alpha_up[ip_off2 + jp];
+                            Complex ad = gpu_alpha_dn[ip_off2 + jp];
+                            // Term 1
+                            if (m2 != 0) {
+                                Complex cu = 0.5 * double(m2) * g2 * au;
+                                Complex cd = -0.5 * double(m2) * g2 * ad;
+                                for (int ig=0; ig<ndc2; ig++) {
+                                    double cv = vnl->Chi_soc()[it2][ia2](ig, jp);
+                                    cpu_scatter[gp2[ig]] += bloch_conj2 * cu * cv;
+                                    cpu_scatter[Nd_ + gp2[ig]] += bloch_conj2 * cd * cv;
+                                }
+                            }
+                            // Term 2: L+S-
+                            if (m2+1 <= l2) {
+                                double ld = std::sqrt(double(l2*(l2+1)-m2*(m2+1)));
+                                Complex c2 = 0.5*ld*g2*gpu_alpha_dn[ip_off2+jp+1];
+                                for(int ig=0;ig<ndc2;ig++){
+                                    double cv=vnl->Chi_soc()[it2][ia2](ig,jp);
+                                    cpu_scatter[gp2[ig]]+=bloch_conj2*c2*cv;
+                                }
+                            }
+                            // Term 2: L-S+
+                            if (m2-1 >= -l2) {
+                                double ld = std::sqrt(double(l2*(l2+1)-m2*(m2-1)));
+                                Complex c2 = 0.5*ld*g2*gpu_alpha_up[ip_off2+jp-1];
+                                for(int ig=0;ig<ndc2;ig++){
+                                    double cv=vnl->Chi_soc()[it2][ia2](ig,jp);
+                                    cpu_scatter[Nd_+gp2[ig]]+=bloch_conj2*c2*cv;
+                                }
+                            }
+                        }
+                        iat_global++;
+                    }
+                }
+                // Compare cpu_scatter (manual, using GPU alpha) with gpu_soc_only
+                double max_scatter_err = 0;
+                int worst_s = 0;
+                for (int i = 0; i < Nd_spinor; i++) {
+                    double err = std::abs(cpu_scatter[i] - gpu_soc_only[i]);
+                    if (err > max_scatter_err) { max_scatter_err = err; worst_s = i; }
+                }
+                printf("  scatter GPU vs CPU-reimpl (full-localvnl): max_err=%.3e at i=%d\n", max_scatter_err, worst_s);
+
+                // Direct test: zero Hpsi, apply SOC only, compare directly
+                CUDA_CHECK(cudaMemset(d_Hpsi_spinor, 0, Nd_spinor * sizeof(cuDoubleComplex)));
+                gpu::soc_apply_z_gpu(d_psi_spinor, d_Hpsi_spinor,
+                    gpu_soc_.d_Chi_soc_flat, gpu_vnl_.d_gpos_flat,
+                    gpu_soc_.d_gpos_offsets_soc, gpu_soc_.d_chi_soc_offsets,
+                    gpu_soc_.d_ndc_arr_soc, gpu_soc_.d_nproj_soc_arr,
+                    gpu_soc_.d_IP_displ_soc, gpu_soc_.d_Gamma_soc,
+                    gpu_soc_.d_proj_l, gpu_soc_.d_proj_m,
+                    d_bloch_fac_,
+                    static_cast<cuDoubleComplex*>(gpu_soc_.d_alpha_soc_up),
+                    static_cast<cuDoubleComplex*>(gpu_soc_.d_alpha_soc_dn),
+                    Nd_, 1, dV_,
+                    gpu_soc_.n_influence_soc, gpu_soc_.total_soc_nproj,
+                    gpu_soc_.max_ndc_soc, gpu_soc_.max_nproj_soc);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                std::vector<Complex> gpu_soc_direct(Nd_spinor);
+                CUDA_CHECK(cudaMemcpy(gpu_soc_direct.data(), d_Hpsi_spinor, Nd_spinor*sizeof(Complex), cudaMemcpyDeviceToHost));
+                double max_direct_err = 0;
+                int worst_d = 0;
+                for (int i=0; i<Nd_spinor; i++) {
+                    double err = std::abs(gpu_soc_direct[i] - cpu_scatter[i]);
+                    if (err > max_direct_err) { max_direct_err = err; worst_d = i; }
+                }
+                printf("  scatter GPU(direct) vs CPU-reimpl: max_err=%.3e at i=%d\n", max_direct_err, worst_d);
+                if (max_direct_err > 1e-10) {
+                    printf("    GPU[%d]=(%.10e,%.10e)\n    CPU[%d]=(%.10e,%.10e)\n",
+                           worst_d, gpu_soc_direct[worst_d].real(), gpu_soc_direct[worst_d].imag(),
+                           worst_d, cpu_scatter[worst_d].real(), cpu_scatter[worst_d].imag());
+                    // Check nearby
+                    for (int di=-2; di<=2; di++) {
+                        int ii = worst_d + di;
+                        if (ii >= 0 && ii < Nd_spinor)
+                            printf("      [%d] G=(%.4e,%.4e) C=(%.4e,%.4e) d=%.2e\n",
+                                   ii, gpu_soc_direct[ii].real(), gpu_soc_direct[ii].imag(),
+                                   cpu_scatter[ii].real(), cpu_scatter[ii].imag(),
+                                   std::abs(gpu_soc_direct[ii]-cpu_scatter[ii]));
+                    }
+                }
+                if (max_scatter_err > 1e-10)
+                    printf("    GPU[%d]=(%.6e,%.6e) CPU[%d]=(%.6e,%.6e)\n",
+                           worst_s, gpu_soc_only[worst_s].real(), gpu_soc_only[worst_s].imag(),
+                           worst_s, cpu_scatter[worst_s].real(), cpu_scatter[worst_s].imag());
             }
 
             // CPU SOC-only: full - localvnl
