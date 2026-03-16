@@ -72,14 +72,19 @@ public:
     const std::array<double, 6>& electrostatic_stress() const { return stress_el_; }
     const std::array<double, 6>& nonlocal_stress() const { return stress_nl_; }
     const std::array<double, 6>& total_stress() const { return stress_total_; }
+    const std::array<double, 6>& soc_stress() const { return stress_soc_; }
+    double soc_energy() const { return energy_soc_; }
+    void set_cell_measure(double cm) { cell_measure_ = cm; }
 
 private:
     std::array<double, 6> stress_k_ = {};
     std::array<double, 6> stress_xc_ = {};
     std::array<double, 6> stress_el_ = {};
     std::array<double, 6> stress_nl_ = {};
+    std::array<double, 6> stress_soc_ = {};
     std::array<double, 6> stress_total_ = {};
     double cell_measure_ = 0.0;
+    double energy_soc_ = 0.0;
 
     // XC stress: diagonal = (Exc - Exc_corr), GGA correction = -∫ Dxcdgrho * ∂ρ/∂x_α * ∂ρ/∂x_β dV
     void compute_xc_stress(
@@ -124,6 +129,7 @@ private:
         const double* Vxc,
         int Nspin);
 
+public:
     // Nonlocal+kinetic stress combined (matching reference)
     void compute_nonlocal_kinetic(
         const Wavefunction& wfn,

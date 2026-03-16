@@ -972,6 +972,9 @@ void compute_soc_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd_d, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs,
+    bool is_orth,
+    const double* uvec,      // [9] lattice vectors (row-major) for nonCart2Cart_coord, may be null if orth
+    const double* uvec_inv,  // [9] inverse lat vectors for nonCart2Cart_grad, may be null if orth
     double kx_Lx, double ky_Ly, double kz_Lz,
     // Host-side proj info for reduction
     const int* h_proj_l, const int* h_proj_m,
@@ -1158,12 +1161,33 @@ void compute_soc_stress_gpu(
         CUDA_CHECK(cudaMemcpy(h_Dpsi_dn_all[dim].data(), d_Dpsi_dn, psi_comp_bytes, cudaMemcpyDeviceToHost));
     }
 
+    // For non-orthogonal: transform gradients to Cartesian
+    // dpsi_cart[dim] = sum_d uvec_inv[dim][d] * dpsi_nc[d]
+    // Do this transform once for all 3 Cartesian directions
+    std::vector<cuDoubleComplex> h_Dpsi_up_cart[3], h_Dpsi_dn_cart[3];
+    if (!is_orth && uvec_inv) {
+        for (int dim = 0; dim < 3; dim++) {
+            h_Dpsi_up_cart[dim].resize((size_t)Nd_d * Nband);
+            h_Dpsi_dn_cart[dim].resize((size_t)Nd_d * Nband);
+            for (int idx = 0; idx < Nd_d * Nband; idx++) {
+                cuDoubleComplex d0_u = h_Dpsi_up_all[0][idx], d1_u = h_Dpsi_up_all[1][idx], d2_u = h_Dpsi_up_all[2][idx];
+                cuDoubleComplex d0_d = h_Dpsi_dn_all[0][idx], d1_d = h_Dpsi_dn_all[1][idx], d2_d = h_Dpsi_dn_all[2][idx];
+                h_Dpsi_up_cart[dim][idx] = make_cuDoubleComplex(
+                    uvec_inv[dim*3+0]*d0_u.x + uvec_inv[dim*3+1]*d1_u.x + uvec_inv[dim*3+2]*d2_u.x,
+                    uvec_inv[dim*3+0]*d0_u.y + uvec_inv[dim*3+1]*d1_u.y + uvec_inv[dim*3+2]*d2_u.y);
+                h_Dpsi_dn_cart[dim][idx] = make_cuDoubleComplex(
+                    uvec_inv[dim*3+0]*d0_d.x + uvec_inv[dim*3+1]*d1_d.x + uvec_inv[dim*3+2]*d2_d.x,
+                    uvec_inv[dim*3+0]*d0_d.y + uvec_inv[dim*3+1]*d1_d.y + uvec_inv[dim*3+2]*d2_d.y);
+            }
+        }
+    }
+
     // CPU: for each Voigt pair (dim, dim2), compute position-weighted beta and reduce
     int cnt = 0;
     for (int dim = 0; dim < 3; ++dim) {
         for (int dim2 = dim; dim2 < 3; ++dim2) {
-            const cuDoubleComplex* h_dpsi_up = h_Dpsi_up_all[dim].data();
-            const cuDoubleComplex* h_dpsi_dn = h_Dpsi_dn_all[dim].data();
+            const cuDoubleComplex* h_dpsi_up = is_orth ? h_Dpsi_up_all[dim].data() : h_Dpsi_up_cart[dim].data();
+            const cuDoubleComplex* h_dpsi_dn = is_orth ? h_Dpsi_dn_all[dim].data() : h_Dpsi_dn_cart[dim].data();
 
             // Compute beta_soc_up/dn: bloch * dV * Chi_soc^T * (xR_dim2 * dpsi_dim)
             std::vector<cuDoubleComplex> beta_soc_up(alpha_elems, make_cuDoubleComplex(0.0, 0.0));
@@ -1199,15 +1223,21 @@ void compute_soc_stress_gpu(
                             int li = flat % nx;
                             int lj = (flat / nx) % ny;
 
-                            double xR;
-                            if (dim2 == 0) {
-                                xR = (li + xs) * dx - ap_x;
-                            } else if (dim2 == 1) {
-                                xR = (lj + ys) * dy - ap_y;
-                            } else {
-                                int lk = flat / (nx * ny);
-                                xR = (lk + zs) * dz - ap_z;
+                            int lk = flat / (nx * ny);
+                            double r1 = (li + xs) * dx - ap_x;
+                            double r2 = (lj + ys) * dy - ap_y;
+                            double r3 = (lk + zs) * dz - ap_z;
+                            // For non-orth: transform to Cartesian
+                            if (!is_orth && uvec) {
+                                double a = r1, b = r2, c = r3;
+                                r1 = uvec[0]*a + uvec[3]*b + uvec[6]*c;
+                                r2 = uvec[1]*a + uvec[4]*b + uvec[7]*c;
+                                r3 = uvec[2]*a + uvec[5]*b + uvec[8]*c;
                             }
+                            double xR;
+                            if (dim2 == 0) xR = r1;
+                            else if (dim2 == 1) xR = r2;
+                            else xR = r3;
 
                             double chi_val = h_Chi_soc_flat[coff + jp * ndc + ig];
                             double w = chi_val * xR;

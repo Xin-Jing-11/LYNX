@@ -28,6 +28,7 @@
 #include "electronic/Occupation.hpp"
 #include "physics/Electrostatics.hpp"
 #include "physics/Forces.hpp"
+#include "physics/Stress.hpp"
 
 namespace lynx {
 
@@ -162,6 +163,7 @@ void compute_soc_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd_d, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs,
+    bool is_orth, const double* uvec, const double* uvec_inv,
     double kx_Lx, double ky_Ly, double kz_Lz,
     const int* h_proj_l, const int* h_proj_m,
     const double* h_Gamma_soc,
@@ -2296,11 +2298,47 @@ double GPUSCFRunner::run(
                                kpt_weights_in, kpoints_, kpt_start_,
                                gpu_stress_soc.data(), &gpu_energy_soc);
 
-            // Print (no CPU stress comparison for now - CPU stress computation is complex)
-            printf("SOC stress (GPU): [%.6e, %.6e, %.6e, %.6e, %.6e, %.6e]\n",
+            // --- CPU SOC stress (call compute_nonlocal_kinetic directly) ---
+            std::array<double, 6> cpu_stress_soc = {};
+            double cpu_energy_soc = 0;
+            {
+                Gradient grad_tmp(stencil, domain);
+                MPIComm comm_self(MPI_COMM_SELF);
+                const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
+                Stress stress_cpu;
+                // Set cell_measure for normalization
+                Vec3 L = grid.lattice().lengths();
+                double Jacbdet = grid.lattice().jacobian() / (L.x * L.y * L.z);
+                double cm = Jacbdet * L.x * L.y * L.z;  // all periodic
+                stress_cpu.set_cell_measure(cm);
+                stress_cpu.compute_nonlocal_kinetic(
+                    wfn, crystal, nloc_influence, *vnl,
+                    grad_tmp, halo, domain, grid,
+                    kpt_weights_in, comm_self, comm_self, comm_self,
+                    kpoints_, kpt_start_, 0);
+                cpu_stress_soc = stress_cpu.soc_stress();
+                cpu_energy_soc = stress_cpu.soc_energy();
+            }
+
+            // Compare
+            double max_s_err = 0, s_norm = 0;
+            for (int i = 0; i < 6; i++) {
+                max_s_err = std::max(max_s_err, std::abs(gpu_stress_soc[i] - cpu_stress_soc[i]));
+                s_norm += cpu_stress_soc[i] * cpu_stress_soc[i];
+            }
+            s_norm = std::sqrt(s_norm);
+            double s_rel = (s_norm > 1e-30) ? max_s_err / s_norm : max_s_err;
+            printf("SOC stress validation: max_err=%.3e, rel_err=%.3e %s\n",
+                   max_s_err, s_rel, s_rel < 1e-8 ? "[PASS]" : "[FAIL]");
+            printf("  GPU: [%.6e, %.6e, %.6e, %.6e, %.6e, %.6e]\n",
                    gpu_stress_soc[0], gpu_stress_soc[1], gpu_stress_soc[2],
                    gpu_stress_soc[3], gpu_stress_soc[4], gpu_stress_soc[5]);
-            printf("SOC energy_nl: %.6e\n", gpu_energy_soc);
+            printf("  CPU: [%.6e, %.6e, %.6e, %.6e, %.6e, %.6e]\n",
+                   cpu_stress_soc[0], cpu_stress_soc[1], cpu_stress_soc[2],
+                   cpu_stress_soc[3], cpu_stress_soc[4], cpu_stress_soc[5]);
+            double e_err = std::abs(gpu_energy_soc - cpu_energy_soc);
+            printf("SOC energy: GPU=%.6e CPU=%.6e err=%.3e\n",
+                   gpu_energy_soc, cpu_energy_soc, e_err);
 
             cudaFreeAsync(d_occ_test, 0);
         }
@@ -3414,6 +3452,18 @@ void GPUSCFRunner::compute_soc_stress(
         CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), 0));
         CUDA_CHECK(cudaMemcpy(d_occ, occ_k.data(), Nband * sizeof(double), cudaMemcpyHostToDevice));
 
+        // Lattice vectors for non-orth transforms
+        double uvec_data[9] = {0}, uvec_inv_data[9] = {0};
+        if (!is_orth_) {
+            auto uv = grid.lattice().lat_uvec();
+            auto uvi = grid.lattice().lat_uvec_inv();
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++) {
+                    uvec_data[i*3+j] = uv(i,j);
+                    uvec_inv_data[i*3+j] = uvi(i,j);
+                }
+        }
+
         // SOC stress for this k-point
         double stress_soc_k[6] = {0.0};
         double energy_soc_k = 0.0;
@@ -3435,6 +3485,7 @@ void GPUSCFRunner::compute_soc_stress(
             nx_, ny_, nz_, FDn_, Nd_d, Nband,
             dV, grid.dx(), grid.dy(), grid.dz(),
             domain.vertices().xs, domain.vertices().ys, domain.vertices().zs,
+            is_orth_, uvec_data, uvec_inv_data,
             kxLx, kyLy, kzLz,
             h_proj_l.data(), h_proj_m.data(), h_Gamma_soc.data(),
             h_Chi_soc_flat.data(),

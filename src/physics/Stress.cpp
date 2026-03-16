@@ -808,7 +808,7 @@ void Stress::compute_nonlocal_kinetic(
 
     double energy_nl = 0.0;
     double energy_soc = 0.0;
-    std::array<double, 6> sk = {}, snl = {};
+    std::array<double, 6> sk = {}, snl = {}, snl_soc = {};
 
     for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts; ++k) {
@@ -1225,7 +1225,7 @@ void Stress::compute_nonlocal_kinetic(
                                             double val = 0.5 * static_cast<double>(m) * gamma_soc * (
                                                 std::real(std::conj(alpha_soc_up[off + jp]) * beta_soc_up[off + jp]) -
                                                 std::real(std::conj(alpha_soc_dn[off + jp]) * beta_soc_dn[off + jp]));
-                                            snl[cnt] -= val * wk * g_n;
+                                            snl[cnt] -= val * wk * g_n; snl_soc[cnt] -= val * wk * g_n;
                                         }
 
                                         // Term 2: L+S- (raises m, dn->up coupling)
@@ -1234,7 +1234,7 @@ void Stress::compute_nonlocal_kinetic(
                                             int jp_shifted = jp + 1;
                                             double val = 0.5 * ladder * gamma_soc *
                                                 std::real(std::conj(alpha_soc_up[off + jp]) * beta_soc_dn[off + jp_shifted]);
-                                            snl[cnt] -= val * wk * g_n;
+                                            snl[cnt] -= val * wk * g_n; snl_soc[cnt] -= val * wk * g_n;
                                         }
 
                                         // Term 2: L-S+ (lowers m, up->dn coupling)
@@ -1243,7 +1243,7 @@ void Stress::compute_nonlocal_kinetic(
                                             int jp_shifted = jp - 1;
                                             double val = 0.5 * ladder * gamma_soc *
                                                 std::real(std::conj(alpha_soc_dn[off + jp]) * beta_soc_up[off + jp_shifted]);
-                                            snl[cnt] -= val * wk * g_n;
+                                            snl[cnt] -= val * wk * g_n; snl_soc[cnt] -= val * wk * g_n;
                                         }
                                     }
                                 }
@@ -1383,6 +1383,7 @@ void Stress::compute_nonlocal_kinetic(
     // Scale nonlocal by spn_fac
     // For SOC (Nspinor==2): spn_fac = 1.0 * 2.0 = 2.0
     for (int i = 0; i < 6; ++i) snl[i] *= spn_fac;
+    for (int i = 0; i < 6; ++i) snl_soc[i] *= 2.0;  // SOC spn_fac = 2.0
     energy_nl *= occfac;
     energy_soc *= 2.0;  // SOC energy scaled by 2.0 (spn_fac for SOC)
 
@@ -1396,6 +1397,15 @@ void Stress::compute_nonlocal_kinetic(
     stress_nl_[5] = snl[5] - energy_diag;
     for (int i = 0; i < 6; ++i) stress_k_[i] = sk[i];
 
+    // SOC-only stress (for GPU comparison)
+    stress_soc_[0] = snl_soc[0] - energy_soc;
+    stress_soc_[1] = snl_soc[1];
+    stress_soc_[2] = snl_soc[2];
+    stress_soc_[3] = snl_soc[3] - energy_soc;
+    stress_soc_[4] = snl_soc[4];
+    stress_soc_[5] = snl_soc[5] - energy_soc;
+    energy_soc_ = energy_soc;
+
     // Allreduce across spin, kpt, band
     auto allreduce6 = [](std::array<double,6>& arr, const MPIComm& comm) {
         if (!comm.is_null() && comm.size() > 1)
@@ -1405,9 +1415,14 @@ void Stress::compute_nonlocal_kinetic(
     allreduce6(stress_nl_, kptcomm);  allreduce6(stress_k_, kptcomm);
     allreduce6(stress_nl_, bandcomm); allreduce6(stress_k_, bandcomm);
 
+    allreduce6(stress_soc_, spincomm);
+    allreduce6(stress_soc_, kptcomm);
+    allreduce6(stress_soc_, bandcomm);
+
     for (int i = 0; i < 6; ++i) {
         stress_nl_[i] /= cell_measure_;
         stress_k_[i] /= cell_measure_;
+        stress_soc_[i] /= cell_measure_;
     }
 }
 

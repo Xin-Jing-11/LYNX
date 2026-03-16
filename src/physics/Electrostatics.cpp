@@ -194,14 +194,12 @@ void Electrostatics::compute_pseudocharge(
             int k_s = inf.zs[iat], k_e = inf.ze[iat];
 
             // Extended grid dimensions for Laplacian computation
-            // Non-orthogonal cells: mixed derivatives need 2*FDn halo
             int nx_loc = i_e - i_s + 1;
             int ny_loc = j_e - j_s + 1;
             int nz_loc = k_e - k_s + 1;
-            int halo = is_orth ? FDn : 2 * FDn;
-            int nxp = nx_loc + 2 * halo;
-            int nyp = ny_loc + 2 * halo;
-            int nzp = nz_loc + 2 * halo;
+            int nxp = nx_loc + 2 * FDn;
+            int nyp = ny_loc + 2 * FDn;
+            int nzp = nz_loc + 2 * FDn;
             int ndp = nxp * nyp * nzp;
             if (iat % 10 == 0) {
                 std::printf("    img %d/%d: box=[%d:%d,%d:%d,%d:%d] ext=%dx%dx%d=%d\n",
@@ -214,13 +212,13 @@ void Electrostatics::compute_pseudocharge(
             std::vector<double> VJ_ref(ndp, 0.0);
 
             for (int kk = 0; kk < nzp; ++kk) {
-                int gk = (k_s - halo + kk);
+                int gk = (k_s - FDn + kk);
                 double rz = gk * dz - pos.z;
                 for (int jj = 0; jj < nyp; ++jj) {
-                    int gj = (j_s - halo + jj);
+                    int gj = (j_s - FDn + jj);
                     double ry = gj * dy - pos.y;
                     for (int ii = 0; ii < nxp; ++ii) {
-                        int gi = (i_s - halo + ii);
+                        int gi = (i_s - FDn + ii);
                         double rx = gi * dx - pos.x;
                         double r = compute_distance(rx, ry, rz, is_orth, lattice);
 
@@ -242,6 +240,19 @@ void Electrostatics::compute_pseudocharge(
                 }
             }
 
+            // Debug: check for NaN in VJ and bJ
+            auto check_nan = [](const std::vector<double>& v, const char* name, int iat) {
+                int nan_count = 0;
+                for (size_t idx = 0; idx < v.size(); ++idx) {
+                    if (std::isnan(v[idx])) nan_count++;
+                }
+                if (nan_count > 0) {
+                    std::printf("  WARNING: %s has %d NaN out of %zu for img %d\n", name, nan_count, v.size(), iat);
+                }
+            };
+            check_nan(VJ, "VJ", iat);
+            check_nan(VJ_ref, "VJ_ref", iat);
+
             // Compute b_J = -1/(4π) * Lap(V_J) on the inner grid
             std::vector<double> bJ(nx_loc * ny_loc * nz_loc, 0.0);
             std::vector<double> bJ_ref(nx_loc * ny_loc * nz_loc, 0.0);
@@ -257,6 +268,9 @@ void Electrostatics::compute_pseudocharge(
                 calc_lapV_nonorth(VJ_ref.data(), bJ_ref.data(), nx_loc, ny_loc, nz_loc,
                                   nxp, nyp, nzp, FDn, stencil, inv_4PI);
             }
+
+            check_nan(bJ, "bJ", iat);
+            check_nan(bJ_ref, "bJ_ref", iat);
 
             // Accumulate into global arrays and compute Eself
             for (int kk = 0; kk < nz_loc; ++kk) {
