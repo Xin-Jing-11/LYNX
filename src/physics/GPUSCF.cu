@@ -2138,6 +2138,24 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), 2*(size_t)Nd_spinor*sizeof(double), cudaMemcpyHostToDevice));
         }
 
+        // CPU benchmark: same H*psi
+        {
+            int Nb = wfn.Nband();
+            const Complex* pp = reinterpret_cast<const Complex*>(wfn.psi_kpt(0, 0).data());
+            std::vector<double> h_Veff_tmp(4 * Nd_);
+            CUDA_CHECK(cudaMemcpy(h_Veff_tmp.data(), d_Veff_spinor, 4*Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+            const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
+            const_cast<Hamiltonian&>(hamiltonian).set_vnl_kpt(vnl);
+            std::vector<Complex> cpu_out(2*Nd_ * Nb, Complex(0));
+            auto tc0 = std::chrono::high_resolution_clock::now();
+            hamiltonian.apply_spinor_kpt(pp, h_Veff_tmp.data(), cpu_out.data(), Nb, Nd_,
+                                          kpt0v, cell_len_v);
+            auto tc1 = std::chrono::high_resolution_clock::now();
+            double ms_cpu = std::chrono::duration<double, std::milli>(tc1 - tc0).count();
+            printf("CPU H*psi benchmark: %d bands, Nd=%d, %.2f ms total (%.3f ms/band)\n",
+                   Nb, Nd_, ms_cpu, ms_cpu / Nb);
+        }
+
         // GPU: apply full spinor H*psi via callback (1 band for validation)
         hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
