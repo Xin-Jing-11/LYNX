@@ -1074,7 +1074,7 @@ void Stress::compute_nonlocal_kinetic(
                                 for (int jp = 0; jp < nproj_soc; ++jp) {
                                     Complex dot_up(0.0), dot_dn(0.0);
                                     for (int ig = 0; ig < ndc; ++ig) {
-                                        double chi_val = Chi_soc[it][iat](ig, jp);
+                                        Complex chi_val = std::conj(Chi_soc[it][iat](ig, jp));
                                         dot_up += chi_val * psi_up[gpos[ig]];
                                         dot_dn += chi_val * psi_dn[gpos[ig]];
                                     }
@@ -1193,7 +1193,7 @@ void Stress::compute_nonlocal_kinetic(
                                                 if (!is_orth) nonCart2Cart_coord(uvec, r1, r2, r3);
 
                                                 double xR = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
-                                                double chi_val = Chi_soc[it][iat](ig, jp);
+                                                Complex chi_val = std::conj(Chi_soc[it][iat](ig, jp));
                                                 dot_up += chi_val * xR * dpsi_up_dim[gpos[ig]];
                                                 dot_dn += chi_val * xR * dpsi_dn_dim[gpos[ig]];
                                             }

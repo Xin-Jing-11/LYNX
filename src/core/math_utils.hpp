@@ -1,8 +1,171 @@
 #pragma once
 
 #include <cmath>
+#include <complex>
 
 namespace lynx {
+
+// Complex spherical harmonics Y_lm(x, y, z, r) for l = 0..6.
+// Matches SPARC's ComplexSphericalHarmonic (Condon-Shortley phase convention).
+// For m > 0: Y_l^m = (-1)^m * C_lm * (x+iy)^m * P_l^m(z/r) / r^l
+// For m < 0: Y_l^{-|m|} = C_l|m| * (x-iy)^|m| * P_l^|m|(z/r) / r^l
+// For m = 0: Y_l^0 = C_l0 * P_l(z/r)
+inline std::complex<double> complex_spherical_harmonic(int l, int m, double x, double y, double z, double r) {
+    using C = std::complex<double>;
+
+    // l = 0
+    if (l == 0) return C(0.282094791773878, 0.0);
+
+    if (r < 1e-10) return C(0.0, 0.0);
+
+    // Coefficients matching SPARC (Condon-Shortley phase)
+    // l=1
+    constexpr double C11 = 0.345494149471335;
+    constexpr double C10 = 0.488602511902920;
+    // l=2
+    constexpr double C22 = 0.386274202023190;
+    constexpr double C21 = 0.772548404046379;
+    constexpr double C20 = 0.315391565252520;
+    // l=3
+    constexpr double C33 = 0.417223823632784;
+    constexpr double C32 = 1.021985476433282;
+    constexpr double C31 = 0.323180184114151;
+    constexpr double C30 = 0.373176332590115;
+    // l=4
+    constexpr double C44 = 0.442532692444983;
+    constexpr double C43 = 1.251671470898352;
+    constexpr double C42 = 0.334523271778645;
+    constexpr double C41 = 0.473087347878780;
+    constexpr double C40 = 0.105785546915204;
+    // l=5
+    constexpr double C55 = 0.464132203440858;
+    constexpr double C54 = 1.467714898305751;
+    constexpr double C53 = 0.345943719146840;
+    constexpr double C52 = 1.694771183260899;
+    constexpr double C51 = 0.320281648576215;
+    constexpr double C50 = 0.116950322453424;
+    // l=6
+    constexpr double C66 = 0.483084113580066;
+    constexpr double C65 = 1.673452458100098;
+    constexpr double C64 = 0.356781262853998;
+    constexpr double C63 = 0.651390485867716;
+    constexpr double C62 = 0.325695242933858;
+    constexpr double C61 = 0.411975516301141;
+    constexpr double C60 = 0.063569202267628;
+
+    // (x +/- iy) — matching SPARC's (x[i] +/- I*y[i])
+    C xpiy(x, y);   // x + iy
+    C xmiy(x, -y);  // x - iy
+
+    // Use division by r products exactly as SPARC does (not precomputed inverse)
+    if (l == 1) {
+        switch (m) {
+            case -1: return C11 * (xmiy / r);
+            case  0: return C(C10 * (z / r), 0.0);
+            case  1: return -C11 * (xpiy / r);
+        }
+        return C(0.0, 0.0);
+    }
+
+    double rr = r * r;  // r^2
+    C xmiy2 = xmiy * xmiy;
+    C xpiy2 = xpiy * xpiy;
+
+    if (l == 2) {
+        switch (m) {
+            case -2: return C22 * (xmiy2) / rr;
+            case -1: return C21 * (xmiy * z) / rr;
+            case  0: return C(C20 * (2.0*z*z - x*x - y*y) / rr, 0.0);
+            case  1: return -C21 * (xpiy * z) / rr;
+            case  2: return C22 * (xpiy2) / rr;
+        }
+        return C(0.0, 0.0);
+    }
+
+    double r3 = rr * r;
+    C xmiy3 = xmiy2 * xmiy;
+    C xpiy3 = xpiy2 * xpiy;
+
+    if (l == 3) {
+        switch (m) {
+            case -3: return C33 * xmiy3 / r3;
+            case -2: return C32 * (xmiy2 * z) / r3;
+            case -1: return C31 * (xmiy * (4.0*z*z - x*x - y*y)) / r3;
+            case  0: return C(C30 * z * (2.0*z*z - 3.0*x*x - 3.0*y*y) / r3, 0.0);
+            case  1: return -C31 * (xpiy * (4.0*z*z - x*x - y*y)) / r3;
+            case  2: return C32 * (xpiy2 * z) / r3;
+            case  3: return -C33 * xpiy3 / r3;
+        }
+        return C(0.0, 0.0);
+    }
+
+    double r4 = rr * rr;
+    C xmiy4 = xmiy2 * xmiy2;
+    C xpiy4 = xpiy2 * xpiy2;
+
+    if (l == 4) {
+        switch (m) {
+            case -4: return C44 * xmiy4 / r4;
+            case -3: return C43 * (xmiy3 * z) / r4;
+            case -2: return C42 * (xmiy2 * (7.0*z*z - rr)) / r4;
+            case -1: return C41 * (xmiy * z * (7.0*z*z - 3.0*rr)) / r4;
+            case  0: return C(C40 * (35.0*z*z*z*z - 30.0*z*z*rr + 3.0*rr*rr) / r4, 0.0);
+            case  1: return -C41 * (xpiy * z * (7.0*z*z - 3.0*rr)) / r4;
+            case  2: return C42 * (xpiy2 * (7.0*z*z - rr)) / r4;
+            case  3: return -C43 * (xpiy3 * z) / r4;
+            case  4: return C44 * xpiy4 / r4;
+        }
+        return C(0.0, 0.0);
+    }
+
+    double r5 = r4 * r;
+    C xmiy5 = xmiy4 * xmiy;
+    C xpiy5 = xpiy4 * xpiy;
+    double z2 = z * z, z3 = z2 * z, z4 = z2 * z2, z5 = z4 * z;
+
+    if (l == 5) {
+        switch (m) {
+            case -5: return C55 * xmiy5 / r5;
+            case -4: return C54 * (xmiy4 * z) / r5;
+            case -3: return C53 * (xmiy3 * (9.0*z2 - rr)) / r5;
+            case -2: return C52 * (xmiy2 * (3.0*z3 - z*rr)) / r5;
+            case -1: return C51 * (xmiy * (21.0*z4 - 14.0*z2*rr + r4)) / r5;
+            case  0: return C(C50 * (63.0*z5 - 70.0*z3*rr + 15.0*z*r4) / r5, 0.0);
+            case  1: return -C51 * (xpiy * (21.0*z4 - 14.0*z2*rr + r4)) / r5;
+            case  2: return C52 * (xpiy2 * (3.0*z3 - z*rr)) / r5;
+            case  3: return -C53 * (xpiy3 * (9.0*z2 - rr)) / r5;
+            case  4: return C54 * (xpiy4 * z) / r5;
+            case  5: return -C55 * xpiy5 / r5;
+        }
+        return C(0.0, 0.0);
+    }
+
+    double r6 = r4 * rr;
+    C xmiy6 = xmiy5 * xmiy;
+    C xpiy6 = xpiy5 * xpiy;
+    double z6 = z4 * z2;
+
+    if (l == 6) {
+        switch (m) {
+            case -6: return C66 * xmiy6 / r6;
+            case -5: return C65 * (xmiy5 * z) / r6;
+            case -4: return C64 * (xmiy4 * (11.0*z2 - rr)) / r6;
+            case -3: return C63 * (xmiy3 * (11.0*z3 - 3.0*z*rr)) / r6;
+            case -2: return C62 * (xmiy2 * (33.0*z4 - 18.0*z2*rr + r4)) / r6;
+            case -1: return C61 * (xmiy * (33.0*z5 - 30.0*z3*rr + 5.0*z*r4)) / r6;
+            case  0: return C(C60 * (231.0*z6 - 315.0*z4*rr + 105.0*z2*r4 - 5.0*r6) / r6, 0.0);
+            case  1: return -C61 * (xpiy * (33.0*z5 - 30.0*z3*rr + 5.0*z*r4)) / r6;
+            case  2: return C62 * (xpiy2 * (33.0*z4 - 18.0*z2*rr + r4)) / r6;
+            case  3: return -C63 * (xpiy3 * (11.0*z3 - 3.0*z*rr)) / r6;
+            case  4: return C64 * (xpiy4 * (11.0*z2 - rr)) / r6;
+            case  5: return -C65 * (xpiy5 * z) / r6;
+            case  6: return C66 * xpiy6 / r6;
+        }
+        return C(0.0, 0.0);
+    }
+
+    return C(0.0, 0.0); // l >= 7 not implemented
+}
 
 // Real spherical harmonics Y_lm(x, y, z, r) for l = 0..6.
 // Matches reference LYNX (tools.c RealSphericalHarmonic).

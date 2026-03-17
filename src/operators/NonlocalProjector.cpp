@@ -392,7 +392,7 @@ void NonlocalProjector::setup_soc(const Crystal& crystal,
             int ndc = inf.ndc[iat];
             if (ndc == 0 || nproj_soc == 0) continue;
 
-            Chi_soc_[it][iat] = NDArray<double>(ndc, nproj_soc);
+            Chi_soc_[it][iat] = NDArray<Complex>(ndc, nproj_soc);
 
             const auto& gpos = inf.grid_pos[iat];
             Vec3 atom_pos = inf.coords[iat];
@@ -431,7 +431,7 @@ void NonlocalProjector::setup_soc(const Crystal& crystal,
 
                     for (int m = -l; m <= l; ++m) {
                         for (int ig = 0; ig < ndc; ++ig) {
-                            double ylm = spherical_harmonic(l, m, rx[ig], ry[ig], rz[ig], rr[ig]);
+                            Complex ylm = complex_spherical_harmonic(l, m, rx[ig], ry[ig], rz[ig], rr[ig]);
                             Chi_soc_[it][iat](ig, col) = ylm * udv_interp[ig];
                         }
                         col++;
@@ -516,7 +516,7 @@ void NonlocalProjector::apply_soc_kpt(const Complex* psi, Complex* Hpsi, int nco
                 for (int jp = 0; jp < nproj_soc; ++jp) {
                     Complex dot_up(0.0), dot_dn(0.0);
                     for (int ig = 0; ig < ndc; ++ig) {
-                        double chi_val = Chi_soc_[it][iat](ig, jp);
+                        Complex chi_val = std::conj(Chi_soc_[it][iat](ig, jp));
                         dot_up += chi_val * psi_up[gpos[ig]];
                         dot_dn += chi_val * psi_dn[gpos[ig]];
                     }
@@ -526,6 +526,8 @@ void NonlocalProjector::apply_soc_kpt(const Complex* psi, Complex* Hpsi, int nco
             }
         }
     }
+
+
 
     // Apply SOC Term 1 (on-diagonal, Lz·Sz) and Term 2 (off-diagonal, ladder operators)
     // For each projector column with (l, m, p):
@@ -578,7 +580,7 @@ void NonlocalProjector::apply_soc_kpt(const Complex* psi, Complex* Hpsi, int nco
                         Complex coeff_dn = -0.5 * static_cast<double>(m) * gamma_soc *
                                            alpha_dn[a_off + n * nproj_soc + jp];
                         for (int ig = 0; ig < ndc; ++ig) {
-                            double chi_val = Chi_soc_[it][iat](ig, jp);
+                            Complex chi_val = Chi_soc_[it][iat](ig, jp);
                             Hpsi_up[gpos[ig]] += bloch_fac_conj * coeff_up * chi_val;
                             Hpsi_dn[gpos[ig]] += bloch_fac_conj * coeff_dn * chi_val;
                         }

@@ -752,7 +752,7 @@ void Forces::compute_nonlocal_soc(
                     for (int jp = 0; jp < nproj_soc; ++jp) {
                         Complex dot_up(0.0), dot_dn(0.0);
                         for (int ig = 0; ig < ndc; ++ig) {
-                            double chi_val = chi_iat(ig, jp);
+                            Complex chi_val = std::conj(chi_iat(ig, jp));
                             dot_up += chi_val * psi_up[gpos[ig]];
                             dot_dn += chi_val * psi_dn[gpos[ig]];
                         }
@@ -805,7 +805,7 @@ void Forces::compute_nonlocal_soc(
                         for (int jp = 0; jp < nproj_soc; ++jp) {
                             Complex dot_up(0.0), dot_dn(0.0);
                             for (int ig = 0; ig < ndc; ++ig) {
-                                double chi_val = chi_iat(ig, jp);
+                                Complex chi_val = std::conj(chi_iat(ig, jp));
                                 dot_up += chi_val * Dpsi_up[gpos[ig]];
                                 dot_dn += chi_val * Dpsi_dn[gpos[ig]];
                             }

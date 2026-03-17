@@ -76,7 +76,7 @@ public:
                        int Nd_d, double dV) const;
 
     bool has_soc() const { return has_soc_; }
-    const std::vector<std::vector<NDArray<double>>>& Chi_soc() const { return Chi_soc_; }
+    const std::vector<std::vector<NDArray<Complex>>>& Chi_soc() const { return Chi_soc_; }
     const std::vector<double>& Gamma_soc_all() const { return Gamma_soc_all_; }
     const std::vector<std::vector<SOCProjInfo>>& soc_proj_info() const { return soc_proj_info_; }
 
@@ -106,9 +106,9 @@ private:
     bool has_soc_ = false;
 
     // Chi_soc arrays per atom type and atom (following SPARC convention):
-    // Chi_soc_[ityp][iat] = NDArray<double>(ndc, nproj_soc) — SOC radial * Ylm
+    // Chi_soc_[ityp][iat] = NDArray<Complex>(ndc, nproj_soc) — SOC radial * complex Ylm
     // nproj_soc per atom = sum_{l=1..lmax} ppl_soc[l] * (2*l+1)
-    std::vector<std::vector<NDArray<double>>> Chi_soc_;
+    std::vector<std::vector<NDArray<Complex>>> Chi_soc_;
 
     // Gamma_soc_all_: SOC energy coefficients (flattened)
     std::vector<double> Gamma_soc_all_;
