@@ -153,7 +153,9 @@ double Occupation::compute(Wavefunction& wfn,
     if (!spincomm.is_null() && spincomm.size() > 1) {
         MPI_Allreduce(MPI_IN_PLACE, &Nspin_global, 1, MPI_INT, MPI_SUM, spincomm.comm());
     }
-    double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
+    // Spin factor: 2.0 for non-spin-polarized, 1.0 for spin-polarized or spinor (SOC)
+    // For SOC (Nspinor=2): each band already contains both spin components, so no doubling
+    double spin_fac = (Nspin_global == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
 
     // Gather LOCAL eigenvalues and weights
     // eigenvalues array is always Nband_global in size (all eigenvalues on every proc)
@@ -241,7 +243,7 @@ double Occupation::entropy(const Wavefunction& wfn,
     int Nkpts = wfn.Nkpts();
     int Nband = wfn.Nband_global();  // use global band count for eigenvalue/occupation iteration
     if (Nspin_global <= 0) Nspin_global = Nspin_local;
-    double spin_fac = (Nspin_global == 1) ? 2.0 : 1.0;
+    double spin_fac = (Nspin_global == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
 
     for (int s = 0; s < Nspin_local; ++s) {
         for (int k = 0; k < Nkpts; ++k) {

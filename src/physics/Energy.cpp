@@ -11,7 +11,7 @@ double Energy::band_energy(const Wavefunction& wfn,
                              int Nspin,
                              int kpt_start) {
     double Eband = 0.0;
-    double spin_fac = (Nspin == 1) ? 2.0 : 1.0;
+    double spin_fac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
     int Nband = wfn.Nband_global();  // use global band count (eigenvalue/occupation size)
 
     for (int s = 0; s < wfn.Nspin(); ++s) {
