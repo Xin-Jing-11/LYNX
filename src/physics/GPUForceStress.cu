@@ -6,6 +6,7 @@
 #include <cassert>
 #include <vector>
 #include <algorithm>
+#include <complex>
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include <cublas_v2.h>
@@ -628,7 +629,7 @@ void gradient_z_gpu(
 __global__
 void soc_gather_alpha_z_kernel(
     const cuDoubleComplex* __restrict__ psi,
-    const double*          __restrict__ Chi_soc_flat,
+    const cuDoubleComplex* __restrict__ Chi_soc_flat,
     const int*             __restrict__ gpos_flat,
     const int*             __restrict__ gpos_offsets,
     const int*             __restrict__ chi_soc_offsets,
@@ -672,7 +673,7 @@ void compute_soc_force_gpu(
     const cuDoubleComplex* d_psi_spinor,  // (2*Nd_d, Nband) spinor psi on device
     const double* d_occ,                   // (Nband) occupations on device
     // SOC projector data (all on device, from GPUSOCData)
-    const double* d_Chi_soc_flat,
+    const cuDoubleComplex* d_Chi_soc_flat,
     const int* d_gpos_flat,
     const int* d_gpos_offsets_soc,
     const int* d_chi_soc_offsets,
@@ -956,7 +957,7 @@ void compute_soc_stress_gpu(
     const cuDoubleComplex* d_psi_spinor,  // (2*Nd_d, Nband)
     const double* d_occ,
     // SOC data (all on device)
-    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const cuDoubleComplex* d_Chi_soc_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets_soc, const int* d_chi_soc_offsets,
     const int* d_ndc_arr_soc, const int* d_nproj_soc_arr,
     const int* d_IP_displ_soc, const double* d_Gamma_soc,
@@ -979,8 +980,8 @@ void compute_soc_stress_gpu(
     // Host-side proj info for reduction
     const int* h_proj_l, const int* h_proj_m,
     const double* h_Gamma_soc,
-    // Host-side SOC projector data for position-weighted beta
-    const double* h_Chi_soc_flat,
+    // Host-side SOC projector data for position-weighted beta (complex)
+    const std::complex<double>* h_Chi_soc_flat,
     const int* h_gpos_flat,
     const int* h_gpos_offsets_soc,
     const int* h_chi_soc_offsets,
@@ -1239,18 +1240,21 @@ void compute_soc_stress_gpu(
                             else if (dim2 == 1) xR = r2;
                             else xR = r3;
 
-                            double chi_val = h_Chi_soc_flat[coff + jp * ndc + ig];
-                            double w = chi_val * xR;
+                            std::complex<double> chi_val = std::conj(h_Chi_soc_flat[coff + jp * ndc + ig]);
+                            // conj(chi) * xR: real-scale the complex conjugate
+                            double w_re = chi_val.real() * xR;
+                            double w_im = chi_val.imag() * xR;
 
                             // dpsi_up[gpos[ig] + n * Nd_d]
                             int psi_idx = n * Nd_d + flat;
                             cuDoubleComplex dp_up = h_dpsi_up[psi_idx];
                             cuDoubleComplex dp_dn = h_dpsi_dn[psi_idx];
 
-                            dot_up_re += w * dp_up.x;
-                            dot_up_im += w * dp_up.y;
-                            dot_dn_re += w * dp_dn.x;
-                            dot_dn_im += w * dp_dn.y;
+                            // (w_re + i*w_im) * (dp.x + i*dp.y)
+                            dot_up_re += w_re * dp_up.x - w_im * dp_up.y;
+                            dot_up_im += w_re * dp_up.y + w_im * dp_up.x;
+                            dot_dn_re += w_re * dp_dn.x - w_im * dp_dn.y;
+                            dot_dn_im += w_re * dp_dn.y + w_im * dp_dn.x;
                         }
 
                         // Multiply by beta_scale = bloch * dV (complex)

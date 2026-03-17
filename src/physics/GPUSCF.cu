@@ -130,7 +130,7 @@ void compute_force_stress_gpu(
 
 void compute_soc_force_gpu(
     const cuDoubleComplex* d_psi_spinor, const double* d_occ,
-    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const cuDoubleComplex* d_Chi_soc_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets_soc, const int* d_chi_soc_offsets,
     const int* d_ndc_arr_soc, const int* d_nproj_soc_arr,
     const int* d_IP_displ_soc,
@@ -149,7 +149,7 @@ void compute_soc_force_gpu(
 
 void compute_soc_stress_gpu(
     const cuDoubleComplex* d_psi_spinor, const double* d_occ,
-    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const cuDoubleComplex* d_Chi_soc_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets_soc, const int* d_chi_soc_offsets,
     const int* d_ndc_arr_soc, const int* d_nproj_soc_arr,
     const int* d_IP_displ_soc, const double* d_Gamma_soc,
@@ -167,7 +167,7 @@ void compute_soc_stress_gpu(
     double kx_Lx, double ky_Ly, double kz_Lz,
     const int* h_proj_l, const int* h_proj_m,
     const double* h_Gamma_soc,
-    const double* h_Chi_soc_flat,
+    const std::complex<double>* h_Chi_soc_flat,
     const int* h_gpos_flat,
     const int* h_gpos_offsets_soc,
     const int* h_chi_soc_offsets,
@@ -235,7 +235,7 @@ void spinor_offdiag_veff_gpu(
 
 void soc_apply_z_gpu(
     const cuDoubleComplex* d_psi, cuDoubleComplex* d_Hpsi,
-    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const cuDoubleComplex* d_Chi_soc_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets, const int* d_chi_soc_offsets,
     const int* d_ndc_arr, const int* d_nproj_soc_arr,
     const int* d_IP_displ_soc,
@@ -790,7 +790,7 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
     std::vector<int> h_ndc_arr, h_nproj_soc_arr, h_IP_displ_arr;
     std::vector<int> h_gpos_offsets(1, 0), h_chi_soc_offsets(1, 0);
     std::vector<int> h_gpos_flat;
-    std::vector<double> h_Chi_soc_flat;
+    std::vector<std::complex<double>> h_Chi_soc_flat;
 
     max_ndc_soc = 0;
     max_nproj_soc = 0;
@@ -822,9 +822,9 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
             for (int ig = 0; ig < ndc; ig++)
                 h_gpos_flat.push_back(inf.grid_pos[iat][ig]);
 
-            // Copy Chi_soc data (ndc x nproj_soc, column-major)
+            // Copy Chi_soc data (ndc x nproj_soc, column-major) — now complex
             if (ndc > 0 && nproj_soc > 0 && psd.has_soc()) {
-                const double* chi_data = Chi_soc[it][iat].data();
+                const Complex* chi_data = Chi_soc[it][iat].data();
                 int chi_ld = Chi_soc[it][iat].ld();
                 for (int jp = 0; jp < nproj_soc; jp++)
                     for (int ig = 0; ig < ndc; ig++)
@@ -833,7 +833,7 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
                 // Pad with zeros for atoms without SOC
                 for (int jp = 0; jp < nproj_soc; jp++)
                     for (int ig = 0; ig < ndc; ig++)
-                        h_Chi_soc_flat.push_back(0.0);
+                        h_Chi_soc_flat.push_back(std::complex<double>(0.0, 0.0));
             }
 
             max_ndc_soc = std::max(max_ndc_soc, ndc);
@@ -890,7 +890,7 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
     int total_gpos = h_gpos_offsets.back();
     int total_chi_soc = h_chi_soc_offsets.back();
 
-    CUDA_CHECK(cudaMallocAsync(&d_Chi_soc_flat, std::max(1, total_chi_soc) * sizeof(double), 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Chi_soc_flat, std::max(1, total_chi_soc) * sizeof(cuDoubleComplex), 0));
     CUDA_CHECK(cudaMallocAsync(&d_gpos_offsets_soc, (n_influence_soc + 1) * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_chi_soc_offsets, (n_influence_soc + 1) * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_ndc_arr_soc, n_influence_soc * sizeof(int), 0));
@@ -913,7 +913,7 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
         (size_t)total_soc_nproj * Nband * sizeof(cuDoubleComplex), 0));
 
     if (total_chi_soc > 0)
-        CUDA_CHECK(cudaMemcpy(d_Chi_soc_flat, h_Chi_soc_flat.data(), total_chi_soc * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_Chi_soc_flat, h_Chi_soc_flat.data(), total_chi_soc * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_gpos_offsets_soc, h_gpos_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_chi_soc_offsets, h_chi_soc_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_ndc_arr_soc, h_ndc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
@@ -1180,7 +1180,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
         gpu::soc_apply_z_gpu(
             d_psi, d_Hpsi,
-            s->gpu_soc_.d_Chi_soc_flat, s->gpu_vnl_.d_gpos_flat,
+            static_cast<const cuDoubleComplex*>(s->gpu_soc_.d_Chi_soc_flat), s->gpu_vnl_.d_gpos_flat,
             s->gpu_soc_.d_gpos_offsets_soc, s->gpu_soc_.d_chi_soc_offsets,
             s->gpu_soc_.d_ndc_arr_soc, s->gpu_soc_.d_nproj_soc_arr,
             s->gpu_soc_.d_IP_displ_soc,
@@ -3234,7 +3234,7 @@ void GPUSCFRunner::compute_soc_force(
 
         gpu::compute_soc_force_gpu(
             d_psi_spinor, d_occ,
-            gpu_soc_.d_Chi_soc_flat, gpu_vnl_.d_gpos_flat,
+            static_cast<const cuDoubleComplex*>(gpu_soc_.d_Chi_soc_flat), gpu_vnl_.d_gpos_flat,
             gpu_soc_.d_gpos_offsets_soc, gpu_soc_.d_chi_soc_offsets,
             gpu_soc_.d_ndc_arr_soc, gpu_soc_.d_nproj_soc_arr,
             gpu_soc_.d_IP_displ_soc,
@@ -3350,7 +3350,7 @@ void GPUSCFRunner::compute_soc_stress(
     std::vector<int> h_ndc_arr_soc, h_nproj_soc_arr, h_IP_displ_soc_inf;
     std::vector<int> h_gpos_offsets_soc(1, 0), h_chi_soc_offsets(1, 0);
     std::vector<int> h_gpos_flat;
-    std::vector<double> h_Chi_soc_flat;
+    std::vector<std::complex<double>> h_Chi_soc_flat;
     std::vector<double> h_atom_pos_soc;
 
     const auto& Chi_soc = vnl_ptr_->Chi_soc();
@@ -3399,7 +3399,7 @@ void GPUSCFRunner::compute_soc_stress(
                 h_gpos_flat.push_back(inf.grid_pos[iat][ig]);
 
             if (ndc > 0 && nproj_soc > 0 && psd.has_soc()) {
-                const double* chi_data = Chi_soc[it][iat].data();
+                const Complex* chi_data = Chi_soc[it][iat].data();
                 int chi_ld = Chi_soc[it][iat].ld();
                 for (int jp = 0; jp < nproj_soc; jp++)
                     for (int ig = 0; ig < ndc; ig++)
@@ -3407,7 +3407,7 @@ void GPUSCFRunner::compute_soc_stress(
             } else {
                 for (int jp = 0; jp < nproj_soc; jp++)
                     for (int ig = 0; ig < ndc; ig++)
-                        h_Chi_soc_flat.push_back(0.0);
+                        h_Chi_soc_flat.push_back(std::complex<double>(0.0, 0.0));
             }
 
             // Atom positions for position-weighted gather
@@ -3470,7 +3470,7 @@ void GPUSCFRunner::compute_soc_stress(
 
         gpu::compute_soc_stress_gpu(
             d_psi_spinor, d_occ,
-            gpu_soc_.d_Chi_soc_flat, gpu_vnl_.d_gpos_flat,
+            static_cast<const cuDoubleComplex*>(gpu_soc_.d_Chi_soc_flat), gpu_vnl_.d_gpos_flat,
             gpu_soc_.d_gpos_offsets_soc, gpu_soc_.d_chi_soc_offsets,
             gpu_soc_.d_ndc_arr_soc, gpu_soc_.d_nproj_soc_arr,
             gpu_soc_.d_IP_displ_soc,

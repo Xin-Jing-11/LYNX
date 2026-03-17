@@ -60,7 +60,7 @@ void atomicAddComplex(cuDoubleComplex* addr, cuDoubleComplex val) {
 __global__
 void soc_gather_alpha_z_kernel(
     const cuDoubleComplex* __restrict__ psi,        // (Nd_d_spinor, ncol_stride)
-    const double*          __restrict__ Chi_soc_flat,// flattened SOC projectors [ndc x nproj per atom]
+    const cuDoubleComplex* __restrict__ Chi_soc_flat,// flattened SOC projectors [ndc x nproj per atom] (complex)
     const int*             __restrict__ gpos_flat,   // flattened grid positions
     const int*             __restrict__ gpos_offsets, // per-influence-atom offsets into gpos_flat
     const int*             __restrict__ chi_soc_offsets, // per-influence-atom offsets into Chi_soc_flat
@@ -107,16 +107,17 @@ void soc_gather_alpha_z_kernel(
 
         for (int ig = 0; ig < ndc; ++ig) {
             int grid_idx = gpos_flat[gpos_off + ig];
-            double chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
+            cuDoubleComplex chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
+            // conj(chi) * psi (gather uses conjugate of Chi_soc)
+            cuDoubleComplex chi_conj = make_cuDoubleComplex(chi_val.x, -chi_val.y);
 
-            // psi_up[grid_idx] * chi_val  (chi is real)
             cuDoubleComplex pu = psi_up[grid_idx];
-            dot_up_re += chi_val * pu.x;
-            dot_up_im += chi_val * pu.y;
+            dot_up_re += chi_conj.x * pu.x - chi_conj.y * pu.y;
+            dot_up_im += chi_conj.x * pu.y + chi_conj.y * pu.x;
 
             cuDoubleComplex pd = psi_dn[grid_idx];
-            dot_dn_re += chi_val * pd.x;
-            dot_dn_im += chi_val * pd.y;
+            dot_dn_re += chi_conj.x * pd.x - chi_conj.y * pd.y;
+            dot_dn_im += chi_conj.x * pd.y + chi_conj.y * pd.x;
         }
 
         // Multiply by bloch_fac * dV: (scale_re + i*scale_im) * (dot_re + i*dot_im)
@@ -147,7 +148,7 @@ void soc_gather_alpha_z_kernel(
 __global__
 void soc_scatter_z_kernel(
     cuDoubleComplex*       __restrict__ Hpsi,        // (Nd_d_spinor, ncol_stride)
-    const double*          __restrict__ Chi_soc_flat,
+    const cuDoubleComplex* __restrict__ Chi_soc_flat, // complex Chi_soc
     const int*             __restrict__ gpos_flat,
     const int*             __restrict__ gpos_offsets,
     const int*             __restrict__ chi_soc_offsets,
@@ -218,9 +219,9 @@ void soc_scatter_z_kernel(
 
                 for (int ig = threadIdx.x; ig < ndc; ig += blockDim.x) {
                     int grid_idx = gpos_flat[gpos_off + ig];
-                    double chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
-                    atomicAddComplex(&Hpsi_up[grid_idx], cmul_rc(bc_cu, chi_val));
-                    atomicAddComplex(&Hpsi_dn[grid_idx], cmul_rc(bc_cd, chi_val));
+                    cuDoubleComplex chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
+                    atomicAddComplex(&Hpsi_up[grid_idx], cuCmul(bc_cu, chi_val));
+                    atomicAddComplex(&Hpsi_dn[grid_idx], cuCmul(bc_cd, chi_val));
                 }
             }
 
@@ -239,8 +240,8 @@ void soc_scatter_z_kernel(
 
                 for (int ig = threadIdx.x; ig < ndc; ig += blockDim.x) {
                     int grid_idx = gpos_flat[gpos_off + ig];
-                    double chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
-                    atomicAddComplex(&Hpsi_up[grid_idx], cmul_rc(bc_c, chi_val));
+                    cuDoubleComplex chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
+                    atomicAddComplex(&Hpsi_up[grid_idx], cuCmul(bc_c, chi_val));
                 }
             }
 
@@ -259,8 +260,8 @@ void soc_scatter_z_kernel(
 
                 for (int ig = threadIdx.x; ig < ndc; ig += blockDim.x) {
                     int grid_idx = gpos_flat[gpos_off + ig];
-                    double chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
-                    atomicAddComplex(&Hpsi_dn[grid_idx], cmul_rc(bc_c, chi_val));
+                    cuDoubleComplex chi_val = Chi_soc_flat[chi_off + jp * ndc + ig];
+                    atomicAddComplex(&Hpsi_dn[grid_idx], cuCmul(bc_c, chi_val));
                 }
             }
         } // jp
@@ -404,7 +405,7 @@ void spinor_offdiag_veff_gpu(
 void soc_apply_z_gpu(
     const cuDoubleComplex* d_psi, cuDoubleComplex* d_Hpsi,
     // SOC projector data (all on device)
-    const double* d_Chi_soc_flat, const int* d_gpos_flat,
+    const cuDoubleComplex* d_Chi_soc_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets, const int* d_chi_soc_offsets,
     const int* d_ndc_arr, const int* d_nproj_soc_arr,
     const int* d_IP_displ_soc,

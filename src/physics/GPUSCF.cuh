@@ -188,7 +188,7 @@ private:
     bool has_soc_ = false;
     const NonlocalProjector* vnl_ptr_ = nullptr;  // for CPU SOC comparison
     struct GPUSOCData {
-        double* d_Chi_soc_flat = nullptr;
+        void* d_Chi_soc_flat = nullptr;  // cast to cuDoubleComplex* (complex Chi_soc)
         int*    d_gpos_offsets_soc = nullptr;
         int*    d_chi_soc_offsets = nullptr;
         int*    d_ndc_arr_soc = nullptr;
