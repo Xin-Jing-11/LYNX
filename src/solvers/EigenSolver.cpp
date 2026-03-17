@@ -1114,39 +1114,115 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
         }
     }
 
-    // Steps 2-5: Orthogonalize, project, diag, rotate — all using Nd_d_spinor as row dim
-    // These use the standard complex routines, just with larger row dimension
-    orthogonalize_kpt(Y.data(), Nd_d_spinor, Nband_loc, dV);
+    // Steps 2-5: Orthogonalize, project, diag, rotate — using Nd_d_spinor as row dim
+    // The ScaLAPACK band-parallel functions accept row dimension as parameter,
+    // so passing Nd_d_spinor instead of Nd_d makes them work for spinors.
+#ifdef USE_SCALAPACK
+    if (npband_ > 1) {
+        orthogonalize_kpt_scalapack(Y.data(), Nd_d_spinor, Nband_loc, dV);
 
-    std::vector<Complex> Hs(Nband_loc * Nband_loc);
-    // Project Hamiltonian: Hs = X^H * H * X * dV
-    {
-        std::vector<Complex> HX(Nd_d_spinor * Nband_loc);
-        H_->apply_spinor_kpt(Y.data(), Veff_spinor, HX.data(), Nband_loc, Nd_d,
-                              kpt_cart, cell_lengths);
+        int N = Nband_global_;
+        std::vector<double> eigs_all(N);
+        // For spinor project_hamiltonian: need spinor H*psi callback
+        // Inline the ScaLAPACK projection with spinor H application
+        {
+            std::vector<Complex> HX(Nd_d_spinor * Nband_loc);
+            H_->apply_spinor_kpt(Y.data(), Veff_spinor, HX.data(), Nband_loc, Nd_d,
+                                  kpt_cart, cell_lengths);
 
-        char transC = 'C', transN = 'N';
-        Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
-        zgemm_(&transC, &transN, &Nband_loc, &Nband_loc, &Nd_d_spinor,
-               &alpha_z, Y.data(), &Nd_d_spinor, HX.data(), &Nd_d_spinor,
-               &beta_z, Hs.data(), &Nband_loc);
-
-        // Hermitianize
-        for (int i = 0; i < Nband_loc; ++i) {
-            for (int j = i + 1; j < Nband_loc; ++j) {
-                Complex avg = 0.5 * (Hs[i + j * Nband_loc] + std::conj(Hs[j + i * Nband_loc]));
-                Hs[i + j * Nband_loc] = avg;
-                Hs[j + i * Nband_loc] = std::conj(avg);
+            // Allgather X and HX
+            std::vector<Complex> X_full(Nd_d_spinor * N), HX_full(Nd_d_spinor * N);
+            {
+                std::vector<int> recvcounts(npband_), displs(npband_);
+                for (int p = 0; p < npband_; ++p) {
+                    int nb_p = Parallelization::block_size(N, npband_, p);
+                    int bs_p = Parallelization::block_start(N, npband_, p);
+                    recvcounts[p] = Nd_d_spinor * nb_p;
+                    displs[p] = Nd_d_spinor * bs_p;
+                }
+                MPI_Allgatherv(Y.data(), Nd_d_spinor * Nband_loc, MPI_C_DOUBLE_COMPLEX,
+                               X_full.data(), recvcounts.data(), displs.data(),
+                               MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
+                MPI_Allgatherv(HX.data(), Nd_d_spinor * Nband_loc, MPI_C_DOUBLE_COMPLEX,
+                               HX_full.data(), recvcounts.data(), displs.data(),
+                               MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
             }
-            Hs[i + i * Nband_loc] = Complex(Hs[i + i * Nband_loc].real(), 0.0);
+
+            // Hs = X^H * HX * dV
+            std::vector<Complex> Hs(N * N, Complex(0.0));
+            {
+                char transC = 'C', transN = 'N';
+                Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+                zgemm_(&transC, &transN, &N, &N, &Nd_d_spinor,
+                       &alpha_z, X_full.data(), &Nd_d_spinor, HX_full.data(), &Nd_d_spinor,
+                       &beta_z, Hs.data(), &N);
+            }
+
+            // Hermitianize
+            for (int i = 0; i < N; ++i) {
+                for (int j = i + 1; j < N; ++j) {
+                    Complex avg = 0.5 * (Hs[i + j * N] + std::conj(Hs[j + i * N]));
+                    Hs[i + j * N] = avg;
+                    Hs[j + i * N] = std::conj(avg);
+                }
+                Hs[i + i * N] = Complex(Hs[i + i * N].real(), 0.0);
+            }
+
+            // Diagonalize
+            {
+                char jobz = 'V', uplo = 'U';
+                int lwork = -1, info;
+                Complex work_query;
+                std::vector<double> rwork(std::max(1, 3 * N - 2));
+                zheev_(&jobz, &uplo, &N, Hs.data(), &N, eigs_all.data(),
+                       &work_query, &lwork, rwork.data(), &info);
+                lwork = static_cast<int>(work_query.real());
+                std::vector<Complex> work(lwork);
+                zheev_(&jobz, &uplo, &N, Hs.data(), &N, eigs_all.data(),
+                       work.data(), &lwork, rwork.data(), &info);
+            }
+
+            Q_dist_z_ = std::move(Hs);
         }
+
+        // Rotate orbitals
+        rotate_orbitals_kpt_scalapack(Y.data(), Nd_d_spinor, Nband_loc);
+
+        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+    } else
+#endif
+    {
+        // Serial path
+        orthogonalize_kpt(Y.data(), Nd_d_spinor, Nband_loc, dV);
+
+        std::vector<Complex> Hs(Nband_loc * Nband_loc);
+        {
+            std::vector<Complex> HX(Nd_d_spinor * Nband_loc);
+            H_->apply_spinor_kpt(Y.data(), Veff_spinor, HX.data(), Nband_loc, Nd_d,
+                                  kpt_cart, cell_lengths);
+
+            char transC = 'C', transN = 'N';
+            Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+            zgemm_(&transC, &transN, &Nband_loc, &Nband_loc, &Nd_d_spinor,
+                   &alpha_z, Y.data(), &Nd_d_spinor, HX.data(), &Nd_d_spinor,
+                   &beta_z, Hs.data(), &Nband_loc);
+
+            for (int i = 0; i < Nband_loc; ++i) {
+                for (int j = i + 1; j < Nband_loc; ++j) {
+                    Complex avg = 0.5 * (Hs[i + j * Nband_loc] + std::conj(Hs[j + i * Nband_loc]));
+                    Hs[i + j * Nband_loc] = avg;
+                    Hs[j + i * Nband_loc] = std::conj(avg);
+                }
+                Hs[i + i * Nband_loc] = Complex(Hs[i + i * Nband_loc].real(), 0.0);
+            }
+        }
+
+        std::vector<double> eigs(Nband_loc);
+        diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
+        rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d_spinor, Nband_loc);
+
+        std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
     }
-
-    std::vector<double> eigs(Nband_loc);
-    diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
-    rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d_spinor, Nband_loc);
-
-    std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
 
     // Unpack
     if (ld != Nd_d_spinor) {
