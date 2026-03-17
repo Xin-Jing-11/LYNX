@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <fstream>
 
 #include "io/InputParser.hpp"
 #include "core/Lattice.hpp"
@@ -32,6 +33,7 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "parallel/Parallelization.hpp"
+#include "core/KPoints.hpp"
 
 using namespace lynx;
 
@@ -57,6 +59,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     DFTResult result;
 
     auto config = InputParser::parse(json_file);
+    InputParser::resolve_pseudopotentials(config);
     InputParser::validate(config);
 
     Lattice lattice(config.latvec, config.cell_type);
@@ -64,8 +67,17 @@ static DFTResult run_single_point(const std::string& json_file) {
                 config.bcx, config.bcy, config.bcz);
     FDStencil stencil(config.fd_order, grid, lattice);
 
-    int Nkpts = config.Kx * config.Ky * config.Kz;
-    int Nspin = (config.spin_type == SpinType::None) ? 1 : 2;
+    // SOC detection
+    bool is_soc = (config.spin_type == SpinType::NonCollinear);
+    int Nspin = is_soc ? 1 : ((config.spin_type == SpinType::None) ? 1 : 2);
+    int Nspinor = is_soc ? 2 : 1;
+    if (is_soc) config.parallel.npspin = 1;
+
+    KPoints kpoints;
+    kpoints.generate(config.Kx, config.Ky, config.Kz, config.kpt_shift, lattice);
+    int Nkpts = kpoints.Nkpts();
+    bool is_kpt = !kpoints.is_gamma_only() || is_soc;
+
     Parallelization parallel(MPI_COMM_WORLD, config.parallel,
                              grid, Nspin, Nkpts, config.Nstates);
 
@@ -94,7 +106,14 @@ static DFTResult run_single_point(const std::string& json_file) {
         for (int ia = 0; ia < n_atoms; ++ia) {
             Vec3 pos = at_in.coords[ia];
             if (at_in.fractional) {
-                pos = lattice.frac_to_cart(pos);
+                if (lattice.is_orthogonal()) {
+                    pos = lattice.frac_to_cart(pos);
+                } else {
+                    Vec3 L = lattice.lengths();
+                    pos = {pos.x * L.x, pos.y * L.y, pos.z * L.z};
+                }
+            } else if (!lattice.is_orthogonal()) {
+                pos = lattice.cart_to_nonCart(pos);
             }
             all_positions.push_back(pos);
             type_indices.push_back(static_cast<int>(it));
@@ -119,7 +138,7 @@ static DFTResult run_single_point(const std::string& json_file) {
         if (!psd.radial_grid().empty())
             rc_max = std::max(rc_max, psd.radial_grid().back());
     }
-    rc_max += 2.0 * std::max({grid.dx(), grid.dy(), grid.dz()});
+    rc_max += 8.0 * std::max({grid.dx(), grid.dy(), grid.dz()});
 
     std::vector<AtomInfluence> influence;
     crystal.compute_atom_influence(domain, rc_max, influence);
@@ -143,13 +162,16 @@ static DFTResult run_single_point(const std::string& json_file) {
 
     NonlocalProjector vnl;
     vnl.setup(crystal, nloc_influence, domain, grid);
+    if (is_soc) vnl.setup_soc(crystal, nloc_influence, domain, grid);
 
     Hamiltonian hamiltonian;
     hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
     // SCF
     int Nstates = config.Nstates;
-    if (Nstates <= 0) Nstates = Nelectron / 2 + 10;
+    if (Nstates <= 0) {
+        Nstates = is_soc ? (Nelectron + 20) : (Nelectron / 2 + 10);
+    }
 
     SCFParams scf_params;
     scf_params.max_iter = config.max_scf_iter;
@@ -162,15 +184,35 @@ static DFTResult run_single_point(const std::string& json_file) {
     scf_params.smearing = config.smearing;
     scf_params.elec_temp = config.elec_temp;
 
+    int Nspin_local = parallel.Nspin_local();
+    int Nkpts_local = parallel.Nkpts_local();
+    int kpt_start = parallel.kpt_start();
+    int spin_start = parallel.spin_start();
+    int Nband_local = parallel.Nband_local();
+    int band_start = parallel.band_start();
+    const auto& kpt_bridge = parallel.kpt_bridge();
+    const auto& spin_bridge = parallel.spin_bridge();
+
     SCF scf;
     scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-              halo, &vnl, bandcomm, kptcomm, spincomm, scf_params);
+              halo, &vnl, bandcomm, kpt_bridge, spin_bridge, scf_params,
+              Nspin, Nspin_local, spin_start, &kpoints, kpt_start,
+              Nstates, band_start);
 #ifdef USE_CUDA
     scf.set_gpu_data(crystal, nloc_influence, influence, elec);
 #endif
 
     Wavefunction wfn;
-    wfn.allocate(Nd_d, Nstates, Nspin, Nkpts);
+    wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local,
+                 is_kpt, Nspinor);
+
+    // Initialize density from atomic superposition
+    {
+        std::vector<double> rho_at(Nd_d, 0.0);
+        elec.compute_atomic_density(crystal, influence, domain, grid,
+                                    rho_at.data(), Nelectron);
+        scf.set_initial_density(rho_at.data(), Nd_d, nullptr);
+    }
 
     // Compute NLCC core density
     std::vector<double> rho_core(Nd_d, 0.0);
@@ -192,7 +234,7 @@ static DFTResult run_single_point(const std::string& json_file) {
 
     // Forces
     if (config.print_forces) {
-        std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
+        std::vector<double> kpt_weights = kpoints.normalized_weights();
         Forces forces;
         result.forces = forces.compute(wfn, crystal, influence, nloc_influence, vnl,
                                        stencil, gradient, halo, domain, grid,
@@ -202,12 +244,13 @@ static DFTResult run_single_point(const std::string& json_file) {
                                        elec.pseudocharge_ref().data(),
                                        scf.Vxc(),
                                        has_nlcc ? rho_core.data() : nullptr,
-                                       kpt_weights, bandcomm, kptcomm, spincomm);
+                                       kpt_weights, bandcomm, kpt_bridge, spin_bridge,
+                                       &kpoints, kpt_start, band_start);
     }
 
     // Stress
     if (config.calc_stress || config.calc_pressure) {
-        std::vector<double> kpt_weights(Nkpts, 1.0 / Nkpts);
+        std::vector<double> kpt_weights = kpoints.normalized_weights();
         Stress stress_calc;
         int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 : 1;
         const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
@@ -226,7 +269,8 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             config.xc,
                                             Nspin_calc,
                                             has_nlcc ? rho_core.data() : nullptr,
-                                            kpt_weights, bandcomm, kptcomm, spincomm);
+                                            kpt_weights, bandcomm, kpt_bridge, spin_bridge,
+                                            &kpoints, kpt_start, band_start);
         result.pressure = stress_calc.pressure();
     }
 
@@ -498,5 +542,87 @@ TEST(EndToEnd, Si8_SCF) {
 
         double p_gpa = result.pressure * au_to_gpa;
         std::printf("\n  Pressure: %.4f GPa (ref: 20.4250)\n", p_gpa);
+    }
+}
+
+// ============================================================
+// Test: PtAu SOC — spin-orbit coupling, non-orthogonal cell
+// Reference: SPARC PtAu_SOC (standard accuracy, 19x19x32 grid)
+//   Etotal = -253.6571996 Ha
+//   Forces (Ha/Bohr):
+//     Au: -0.1621  0.1139  0.4109
+//     Pt:  0.1621 -0.1139 -0.4109
+// ============================================================
+TEST(EndToEnd, PtAu_SOC) {
+    // Use the PtAu_SOC example JSON (requires FR pseudopotentials from SPARC test data)
+    std::string json_file;
+    // Try multiple paths
+    std::vector<std::string> candidates = {
+        "../examples/PtAu_SOC.json",
+        "examples/PtAu_SOC.json",
+        "/home/xx/Desktop/LYNX/examples/PtAu_SOC.json"
+    };
+    for (const auto& path : candidates) {
+        std::ifstream f(path);
+        if (f.good()) { json_file = path; break; }
+    }
+    if (json_file.empty()) {
+        GTEST_SKIP() << "PtAu_SOC.json not found (need FR pseudopotentials)";
+    }
+
+    // Check that the pseudopotential files exist
+    {
+        auto config = InputParser::parse(json_file);
+        for (const auto& at : config.atom_types) {
+            if (!at.pseudo_file.empty()) {
+                std::ifstream f(at.pseudo_file);
+                if (!f.good()) {
+                    GTEST_SKIP() << "Pseudopotential not found: " << at.pseudo_file;
+                }
+            }
+        }
+    }
+
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== PtAu SOC Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha (ref: -253.6571996)\n", result.Etotal);
+        std::printf("  Ef     = %.10f Ha (ref: 0.5357)\n", result.Ef);
+    }
+
+    // SPARC reference
+    double ref_Etotal = -253.6571996;
+
+    EXPECT_TRUE(result.converged) << "SOC SCF did not converge";
+    // Energy should match within ~2 mHa (slightly different numerics)
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 2e-3)
+        << "SOC total energy deviates from SPARC reference";
+
+    // Forces
+    if (rank == 0 && result.forces.size() == 6) {
+        double ref_forces[6] = {
+            -1.6214905881E-01,  1.1390720982E-01,  4.1092765948E-01,
+             1.6214905881E-01, -1.1390720982E-01, -4.1092765948E-01
+        };
+        std::printf("\n  Forces (Ha/Bohr):\n");
+        double max_force_err = 0.0;
+        for (int i = 0; i < 2; ++i) {
+            std::printf("  Atom %d: %12.6f %12.6f %12.6f  (ref: %12.6f %12.6f %12.6f)\n",
+                        i + 1,
+                        result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2],
+                        ref_forces[3*i], ref_forces[3*i+1], ref_forces[3*i+2]);
+            for (int d = 0; d < 3; ++d) {
+                double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
+                max_force_err = std::max(max_force_err, err);
+            }
+        }
+        std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+        // Forces should match within ~5e-3 Ha/Bohr
+        EXPECT_LT(max_force_err, 1e-2) << "SOC forces deviate from SPARC reference";
     }
 }

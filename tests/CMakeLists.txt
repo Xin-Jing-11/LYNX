@@ -41,6 +41,10 @@ add_test(NAME E2E_Si8_1proc
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_e2e_tests> --gtest_filter=EndToEnd.Si8_SCF)
 set_tests_properties(E2E_Si8_1proc PROPERTIES TIMEOUT 600)
 
+add_test(NAME E2E_PtAu_SOC
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 $<TARGET_FILE:lynx_e2e_tests> --gtest_filter=EndToEnd.PtAu_SOC)
+set_tests_properties(E2E_PtAu_SOC PROPERTIES TIMEOUT 1800)
+
 # Reference comparison tests
 add_executable(lynx_compare_tests
     test_CompareRef.cpp
