@@ -14,10 +14,11 @@ void bind_electronic(py::module_& m) {
     // Wavefunction (non-copyable due to move-only NDArray members)
     py::class_<Wavefunction>(m, "Wavefunction")
         .def(py::init<>())
-        .def("allocate", py::overload_cast<int, int, int, int, bool>(
+        .def("allocate", py::overload_cast<int, int, int, int, bool, int>(
                  &Wavefunction::allocate),
              py::arg("Nd_d"), py::arg("Nband"), py::arg("Nspin"),
-             py::arg("Nkpts"), py::arg("is_complex") = false)
+             py::arg("Nkpts"), py::arg("is_complex") = false,
+             py::arg("Nspinor") = 1)
         .def("Nd_d", &Wavefunction::Nd_d)
         .def("Nband", &Wavefunction::Nband)
         .def("Nband_global", &Wavefunction::Nband_global)

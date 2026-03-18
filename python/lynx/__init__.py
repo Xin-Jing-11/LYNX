@@ -81,6 +81,18 @@ from ._core import _ensure_mpi
 from .config import DFTConfig, find_psp
 from . import units
 
+# Modular DFT framework
+from . import abc
+from .operators import FDHamiltonian, FDKinetic, FDNonlocal, FDGradient
+from .solvers import (
+    CheFSIEigenSolver, AARPoissonSolver, AndersonMixer,
+    FermiDiracOccupation, GaussianOccupation,
+)
+from .xc import LibxcFunctional
+from .scf import SCFDriver, SCFResult
+from .system import SystemSetup
+from . import postprocessing
+
 
 def init():
     """Initialize MPI if not already done. Call before any LYNX operations."""

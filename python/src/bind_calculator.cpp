@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <cstring>
 #include "Calculator.hpp"
 #include "ArrayBridge.hpp"
 
@@ -145,6 +146,22 @@ void bind_calculator(py::module_& m) {
         .def_property_readonly("density", [](const Calculator& c) {
             return pylynx::to_numpy(c.scf().density().rho_total());
         }, py::return_value_policy::reference_internal)
+
+        // Local pseudopotential as numpy (copy)
+        .def_property_readonly("Vloc", [](const Calculator& c) {
+            int N = c.Vloc_size();
+            auto arr = py::array_t<double>(N);
+            std::memcpy(arr.mutable_data(), c.Vloc_data(), N * sizeof(double));
+            return arr;
+        }, "Local pseudopotential as numpy array (Nd_d,)")
+        // Atomic superposition density as numpy (copy)
+        .def_property_readonly("atomic_density", [](const Calculator& c) {
+            int N = c.atomic_density_size();
+            auto arr = py::array_t<double>(N);
+            std::memcpy(arr.mutable_data(), c.atomic_density_data(),
+                        N * sizeof(double));
+            return arr;
+        }, "Atomic superposition density as numpy array (Nd_d,)")
 
         // Internal objects for mid-level usage
         .def_property_readonly("lattice", &Calculator::lattice,

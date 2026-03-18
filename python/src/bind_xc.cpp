@@ -25,10 +25,12 @@ void bind_xc(py::module_& m) {
             double* Vxc_ptr = static_cast<double*>(Vxc.request().ptr);
             double* exc_ptr = static_cast<double*>(exc.request().ptr);
 
-            xc.evaluate(rho, Vxc_ptr, exc_ptr, Nd_d);
+            {
+                py::gil_scoped_release release;
+                xc.evaluate(rho, Vxc_ptr, exc_ptr, Nd_d);
+            }
 
             return py::make_tuple(Vxc, exc);
         }, py::arg("rho"), py::arg("Nd_d"),
-           py::call_guard<py::gil_scoped_release>(),
            "Evaluate XC potential and energy density. Returns (Vxc, exc).");
 }

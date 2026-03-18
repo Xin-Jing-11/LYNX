@@ -88,7 +88,10 @@ public:
     int Nspin() const { return Nspin_; }
 
     const double* Vloc_data() const { return Vloc_.data(); }
+    int Vloc_size() const { return static_cast<int>(Vloc_.size()); }
     const double* rho_core_data() const { return has_nlcc_ ? rho_core_.data() : nullptr; }
+    const double* atomic_density_data() const { return rho_atomic_.data(); }
+    int atomic_density_size() const { return static_cast<int>(rho_atomic_.size()); }
 
 private:
     lynx::SystemConfig config_;
@@ -112,6 +115,7 @@ private:
     std::vector<lynx::AtomInfluence> influence_;
     std::vector<lynx::AtomNlocInfluence> nloc_influence_;
     std::vector<double> Vloc_;
+    std::vector<double> rho_atomic_;
     std::vector<double> rho_core_;
 
     int Nelectron_ = 0;

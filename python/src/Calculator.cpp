@@ -164,6 +164,7 @@ void Calculator::setup(MPI_Comm comm) {
     std::vector<double> rho_at(Nd_d_val, 0.0);
     elec_.compute_atomic_density(crystal_, influence_, domain, grid_,
                                   rho_at.data(), Nelectron_);
+    rho_atomic_ = rho_at;
 
     std::vector<double> mag_init;
     if (Nspin_ == 2) {
