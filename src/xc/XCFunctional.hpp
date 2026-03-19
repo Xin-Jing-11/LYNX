@@ -23,17 +23,25 @@ public:
     // rho: (Nd_d,) electron density
     // Vxc: (Nd_d,) output XC potential
     // exc: (Nd_d,) output XC energy density (per particle)
-    // Dxcdgrho: (Nd_d,) output d(rho*exc)/d(|grad rho|^2) for GGA (2*vsigma)
+    // Dxcdgrho: (Nd_d,) output d(rho*exc)/d(|grad rho|^2) for GGA/mGGA (2*vsigma)
+    // tau: (Nd_d,) input kinetic energy density (for mGGA)
+    // vtau: (Nd_d,) output d(rho*exc)/d(tau) (for mGGA)
     void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
-                  double* Dxcdgrho = nullptr) const;
+                  double* Dxcdgrho = nullptr,
+                  const double* tau = nullptr,
+                  double* vtau = nullptr) const;
 
     // Evaluate for spin-polarized (collinear)
     // rho: [Nd_d*3] layout: rho[0..Nd_d-1] = total, rho[Nd_d..2*Nd_d-1] = up,
     //       rho[2*Nd_d..3*Nd_d-1] = down
     // Vxc: [Nd_d*2] layout: Vxc[0..Nd_d-1] = up, Vxc[Nd_d..2*Nd_d-1] = down
     // Dxcdgrho: [Nd_d*3] layout: [v2c | v2x_up | v2x_down]
+    // tau: [Nd_d*3] layout: [total | up | down] (for mGGA)
+    // vtau: [Nd_d*2] layout: [up | down] (for mGGA)
     void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
-                       double* Dxcdgrho = nullptr) const;
+                       double* Dxcdgrho = nullptr,
+                       const double* tau = nullptr,
+                       double* vtau = nullptr) const;
 
     XCType type() const { return type_; }
     bool is_gga() const {
