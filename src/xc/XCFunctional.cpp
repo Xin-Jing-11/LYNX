@@ -28,6 +28,7 @@ void XCFunctional::get_func_ids(int& xc_id, int& cc_id) const {
         case XCType::GGA_PBE:    xc_id = XC_GGA_X_PBE; cc_id = XC_GGA_C_PBE; break;
         case XCType::GGA_PBEsol: xc_id = XC_GGA_X_PBE_SOL; cc_id = XC_GGA_C_PBE_SOL; break;
         case XCType::GGA_RPBE:   xc_id = XC_GGA_X_RPBE; cc_id = XC_GGA_C_PBE; break;
+        case XCType::MGGA_SCAN:  xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW; break; // placeholder — mGGA uses separate path
         default:                 xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW;     break;
     }
 }

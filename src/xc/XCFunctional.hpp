@@ -39,6 +39,9 @@ public:
     bool is_gga() const {
         return type_ == XCType::GGA_PBE || type_ == XCType::GGA_PBEsol || type_ == XCType::GGA_RPBE;
     }
+    bool is_mgga() const {
+        return type_ == XCType::MGGA_SCAN;
+    }
 
 private:
     XCType type_ = XCType::GGA_PBE;
