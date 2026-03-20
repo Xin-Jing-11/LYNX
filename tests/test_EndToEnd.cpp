@@ -712,3 +712,46 @@ TEST(EndToEnd, Si4_kpt_SCAN) {
     EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
         << "Total energy deviates from SPARC reference";
 }
+
+// ============================================================
+// Test: Gamma-point Si4 SCAN — orthogonal cell
+// SPARC reference: Si4 FCC, 26x26x26 grid, gamma-only, SCAN
+//   Etotal = -15.477507471 Ha
+//   Eband  = -1.8911990670 Ha
+//   Exc    = -4.4332977072 Ha
+//   Ef     = 0.010348992 Ha
+// ============================================================
+TEST(EndToEnd, Si4_gamma_SCAN) {
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_gamma.json";
+
+    std::ifstream f(json_file);
+    if (!f.good()) {
+        GTEST_SKIP() << "Test data not found: " << json_file;
+    }
+    f.close();
+
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    double ref_Etotal = -15.477507471;
+    double ref_Eband = -1.8911990670;
+    double ref_Exc = -4.4332977072;
+    double ref_Ef = 0.010348992;
+
+    if (rank == 0) {
+        std::printf("\n=== Si4 Gamma-point SCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.12f Ha (ref: %.12f)\n", result.Etotal, ref_Etotal);
+        std::printf("  Eband  = %.12f Ha (ref: %.12f)\n", result.Eband, ref_Eband);
+        std::printf("  Exc    = %.12f Ha (ref: %.12f)\n", result.Exc, ref_Exc);
+        std::printf("  Ef     = %.12f Ha (ref: %.12f)\n", result.Ef, ref_Ef);
+        std::printf("  Etotal error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
+        std::printf("  Exc error:    %.6e Ha\n", std::abs(result.Exc - ref_Exc));
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
+        << "Total energy deviates from SPARC reference";
+}

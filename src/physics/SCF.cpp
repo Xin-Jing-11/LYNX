@@ -113,7 +113,10 @@ void SCF::compute_tau(const Wavefunction& wfn,
     // Zero tau
     std::memset(tau_.data(), 0, tau_.size() * sizeof(double));
 
-    double spin_fac = (Nspin_global_ == 1) ? 2.0 : 1.0;
+    // NOTE: Do NOT apply spin_fac to tau. Unlike density which is ρ = spin_fac * Σ f_n |ψ|²,
+    // tau is τ = Σ f_n |∇ψ|² (no spin factor). SPARC uses g_nk = occ[n] for tau (no 2x).
+    // The factor of 2 in density accounts for spin degeneracy (2 electrons per orbital),
+    // but tau is the kinetic energy density which doesn't have this doubling.
 
     // Gradient operator and halo exchange setup
     int FDn = gradient_->stencil().FDn();
@@ -141,7 +144,7 @@ void SCF::compute_tau(const Wavefunction& wfn,
                 for (int n = 0; n < Nband_loc; ++n) {
                     double fn = occ(band_start + n);
                     if (fn < 1e-16) continue;
-                    double g_nk = spin_fac * wk * fn;
+                    double g_nk = wk * fn;
 
                     const Complex* col = psi_c.col(n);
                     halo_->execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
@@ -175,7 +178,7 @@ void SCF::compute_tau(const Wavefunction& wfn,
                 for (int n = 0; n < Nband_loc; ++n) {
                     double fn = occ(band_start + n);
                     if (fn < 1e-16) continue;
-                    double g_nk = spin_fac * wk * fn;
+                    double g_nk = wk * fn;
 
                     const double* col = psi.col(n);
                     halo_->execute(col, psi_ex.data(), 1);
@@ -257,6 +260,8 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
         Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
     }
     double* dxc_ptr = (xc.is_gga() || xc.is_mgga()) ? Dxcdgrho_.data() : nullptr;
+    // Always pass tau for mGGA (zero-initialized for first Veff).
+    // vtau output is computed but only used in Hamiltonian after tau_valid_.
     const double* tau_ptr = xc.is_mgga() ? tau_.data() : nullptr;
     double* vtau_ptr = xc.is_mgga() ? vtau_.data() : nullptr;
 
@@ -340,9 +345,11 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
         }
     }
 
-    // 4. Set vtau on Hamiltonian for mGGA
-    if (xc_type_ == XCType::MGGA_SCAN) {
+    // 4. Set vtau on Hamiltonian for mGGA (only after tau has been computed)
+    if (xc_type_ == XCType::MGGA_SCAN && tau_valid_) {
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data());
+    } else if (xc_type_ == XCType::MGGA_SCAN) {
+        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(nullptr);
     }
 }
 
@@ -829,6 +836,7 @@ double SCF::run(Wavefunction& wfn,
         // Compute tau for mGGA after CheFSI solve
         if (xc_type_ == XCType::MGGA_SCAN) {
             compute_tau(wfn, kpt_weights, kpt_start_, band_start_);
+            tau_valid_ = true;
         }
 
         // 2. Compute new electron density

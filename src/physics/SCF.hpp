@@ -132,6 +132,7 @@ private:
     NDArray<double> Dxcdgrho_;  // GGA: dExc/d(|∇ρ|²) = v2x + v2c (stored like reference)
     NDArray<double> tau_;       // kinetic energy density (mGGA)
     NDArray<double> vtau_;      // d(nε)/dτ potential (mGGA)
+    bool tau_valid_ = false;    // true after first compute_tau() call
 
     XCType xc_type_ = XCType::GGA_PBE;
     const double* Vloc_ = nullptr;
