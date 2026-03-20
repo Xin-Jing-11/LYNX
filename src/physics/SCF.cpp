@@ -874,11 +874,42 @@ double SCF::run(Wavefunction& wfn,
                                        (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
                                        (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
 
-        // 4. Evaluate SCF error: ||rho_out - rho_in|| / ||rho_out||
-        //    Reference: Evaluate_scf_error in electronicGroundState.c
-        //    var_in = mixing_hist_xk (input density), var_out = electronDens (output density)
+        // 4. For potential mixing: compute Veff_out from rho_out now
+        //    (needed for both SCF error and mixing)
+        bool use_potential_mixing = (params_.mixing_var == MixingVariable::Potential) && !is_soc_;
+        NDArray<double> Veff_out;
+        if (use_potential_mixing) {
+            // Save Veff_in (current)
+            NDArray<double> Veff_in(Nd_d * Nspin);
+            std::memcpy(Veff_in.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
+
+            // Set density_ to rho_out for Veff computation
+            std::memcpy(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
+            for (int s = 0; s < Nspin; ++s)
+                std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
+
+            compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+            // Veff_ is now Veff_out
+            Veff_out = NDArray<double>(Nd_d * Nspin);
+            std::memcpy(Veff_out.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
+
+            // Restore Veff_in (mixer needs it)
+            std::memcpy(Veff_.data(), Veff_in.data(), Nd_d * Nspin * sizeof(double));
+        }
+
+        // 5. Evaluate SCF error
         double scf_error = 0.0;
-        {
+        if (use_potential_mixing) {
+            // ||Veff_out - Veff_in|| / ||Veff_out||
+            double sum_sq_out = 0.0, sum_sq_diff = 0.0;
+            for (int i = 0; i < Nd_d * Nspin; ++i) {
+                double diff = Veff_out.data()[i] - Veff_.data()[i];
+                sum_sq_out += Veff_out.data()[i] * Veff_out.data()[i];
+                sum_sq_diff += diff * diff;
+            }
+            scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
+        } else {
+            // ||rho_out - rho_in|| / ||rho_out||
             const double* rho_in = density_.rho_total().data();
             const double* rho_out = rho_new.rho_total().data();
             double sum_sq_out = 0.0, sum_sq_diff = 0.0;
@@ -929,8 +960,40 @@ double SCF::run(Wavefunction& wfn,
 
         E_prev = energy_.Etotal;
 
-        // 5. Mix density
-        if (is_soc_) {
+        // 6. Mix
+        if (use_potential_mixing) {
+            // Potential mixing: mix Veff_in (Veff_) with Veff_out, use directly.
+            // density_ was already updated to rho_out in step 4.
+
+            // Shift Veff to zero mean before mixing (periodic gauge)
+            std::vector<double> mean_out(Nspin);
+            for (int s = 0; s < Nspin; ++s) {
+                double mean_in = 0;
+                mean_out[s] = 0;
+                for (int i = 0; i < Nd_d; ++i) {
+                    mean_in += Veff_.data()[s*Nd_d + i];
+                    mean_out[s] += Veff_out.data()[s*Nd_d + i];
+                }
+                mean_in /= grid_->Nd();
+                mean_out[s] /= grid_->Nd();
+                for (int i = 0; i < Nd_d; ++i) {
+                    Veff_.data()[s*Nd_d + i] -= mean_in;
+                    Veff_out.data()[s*Nd_d + i] -= mean_out[s];
+                }
+            }
+
+            // Mix: Veff_ is x_k (in), Veff_out is f_k (out)
+            // After mixing, Veff_ contains the mixed result
+            mixer.mix(Veff_.data(), Veff_out.data(), Nd_d, Nspin);
+
+            // Shift mean back (use output mean)
+            for (int s = 0; s < Nspin; ++s) {
+                for (int i = 0; i < Nd_d; ++i) {
+                    Veff_.data()[s*Nd_d + i] += mean_out[s];
+                }
+            }
+            // Veff_ now contains the mixed Veff — use directly, no recompute needed.
+        } else if (is_soc_) {
             // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
             std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);
             std::memcpy(dens_in.data(), density_.rho_total().data(), Nd_d * sizeof(double));
@@ -1031,11 +1094,14 @@ double SCF::run(Wavefunction& wfn,
             }
         }
 
-        // 6. Compute new Veff from mixed density
-        if (is_soc_) {
-            compute_Veff_spinor(density_, rho_b, Vloc_);
-        } else {
-            compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+        // 7. For density mixing: recompute Veff from mixed density
+        //    For potential mixing: Veff_ already contains the mixed potential
+        if (!use_potential_mixing) {
+            if (is_soc_) {
+                compute_Veff_spinor(density_, rho_b, Vloc_);
+            } else {
+                compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+            }
         }
     }
 

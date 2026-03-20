@@ -33,9 +33,9 @@
     "shift": [0.0, 0.0, 0.0]
   },
   "scf": {
-    "max_iter": 100,
+    "max_iter": 200,
     "tolerance": 1e-6,
-    "mixing": "density",
+    "mixing": "potential",
     "preconditioner": "kerker",
     "mixing_history": 7,
     "mixing_parameter": 0.1
