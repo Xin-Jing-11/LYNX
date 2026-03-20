@@ -534,6 +534,98 @@ TEST(SCANFunctional, GridXCOperator_NonSpin) {
     EXPECT_GT(Vxc_min, -10.0) << "Vxc shouldn't be extremely negative";
 }
 
+// ============================================================
+// Compare LYNX SCAN XC operator against SPARC dump
+// Uses binary dump from SPARC at SCF iteration 2
+// ============================================================
+TEST(SCANFunctional, CompareWithSPARC_NonSpin) {
+    const char* dump_file = "/tmp/sparc_xc_dump.bin";
+    FILE* fp = fopen(dump_file, "rb");
+    if (!fp) {
+        GTEST_SKIP() << "SPARC dump not found: " << dump_file;
+    }
+
+    // Read SPARC dump: N, rho, sigma, tau, exc, Vxc, Dxcdgrho, vtau
+    int N;
+    fread(&N, sizeof(int), 1, fp);
+    std::printf("  Loading SPARC dump: N=%d\n", N);
+
+    std::vector<double> rho_sp(N), sigma_sp(N), tau_sp(N);
+    std::vector<double> exc_sp(N), Vxc_sp(N), Dxc_sp(N), vtau_sp(N);
+    fread(rho_sp.data(), sizeof(double), N, fp);
+    fread(sigma_sp.data(), sizeof(double), N, fp);
+    fread(tau_sp.data(), sizeof(double), N, fp);
+    fread(exc_sp.data(), sizeof(double), N, fp);
+    fread(Vxc_sp.data(), sizeof(double), N, fp);
+    fread(Dxc_sp.data(), sizeof(double), N, fp);
+    fread(vtau_sp.data(), sizeof(double), N, fp);
+    fclose(fp);
+
+    // Call LYNX hand-coded SCAN with the same inputs
+    std::vector<double> ex_ly(N), vx_ly(N), v2x_ly(N), v3x_ly(N);
+    std::vector<double> ec_ly(N), vc_ly(N), v2c_ly(N), v3c_ly(N);
+    scan::scanx(N, rho_sp.data(), sigma_sp.data(), tau_sp.data(),
+                ex_ly.data(), vx_ly.data(), v2x_ly.data(), v3x_ly.data());
+    scan::scanc(N, rho_sp.data(), sigma_sp.data(), tau_sp.data(),
+                ec_ly.data(), vc_ly.data(), v2c_ly.data(), v3c_ly.data());
+
+    // Compare exc = ex + ec
+    double max_exc_err = 0, max_exc_rel = 0;
+    for (int i = 0; i < N; i++) {
+        double exc_ly = ex_ly[i] + ec_ly[i];
+        double err = std::abs(exc_ly - exc_sp[i]);
+        double rel = (std::abs(exc_sp[i]) > 1e-15) ? err / std::abs(exc_sp[i]) : err;
+        max_exc_err = std::max(max_exc_err, err);
+        max_exc_rel = std::max(max_exc_rel, rel);
+    }
+    std::printf("  exc:  max_abs_err=%.6e  max_rel_err=%.6e\n", max_exc_err, max_exc_rel);
+    EXPECT_LT(max_exc_rel, 1e-13) << "exc mismatch between LYNX and SPARC";
+
+    // Compare Dxcdgrho = v2x + v2c (before divergence)
+    double max_dxc_err = 0, max_dxc_rel = 0;
+    for (int i = 0; i < N; i++) {
+        double dxc_ly = v2x_ly[i] + v2c_ly[i];
+        double err = std::abs(dxc_ly - Dxc_sp[i]);
+        double ref = std::max(std::abs(Dxc_sp[i]), 1e-10);
+        max_dxc_err = std::max(max_dxc_err, err);
+        max_dxc_rel = std::max(max_dxc_rel, err / ref);
+    }
+    std::printf("  Dxc:  max_abs_err=%.6e  max_rel_err=%.6e\n", max_dxc_err, max_dxc_rel);
+    EXPECT_LT(max_dxc_rel, 1e-13) << "Dxcdgrho mismatch between LYNX and SPARC";
+
+    // Compare vtau = v3x + v3c
+    double max_vtau_err = 0, max_vtau_rel = 0;
+    for (int i = 0; i < N; i++) {
+        double vtau_ly = v3x_ly[i] + v3c_ly[i];
+        double err = std::abs(vtau_ly - vtau_sp[i]);
+        double ref = std::max(std::abs(vtau_sp[i]), 1e-10);
+        max_vtau_err = std::max(max_vtau_err, err);
+        max_vtau_rel = std::max(max_vtau_rel, err / ref);
+    }
+    std::printf("  vtau: max_abs_err=%.6e  max_rel_err=%.6e\n", max_vtau_err, max_vtau_rel);
+    EXPECT_LT(max_vtau_rel, 1e-13) << "vtau mismatch between LYNX and SPARC";
+
+    // Compare Vxc (local part = vx1 + vc1, before divergence)
+    // SPARC's Vxc includes divergence, so we compare the local part only
+    double max_vxc_local_err = 0, max_vxc_local_rel = 0;
+    for (int i = 0; i < N; i++) {
+        double vxc_local_ly = vx_ly[i] + vc_ly[i];
+        // We can't compare with SPARC's full Vxc directly because it includes divergence
+        // But we can check that the local part is reasonable
+        ASSERT_TRUE(std::isfinite(vxc_local_ly)) << "Vxc_local not finite at i=" << i;
+    }
+    std::printf("  Vxc_local: all finite (divergence comparison skipped)\n");
+
+    // Print first few comparison values
+    std::printf("  Sample comparisons:\n");
+    for (int i = 0; i < 5 && i < N; i++) {
+        double exc_ly = ex_ly[i] + ec_ly[i];
+        double vtau_ly = v3x_ly[i] + v3c_ly[i];
+        std::printf("    [%d] rho=%.6e | exc: SP=%.10e LY=%.10e | vtau: SP=%.10e LY=%.10e\n",
+                    i, rho_sp[i], exc_sp[i], exc_ly, vtau_sp[i], vtau_ly);
+    }
+}
+
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
     ::testing::InitGoogleTest(&argc, argv);
