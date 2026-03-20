@@ -417,7 +417,7 @@ TEST(EndToEnd, XCFunctionalRealDensity) {
 //   Ef     = 0.31446488165 Ha
 // ============================================================
 TEST(EndToEnd, BaTiO3_SCF) {
-    std::string json_file = "/home/xx/Desktop/SPARC/tests/data/BaTiO3_quick.json";
+    std::string json_file = "tests/data/BaTiO3_quick.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -481,7 +481,7 @@ TEST(EndToEnd, BaTiO3_SCF) {
 //      -4.0031   7.3638 -17.0501
 // ============================================================
 TEST(EndToEnd, Si8_SCF) {
-    std::string json_file = "/home/xx/Desktop/SPARC/tests/data/Si8.json";
+    std::string json_file = "tests/data/Si8.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
