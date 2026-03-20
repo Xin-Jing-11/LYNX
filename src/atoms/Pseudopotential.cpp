@@ -7,6 +7,14 @@
 
 namespace lynx {
 
+// Replace Fortran 'D' exponent notation with 'E' for C++ parsing
+// e.g. "1.234D+05" -> "1.234E+05"
+static void fix_fortran_exp(std::string& s) {
+    for (auto& c : s) {
+        if (c == 'D' || c == 'd') c = 'E';
+    }
+}
+
 int Pseudopotential::nproj_per_atom() const {
     int total = 0;
     for (int l = 0; l <= lmax_; ++l) {
@@ -29,7 +37,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     // Line 2: zatom, zion, pspd (date)
     double zatom;
     {
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream ss(line);
         ss >> zatom >> Zval_;
     }
@@ -38,7 +46,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     int pspcod, mmax;
     double r2well;
     {
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream ss(line);
         ss >> pspcod >> pspxc_ >> lmax_ >> lloc_ >> mmax >> r2well;
     }
@@ -49,14 +57,14 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     // Line 4: rchrg, fchrg, qchrg (NLCC parameters)
     double rchrg, qchrg;
     {
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream ss(line);
         ss >> rchrg >> fchrg_ >> qchrg;
     }
 
     // Line 5: nproj per l channel (lmax+1 values, possibly more)
     {
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream ss(line);
         ppl_.resize(lmax_ + 1, 0);
         for (int l = 0; l <= lmax_; ++l) {
@@ -67,7 +75,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     // Line 6: extension_switch
     int extension_switch = 0;
     {
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream ss(line);
         ss >> extension_switch;
     }
@@ -76,7 +84,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     // This line exists in FR pseudopotentials and must be consumed before channel data
     std::vector<int> nprojso;
     if (extension_switch >= 2) {
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream ss(line);
         nprojso.resize(lmax_ + 1, 0);
         // nprojso values are for l=1..lmax (l=0 has no SOC)
@@ -106,7 +114,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
         UdV_d_[l].resize(nprj);
 
         // Read l header line: l_value [ekb values if nonlocal]
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         std::istringstream hdr(line);
         int l_read;
         hdr >> l_read;
@@ -119,7 +127,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
 
             // Read mmax lines of radial data: index, r, u0(r), u1(r), ...
             for (int i = 0; i < mmax; ++i) {
-                std::getline(ifs, line);
+                std::getline(ifs, line); fix_fortran_exp(line);
                 std::istringstream ss(line);
                 int idx;
                 double ri;
@@ -149,13 +157,14 @@ void Pseudopotential::load_psp8(const std::string& filename) {
         } else if (l == lloc_) {
             // Local channel: read mmax lines of Vloc data
             for (int i = 0; i < mmax; ++i) {
-                std::getline(ifs, line);
+                std::getline(ifs, line); fix_fortran_exp(line);
                 std::istringstream ss(line);
                 int idx;
                 double ri, vloc_val;
                 ss >> idx >> ri >> vloc_val;
                 if (!have_rgrid) r_[i] = ri;
                 rVloc_[i] = ri * vloc_val;  // Store as r * Vloc
+                if (i == 0) Vloc_0_ = vloc_val;  // Store Vloc(r=0) directly from file
             }
             have_rgrid = true;
         } else {
@@ -169,27 +178,30 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     // If lloc > lmax, the local potential data comes after all nonlocal channels
     if (lloc_ > lmax_) {
         // Read local channel header (just the l value)
-        std::getline(ifs, line);
+        std::getline(ifs, line); fix_fortran_exp(line);
         // l_value should be lloc_
 
         // Read mmax lines of Vloc data
         for (int i = 0; i < mmax; ++i) {
-            std::getline(ifs, line);
+            std::getline(ifs, line); fix_fortran_exp(line);
             std::istringstream ss(line);
             int idx;
             double ri, vloc_val;
             ss >> idx >> ri >> vloc_val;
             if (!have_rgrid) r_[i] = ri;
             rVloc_[i] = ri * vloc_val;  // Store as r * Vloc
+            if (i == 0) Vloc_0_ = vloc_val;  // Store Vloc(r=0) directly from file
         }
         have_rgrid = true;
     }
 
-    // Vloc(r=0): extrapolate from first/second point
-    if (r_[0] < 1e-14 && mmax > 1) {
-        Vloc_0_ = rVloc_[1] / r_[1];
-    } else if (mmax > 0) {
-        Vloc_0_ = rVloc_[0] / r_[0];
+    // Vloc_0 fallback: if not set above (shouldn't happen for valid psp8 files)
+    if (Vloc_0_ == 0.0 && mmax > 1) {
+        if (r_[0] < 1e-14) {
+            Vloc_0_ = rVloc_[1] / r_[1];
+        } else {
+            Vloc_0_ = rVloc_[0] / r_[0];
+        }
     }
 
     // Read rc values from the r_core comment in line 1
@@ -235,7 +247,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
             if (nprj == 0) continue;
 
             // Read SOC header line: l_value [ekb_soc values]
-            std::getline(ifs, line);
+            std::getline(ifs, line); fix_fortran_exp(line);
             std::istringstream hdr(line);
             int l_read;
             hdr >> l_read;
@@ -245,7 +257,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
 
             // Read mmax lines: index, r, soc_proj_0(r), soc_proj_1(r), ...
             for (int i = 0; i < mmax; ++i) {
-                std::getline(ifs, line);
+                std::getline(ifs, line); fix_fortran_exp(line);
                 std::istringstream ss(line);
                 int idx;
                 double ri;
@@ -277,6 +289,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
         rho_c_.resize(mmax, 0.0);
         for (int i = 0; i < mmax; ++i) {
             if (!std::getline(ifs, line)) break;
+            fix_fortran_exp(line);
             std::istringstream ss(line);
             int idx;
             double ri;
@@ -292,6 +305,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
     for (int i = 0; i < mmax; ++i) {
         if (!std::getline(ifs, line)) break;
         if (line.empty()) break;
+        fix_fortran_exp(line);
         std::istringstream ss(line);
         int idx;
         double ri;
