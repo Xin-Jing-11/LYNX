@@ -617,10 +617,28 @@ double SCF::run(Wavefunction& wfn,
     std::vector<double> eigval_min(Nspin_local, 0.0), eigval_max(Nspin_local, 0.0);
 
     // Initial Veff from initial density
+    bool use_potential_mixing = (params_.mixing_var == MixingVariable::Potential) && !is_soc_;
+    if (use_potential_mixing) {
+        Veff_mean_.resize(Nspin, 0.0);
+    }
     if (is_soc_) {
         compute_Veff_spinor(density_, rho_b, Vloc_);
     } else {
         compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+    }
+    // For potential mixing: initialize Veff_mixed_ (zero-mean copy for mixer history)
+    // matching SPARC's Update_mixing_hist_xk
+    NDArray<double> Veff_mixed;  // zero-mean Veff for mixer (persistent across SCF loop)
+    if (use_potential_mixing) {
+        Veff_mixed = NDArray<double>(Nd_d * Nspin);
+        std::memcpy(Veff_mixed.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
+        for (int s = 0; s < Nspin; ++s) {
+            double mean = 0;
+            for (int i = 0; i < Nd_d; ++i) mean += Veff_mixed.data()[s*Nd_d + i];
+            mean /= grid_->Nd();
+            Veff_mean_[s] = mean;
+            for (int i = 0; i < Nd_d; ++i) Veff_mixed.data()[s*Nd_d + i] -= mean;
+        }
     }
 
     // Debug: dump initial state for comparison with reference
@@ -879,7 +897,6 @@ double SCF::run(Wavefunction& wfn,
 
         // 3. For potential mixing: compute Veff_out from rho_out, energy with Escc correction
         //    For density mixing: compute energy using rho_in
-        bool use_potential_mixing = (params_.mixing_var == MixingVariable::Potential) && !is_soc_;
         NDArray<double> Veff_out;
 
         if (use_potential_mixing) {
@@ -944,9 +961,10 @@ double SCF::run(Wavefunction& wfn,
         // 5. Evaluate SCF error
         double scf_error = 0.0;
         if (use_potential_mixing) {
-            // ||Veff_out - Veff_in|| / ||Veff_out||
+            // ||Veff_out - Veff_in|| / ||Veff_out|| (using unshifted values)
             double sum_sq_out = 0.0, sum_sq_diff = 0.0;
             for (int i = 0; i < Nd_d * Nspin; ++i) {
+                // Veff_out and Veff_ are both unshifted at this point
                 double diff = Veff_out.data()[i] - Veff_.data()[i];
                 sum_sq_out += Veff_out.data()[i] * Veff_out.data()[i];
                 sum_sq_diff += diff * diff;
@@ -1006,37 +1024,30 @@ double SCF::run(Wavefunction& wfn,
 
         // 6. Mix
         if (use_potential_mixing) {
-            // Potential mixing: mix Veff_in (Veff_) with Veff_out, use directly.
-            // density_ was already updated to rho_out in step 4.
+            // Potential mixing matching SPARC's exact flow:
+            // Veff_mixed = zero-mean copy of the mixer's x_k (persistent, like mixing_hist_xk)
+            // Veff_out = zero-mean copy of g_k (output from compute_Veff, shifted here)
+            // After mixing, Veff_mixed is updated to x_kp1, and Veff_ = Veff_mixed + mean.
 
-            // Shift Veff to zero mean before mixing (periodic gauge)
-            std::vector<double> mean_out(Nspin);
+            // Step 1: Shift Veff_out to zero-mean, save mean for later
             for (int s = 0; s < Nspin; ++s) {
-                double mean_in = 0;
-                mean_out[s] = 0;
-                for (int i = 0; i < Nd_d; ++i) {
-                    mean_in += Veff_.data()[s*Nd_d + i];
-                    mean_out[s] += Veff_out.data()[s*Nd_d + i];
-                }
-                mean_in /= grid_->Nd();
-                mean_out[s] /= grid_->Nd();
-                for (int i = 0; i < Nd_d; ++i) {
-                    Veff_.data()[s*Nd_d + i] -= mean_in;
-                    Veff_out.data()[s*Nd_d + i] -= mean_out[s];
-                }
+                double mean = 0;
+                for (int i = 0; i < Nd_d; ++i) mean += Veff_out.data()[s*Nd_d + i];
+                mean /= grid_->Nd();
+                Veff_mean_[s] = mean;
+                for (int i = 0; i < Nd_d; ++i) Veff_out.data()[s*Nd_d + i] -= mean;
             }
 
-            // Mix: Veff_ is x_k (in), Veff_out is f_k (out)
-            // After mixing, Veff_ contains the mixed result
-            mixer.mix(Veff_.data(), Veff_out.data(), Nd_d, Nspin);
+            // Step 2: Mix. Veff_mixed is x_k (zero-mean), Veff_out is g_k (zero-mean).
+            // After mix(), Veff_mixed is updated to x_{k+1} (zero-mean).
+            mixer.mix(Veff_mixed.data(), Veff_out.data(), Nd_d, Nspin);
 
-            // Shift mean back (use output mean)
+            // Step 3: Veff_ = Veff_mixed + mean (for Hamiltonian)
             for (int s = 0; s < Nspin; ++s) {
                 for (int i = 0; i < Nd_d; ++i) {
-                    Veff_.data()[s*Nd_d + i] += mean_out[s];
+                    Veff_.data()[s*Nd_d + i] = Veff_mixed.data()[s*Nd_d + i] + Veff_mean_[s];
                 }
             }
-            // Veff_ now contains the mixed Veff — use directly, no recompute needed.
         } else if (is_soc_) {
             // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
             std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);

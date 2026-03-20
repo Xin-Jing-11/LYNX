@@ -134,6 +134,9 @@ private:
     NDArray<double> vtau_;      // d(nε)/dτ potential (mGGA)
     bool tau_valid_ = false;    // true after first compute_tau() call
 
+    // Potential mixing state: Veff mean for each spin (removed before mixing, added for Hamiltonian)
+    std::vector<double> Veff_mean_;  // per-spin Veff mean (for potential mixing)
+
     XCType xc_type_ = XCType::GGA_PBE;
     const double* Vloc_ = nullptr;
     const double* rho_core_ = nullptr;  // NLCC core density (non-owning)

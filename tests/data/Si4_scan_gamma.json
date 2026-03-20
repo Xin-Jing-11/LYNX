@@ -33,7 +33,7 @@
     "shift": [0.0, 0.0, 0.0]
   },
   "scf": {
-    "max_iter": 100,
+    "max_iter": 50,
     "tolerance": 1e-6,
     "mixing": "density",
     "preconditioner": "kerker",
