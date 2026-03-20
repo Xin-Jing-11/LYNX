@@ -102,6 +102,149 @@ void SCF::set_initial_density(const double* rho_init, int Nd_d,
     }
 }
 
+void SCF::compute_tau(const Wavefunction& wfn,
+                       const std::vector<double>& kpt_weights,
+                       int kpt_start, int band_start) {
+    int Nd_d = domain_->Nd_d();
+    int Nband_loc = wfn.Nband();
+    int Nspin_local = wfn.Nspin();
+    int Nkpts = wfn.Nkpts();
+
+    // Zero tau
+    std::memset(tau_.data(), 0, tau_.size() * sizeof(double));
+
+    double spin_fac = (Nspin_global_ == 1) ? 2.0 : 1.0;
+
+    // Gradient operator and halo exchange setup
+    int FDn = gradient_->stencil().FDn();
+    int nx = domain_->Nx_d(), ny = domain_->Ny_d(), nz = domain_->Nz_d();
+    int nd_ex = halo_->nx_ex() * halo_->ny_ex() * halo_->nz_ex();
+    bool is_orth = grid_->lattice().is_orthogonal();
+    const Mat3& lapcT = grid_->lattice().lapc_T();
+    Vec3 cell_lengths = grid_->lattice().lengths();
+
+    for (int s = 0; s < Nspin_local; ++s) {
+        int s_glob = spin_start_ + s;
+        double* tau_s = tau_.data() + s_glob * Nd_d;
+
+        for (int k = 0; k < Nkpts; ++k) {
+            const auto& occ = wfn.occupations(s, k);
+            double wk = kpt_weights[kpt_start + k];
+
+            if (wfn.is_complex()) {
+                // k-point (complex) path
+                const auto& psi_c = wfn.psi_kpt(s, k);
+                std::vector<Complex> psi_ex(nd_ex);
+                std::vector<Complex> dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+                Vec3 kpt = kpoints_->kpts_cart()[kpt_start + k];
+
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);
+                    if (fn < 1e-16) continue;
+                    double g_nk = spin_fac * wk * fn;
+
+                    const Complex* col = psi_c.col(n);
+                    halo_->execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
+
+                    gradient_->apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+                    if (is_orth) {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            tau_s[i] += g_nk * (std::norm(dpsi_x[i]) + std::norm(dpsi_y[i]) + std::norm(dpsi_z[i]));
+                        }
+                    } else {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            Complex dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+                            // |∇ψ|² with metric tensor: Re(conj(∇ψ) · lapcT · ∇ψ)
+                            double val = lapcT(0,0) * std::norm(dx) + lapcT(1,1) * std::norm(dy) + lapcT(2,2) * std::norm(dz)
+                                       + 2.0 * lapcT(0,1) * (std::conj(dx) * dy).real()
+                                       + 2.0 * lapcT(0,2) * (std::conj(dx) * dz).real()
+                                       + 2.0 * lapcT(1,2) * (std::conj(dy) * dz).real();
+                            tau_s[i] += g_nk * val;
+                        }
+                    }
+                }
+            } else {
+                // Gamma-point (real) path
+                const auto& psi = wfn.psi(s, k);
+                std::vector<double> psi_ex(nd_ex);
+                std::vector<double> dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);
+                    if (fn < 1e-16) continue;
+                    double g_nk = spin_fac * wk * fn;
+
+                    const double* col = psi.col(n);
+                    halo_->execute(col, psi_ex.data(), 1);
+
+                    gradient_->apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+                    if (is_orth) {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            tau_s[i] += g_nk * (dpsi_x[i]*dpsi_x[i] + dpsi_y[i]*dpsi_y[i] + dpsi_z[i]*dpsi_z[i]);
+                        }
+                    } else {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            double dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+                            double val = lapcT(0,0)*dx*dx + lapcT(1,1)*dy*dy + lapcT(2,2)*dz*dz
+                                       + 2.0*lapcT(0,1)*dx*dy + 2.0*lapcT(0,2)*dx*dz + 2.0*lapcT(1,2)*dy*dz;
+                            tau_s[i] += g_nk * val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Allreduce over band communicator
+    if (!bandcomm_->is_null() && bandcomm_->size() > 1) {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start_ + s;
+            bandcomm_->allreduce_sum(tau_.data() + s_glob * Nd_d, Nd_d);
+        }
+    }
+
+    // Allreduce over kpt communicator
+    if (!kptcomm_->is_null() && kptcomm_->size() > 1) {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start_ + s;
+            kptcomm_->allreduce_sum(tau_.data() + s_glob * Nd_d, Nd_d);
+        }
+    }
+
+    // Exchange spin channels across spin communicator
+    if (spincomm_ && !spincomm_->is_null() && spincomm_->size() > 1 && Nspin_global_ == 2) {
+        int my_spin = spin_start_;
+        int other_spin = 1 - my_spin;
+        int partner = (spincomm_->rank() == 0) ? 1 : 0;
+        MPI_Sendrecv(tau_.data() + my_spin * Nd_d, Nd_d, MPI_DOUBLE, partner, 0,
+                     tau_.data() + other_spin * Nd_d, Nd_d, MPI_DOUBLE, partner, 0,
+                     spincomm_->comm(), MPI_STATUS_IGNORE);
+    }
+
+    // Divide by dV (tau is accumulated as integral, convert to density)
+    double inv_dV = 1.0 / grid_->dV();
+    int tau_grid_size = (Nspin_global_ == 2) ? 2 * Nd_d : Nd_d;
+    for (int i = 0; i < tau_grid_size; ++i) {
+        tau_.data()[i] *= inv_dV;
+    }
+
+    // For spin-polarized: compute total = up + dn in the third slot
+    if (Nspin_global_ == 2) {
+        double* tau_up = tau_.data();
+        double* tau_dn = tau_.data() + Nd_d;
+        double* tau_tot = tau_.data() + 2 * Nd_d;
+        for (int i = 0; i < Nd_d; ++i) {
+            tau_tot[i] = tau_up[i] + tau_dn[i];
+        }
+    }
+}
+
 void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vloc) {
     int Nd_d = domain_->Nd_d();
 
@@ -110,12 +253,14 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
     XCFunctional xc;
     xc.setup(xc_type_, *domain_, *grid_, gradient_, halo_);
 
-    // Allocate Dxcdgrho_ if GGA
+    // Allocate Dxcdgrho_ if GGA or mGGA
     int dxc_ncol = (Nspin_global_ == 2) ? 3 : 1;  // 3 columns for spin: [v2c, v2x_up, v2x_down]
-    if (xc.is_gga() && Dxcdgrho_.size() == 0) {
+    if ((xc.is_gga() || xc.is_mgga()) && Dxcdgrho_.size() == 0) {
         Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
     }
-    double* dxc_ptr = xc.is_gga() ? Dxcdgrho_.data() : nullptr;
+    double* dxc_ptr = (xc.is_gga() || xc.is_mgga()) ? Dxcdgrho_.data() : nullptr;
+    const double* tau_ptr = xc.is_mgga() ? tau_.data() : nullptr;
+    double* vtau_ptr = xc.is_mgga() ? vtau_.data() : nullptr;
 
     if (Nspin_global_ == 2) {
         // Spin-polarized: build rho_xc array [total | up | down] (3*Nd_d)
@@ -142,7 +287,7 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
             rho_xc[Nd_d + i] = ru;
             rho_xc[2*Nd_d + i] = rd;
         }
-        xc.evaluate_spin(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr);
+        xc.evaluate_spin(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr, tau_ptr, vtau_ptr);
     } else {
         // Non-spin-polarized
         if (rho_core_) {
@@ -152,9 +297,9 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
                 rho_xc[i] = rho[i] + rho_core_[i];
                 if (rho_xc[i] < xc_rhotol) rho_xc[i] = xc_rhotol;
             }
-            xc.evaluate(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr);
+            xc.evaluate(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr, tau_ptr, vtau_ptr);
         } else {
-            xc.evaluate(rho, Vxc_.data(), exc_.data(), Nd_d, dxc_ptr);
+            xc.evaluate(rho, Vxc_.data(), exc_.data(), Nd_d, dxc_ptr, tau_ptr, vtau_ptr);
         }
     }
 
@@ -197,6 +342,10 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
         }
     }
 
+    // 4. Set vtau on Hamiltonian for mGGA
+    if (xc_type_ == XCType::MGGA_SCAN) {
+        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data());
+    }
 }
 
 void SCF::compute_Veff_spinor(const ElectronDensity& density,
@@ -400,6 +549,12 @@ double SCF::run(Wavefunction& wfn,
     phi_ = NDArray<double>(Nd_d);
     if (is_soc_) {
         Veff_spinor_ = NDArray<double>(4 * Nd_d);
+    }
+    if (xc_type_ == XCType::MGGA_SCAN) {
+        int tau_size = (Nspin_global_ == 2) ? 3 * Nd_d : Nd_d;
+        int vtau_size = (Nspin_global_ == 2) ? 2 * Nd_d : Nd_d;
+        tau_ = NDArray<double>(tau_size);
+        vtau_ = NDArray<double>(vtau_size);
     }
 
     // Initialize density if not already set
@@ -605,6 +760,10 @@ double SCF::run(Wavefunction& wfn,
                 for (int s = 0; s < Nspin_local; ++s) {
                     int s_glob = spin_start_ + s;
                     double* Veff_s = Veff_.data() + s_glob * Nd_d;
+                    // Set per-spin vtau for mGGA
+                    if (xc_type_ == XCType::MGGA_SCAN && Nspin_global_ == 2) {
+                        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data() + s_glob * Nd_d);
+                    }
                     for (int k = 0; k < Nkpts; ++k) {
                         double* eig = wfn.eigenvalues(s, k).data();
 
@@ -667,6 +826,11 @@ double SCF::run(Wavefunction& wfn,
                 std::printf("\n");
             }
 
+        }
+
+        // Compute tau for mGGA after CheFSI solve
+        if (xc_type_ == XCType::MGGA_SCAN) {
+            compute_tau(wfn, kpt_weights, kpt_start_, band_start_);
         }
 
         // 2. Compute new electron density
