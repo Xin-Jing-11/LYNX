@@ -260,10 +260,16 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
         Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
     }
     double* dxc_ptr = (xc.is_gga() || xc.is_mgga()) ? Dxcdgrho_.data() : nullptr;
-    // Always pass tau for mGGA (zero-initialized for first Veff).
-    // vtau output is computed but only used in Hamiltonian after tau_valid_.
-    const double* tau_ptr = xc.is_mgga() ? tau_.data() : nullptr;
-    double* vtau_ptr = xc.is_mgga() ? vtau_.data() : nullptr;
+    // For the first Veff (before tau is computed from real wavefunctions),
+    // SPARC uses PBE instead of SCAN (exchangeCorrelation.c line 64-68).
+    // This avoids evaluating SCAN with tau=0 which produces poor potentials.
+    // After the first CheFSI + tau computation, switch to SCAN.
+    if (xc.is_mgga() && !tau_valid_) {
+        // Use PBE for the initial Veff (matching SPARC)
+        xc.setup(XCType::GGA_PBE, *domain_, *grid_, gradient_, halo_);
+    }
+    const double* tau_ptr = (xc.is_mgga() && tau_valid_) ? tau_.data() : nullptr;
+    double* vtau_ptr = (xc.is_mgga() && tau_valid_) ? vtau_.data() : nullptr;
 
     if (Nspin_global_ == 2) {
         // Spin-polarized: build rho_xc array [total | up | down] (3*Nd_d)
@@ -719,6 +725,15 @@ double SCF::run(Wavefunction& wfn,
                 wfn.randomize(s, k, rand_seed);
             }
         }
+    }
+
+    // Debug: dump initial wavefunctions
+    if (rank_world == 0 && !is_kpt_) {
+        const double* psi0 = wfn.psi(0, 0).data();
+        std::printf("DUMP_PSI_INIT[0..4]= %.15e %.15e %.15e %.15e %.15e\n",
+                    psi0[0], psi0[1], psi0[2], psi0[3], psi0[4]);
+        std::printf("DUMP_PSI_INIT seed=%u Nd_d=%d Nband_loc=%d\n",
+                    rand_seed, Nd_d, wfn.Nband());
     }
 
     double E_prev = 0.0;
