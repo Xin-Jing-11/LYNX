@@ -368,7 +368,176 @@ TEST(SCANFunctional, HandCodedVsLibxc_Spin) {
     // direct comparison complex; skip for now
 }
 
+// ============================================================
+// Grid-level XC operator test: verify XCFunctional::evaluate with SCAN
+// on a real grid matches direct hand-coded evaluation
+// ============================================================
+
+#include "core/Lattice.hpp"
+#include "core/FDGrid.hpp"
+#include "core/Domain.hpp"
+#include "operators/FDStencil.hpp"
+#include "operators/Gradient.hpp"
+#include "parallel/HaloExchange.hpp"
+#include "xc/XCFunctional.hpp"
+#include <mpi.h>
+
+TEST(SCANFunctional, GridXCOperator_NonSpin) {
+    // Small orthogonal grid — fast test
+    int Nx = 12, Ny = 12, Nz = 12;
+    double L = 10.0; // Bohr
+    int fd_order = 12;
+
+    Mat3 lv;
+    lv(0,0) = L; lv(1,1) = L; lv(2,2) = L;
+    Lattice lattice(lv, CellType::Orthogonal);
+    FDGrid grid(Nx, Ny, Nz, lattice, BCType::Periodic, BCType::Periodic, BCType::Periodic);
+    FDStencil stencil(fd_order, grid, lattice);
+    DomainVertices verts;
+    verts.xs = 0; verts.xe = Nx - 1;
+    verts.ys = 0; verts.ye = Ny - 1;
+    verts.zs = 0; verts.ze = Nz - 1;
+    Domain domain(grid, verts);
+    Gradient gradient(stencil, domain);
+    HaloExchange halo(domain, stencil.FDn());
+
+    int Nd_d = domain.Nd_d();
+    double dV = grid.dV();
+    double dx = L / Nx, dy = L / Ny, dz = L / Nz;
+
+    // Create smooth density that never has zero gradient:
+    // rho(r) = rho0 + A*sin(2*pi*x/L + 0.3)*sin(2*pi*y/L + 0.7)*sin(2*pi*z/L + 1.1)
+    // Phase shifts ensure gradient is never simultaneously zero in all components
+    double rho0 = 0.5;
+    double A = 0.1;
+    std::vector<double> rho(Nd_d), tau(Nd_d);
+    double threePi2_2o3 = std::pow(3.0*M_PI*M_PI, 2.0/3.0);
+
+    for (int k = 0; k < Nz; ++k)
+    for (int j = 0; j < Ny; ++j)
+    for (int i = 0; i < Nx; ++i) {
+        int idx = i + j * Nx + k * Nx * Ny;
+        double x = i * dx, y = j * dy, z = k * dz;
+        double sx = std::sin(2*M_PI*x/L + 0.3);
+        double sy = std::sin(2*M_PI*y/L + 0.7);
+        double sz = std::sin(2*M_PI*z/L + 1.1);
+        rho[idx] = rho0 + A * sx * sy * sz;
+        // tau: near-uniform, proportional to rho^(5/3)
+        tau[idx] = 0.3 * threePi2_2o3 * std::pow(rho[idx], 5.0/3.0);
+    }
+
+    // 1. Evaluate XC using XCFunctional (full grid operator)
+    XCFunctional xc;
+    xc.setup(XCType::MGGA_SCAN, domain, grid, &gradient, &halo);
+
+    std::vector<double> Vxc(Nd_d), exc(Nd_d), Dxcdgrho(Nd_d), vtau(Nd_d);
+    xc.evaluate(rho.data(), Vxc.data(), exc.data(), Nd_d,
+                Dxcdgrho.data(), tau.data(), vtau.data());
+
+    // 2. Verify basic sanity — check first few values for NaN
+    int nan_count_exc = 0, nan_count_vxc = 0, nan_count_vtau = 0, nan_count_dxc = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        if (!std::isfinite(exc[i])) nan_count_exc++;
+        if (!std::isfinite(Vxc[i])) nan_count_vxc++;
+        if (!std::isfinite(vtau[i])) nan_count_vtau++;
+        if (!std::isfinite(Dxcdgrho[i])) nan_count_dxc++;
+    }
+    std::printf("  NaN counts: exc=%d, Vxc=%d, vtau=%d, Dxcdgrho=%d (out of %d)\n",
+                nan_count_exc, nan_count_vxc, nan_count_vtau, nan_count_dxc, Nd_d);
+    // Print first few values
+    for (int i = 0; i < 5 && i < Nd_d; ++i) {
+        std::printf("  [%d] rho=%.6e tau=%.6e => exc=%.6e Vxc=%.6e vtau=%.6e Dxcdgrho=%.6e\n",
+                    i, rho[i], tau[i], exc[i], Vxc[i], vtau[i], Dxcdgrho[i]);
+    }
+
+    double exc_sum = 0, Vxc_sum = 0, vtau_sum = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        ASSERT_TRUE(std::isfinite(exc[i])) << "exc not finite at i=" << i;
+        ASSERT_TRUE(std::isfinite(Vxc[i])) << "Vxc not finite at i=" << i
+            << " rho=" << rho[i] << " tau=" << tau[i];
+        ASSERT_TRUE(std::isfinite(vtau[i])) << "vtau not finite at i=" << i;
+        ASSERT_TRUE(std::isfinite(Dxcdgrho[i])) << "Dxcdgrho not finite at i=" << i;
+        exc_sum += exc[i];
+        Vxc_sum += Vxc[i];
+        vtau_sum += vtau[i];
+    }
+
+    // exc should be negative (exchange-correlation)
+    EXPECT_LT(exc_sum / Nd_d, 0.0) << "Average exc should be negative";
+
+    // vtau should be non-positive for SCAN (typically vtau <= 0)
+    // Actually vtau can be positive or negative, but for near-uniform gas it should be small
+    EXPECT_TRUE(std::isfinite(vtau_sum)) << "vtau sum not finite";
+
+    // 3. Compare exc against direct hand-coded evaluation
+    // First compute sigma from gradient
+    int FDn = gradient.stencil().FDn();
+    int nd_ex = halo.nx_ex() * halo.ny_ex() * halo.nz_ex();
+    std::vector<double> rho_ex(nd_ex);
+    halo.execute(rho.data(), rho_ex.data(), 1);
+
+    std::vector<double> Drho_x(Nd_d), Drho_y(Nd_d), Drho_z(Nd_d);
+    gradient.apply(rho_ex.data(), Drho_x.data(), 0, 1);
+    gradient.apply(rho_ex.data(), Drho_y.data(), 1, 1);
+    gradient.apply(rho_ex.data(), Drho_z.data(), 2, 1);
+
+    std::vector<double> sigma(Nd_d);
+    for (int i = 0; i < Nd_d; ++i)
+        sigma[i] = Drho_x[i]*Drho_x[i] + Drho_y[i]*Drho_y[i] + Drho_z[i]*Drho_z[i];
+
+    // Direct hand-coded scan evaluation
+    std::vector<double> ex_dir(Nd_d), vx1_dir(Nd_d), vx2_dir(Nd_d), vx3_dir(Nd_d);
+    std::vector<double> ec_dir(Nd_d), vc1_dir(Nd_d), vc2_dir(Nd_d), vc3_dir(Nd_d);
+    scan::scanx(Nd_d, rho.data(), sigma.data(), tau.data(),
+                ex_dir.data(), vx1_dir.data(), vx2_dir.data(), vx3_dir.data());
+    scan::scanc(Nd_d, rho.data(), sigma.data(), tau.data(),
+                ec_dir.data(), vc1_dir.data(), vc2_dir.data(), vc3_dir.data());
+
+    // exc should match exactly (before divergence correction)
+    double max_exc_err = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        double exc_direct = ex_dir[i] + ec_dir[i];
+        double err = std::abs(exc[i] - exc_direct);
+        max_exc_err = std::max(max_exc_err, err);
+    }
+    std::printf("  Grid XC test: max exc error = %.6e (should be ~0)\n", max_exc_err);
+    EXPECT_LT(max_exc_err, 1e-14) << "exc from XCFunctional doesn't match direct evaluation";
+
+    // vtau should also match exactly
+    double max_vtau_err = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        double vtau_direct = vx3_dir[i] + vc3_dir[i];
+        double err = std::abs(vtau[i] - vtau_direct);
+        max_vtau_err = std::max(max_vtau_err, err);
+    }
+    std::printf("  Grid XC test: max vtau error = %.6e (should be ~0)\n", max_vtau_err);
+    EXPECT_LT(max_vtau_err, 1e-14) << "vtau from XCFunctional doesn't match direct evaluation";
+
+    // Dxcdgrho should match v2x + v2c
+    double max_dxc_err = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        double dxc_direct = vx2_dir[i] + vc2_dir[i];
+        double err = std::abs(Dxcdgrho[i] - dxc_direct);
+        max_dxc_err = std::max(max_dxc_err, err);
+    }
+    std::printf("  Grid XC test: max Dxcdgrho error = %.6e (should be ~0)\n", max_dxc_err);
+    EXPECT_LT(max_dxc_err, 1e-14) << "Dxcdgrho from XCFunctional doesn't match direct evaluation";
+
+    // Vxc includes the divergence correction, so it won't match vx1+vc1 directly.
+    // But we can check that the LOCAL part (before divergence) matches.
+    // The divergence correction modifies Vxc: Vxc = (vx1+vc1) - div(v2xc * grad(rho))
+    // Just verify Vxc is finite and in a reasonable range.
+    double Vxc_min = *std::min_element(Vxc.begin(), Vxc.end());
+    double Vxc_max = *std::max_element(Vxc.begin(), Vxc.end());
+    std::printf("  Grid XC test: Vxc range = [%.6e, %.6e]\n", Vxc_min, Vxc_max);
+    EXPECT_LT(Vxc_max, 0.0) << "Vxc should be negative for this density range";
+    EXPECT_GT(Vxc_min, -10.0) << "Vxc shouldn't be extremely negative";
+}
+
 int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
     ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    int ret = RUN_ALL_TESTS();
+    MPI_Finalize();
+    return ret;
 }

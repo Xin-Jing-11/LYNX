@@ -227,12 +227,10 @@ void SCF::compute_tau(const Wavefunction& wfn,
                      spincomm_->comm(), MPI_STATUS_IGNORE);
     }
 
-    // Divide by dV (tau is accumulated as integral, convert to density)
-    double inv_dV = 1.0 / grid_->dV();
-    int tau_grid_size = (Nspin_global_ == 2) ? 2 * Nd_d : Nd_d;
-    for (int i = 0; i < tau_grid_size; ++i) {
-        tau_.data()[i] *= inv_dV;
-    }
+    // NOTE: No dV division needed. LYNX wavefunctions satisfy <ψ_m|ψ_n> = Σ_i ψ*_m(i) ψ_n(i) dV = δ_mn.
+    // Density is computed as ρ[i] = Σ_n g_nk |ψ_n(i)|² (no 1/dV) and integrates as Σ ρ*dV = Ne.
+    // Tau follows the same convention: τ[i] = Σ_n g_nk |∇ψ_n(i)|² (no 1/dV).
+    // (SPARC divides BOTH ρ and τ by dV; LYNX divides neither.)
 
     // For spin-polarized: compute total = up + dn in the third slot
     if (Nspin_global_ == 2) {
@@ -864,7 +862,9 @@ double SCF::run(Wavefunction& wfn,
                                        Eself, Ec, beta, params_.smearing,
                                        kpt_weights, Nd_d, grid_->dV(),
                                        rho_core, Ef_, kpt_start_,
-                                       kptcomm_, spincomm_, Nspin);
+                                       kptcomm_, spincomm_, Nspin, nullptr,
+                                       (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
+                                       (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
 
         // 4. Evaluate SCF error: ||rho_out - rho_in|| / ||rho_out||
         //    Reference: Evaluate_scf_error in electronicGroundState.c

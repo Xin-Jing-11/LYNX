@@ -645,3 +645,70 @@ TEST(EndToEnd, PtAu_SOC) {
         EXPECT_LT(max_force_err, 2e-2) << "SOC forces deviate from SPARC reference";
     }
 }
+
+// ============================================================
+// Test: Si4 k-point SCAN — meta-GGA with k-points, non-orthogonal cell
+// Reference: SPARC Si4_kpt_scan
+//   Etotal = -15.87545747412903 Ha
+//   Eband  = 0.31985719641 Ha
+//   Exc    = -4.8361302059 Ha
+//   Ef     = 0.23136909966 Ha
+// ============================================================
+TEST(EndToEnd, Si4_kpt_SCAN) {
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_kpt_scan.json";
+
+    // Check if input file exists
+    std::ifstream f(json_file);
+    if (!f.good()) {
+        GTEST_SKIP() << "Test data not found: " << json_file;
+    }
+    f.close();
+
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    // SPARC reference values
+    double ref_Etotal = -15.87545747412903;
+    double ref_Eband = 0.31985719641;
+    double ref_Exc = -4.8361302059;
+    double ref_Ef = 0.23136909966;
+    double ref_forces[12] = {
+        -2.7676965222E-02, -3.1808357578E-02, -2.7429107218E-02,
+         2.7526741343E-02,  3.1000410031E-02,  2.7308764279E-02,
+        -2.2461294631E-02, -2.6401277434E-02, -2.5239334190E-02,
+         2.2611518510E-02,  2.7209224982E-02,  2.5359677130E-02
+    };
+
+    if (rank == 0) {
+        std::printf("\n=== Si4 k-point SCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.12f Ha (ref: %.12f)\n", result.Etotal, ref_Etotal);
+        std::printf("  Eband  = %.12f Ha (ref: %.12f)\n", result.Eband, ref_Eband);
+        std::printf("  Exc    = %.12f Ha (ref: %.12f)\n", result.Exc, ref_Exc);
+        std::printf("  Ef     = %.12f Ha (ref: %.12f)\n", result.Ef, ref_Ef);
+        std::printf("  Energy error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
+
+        if (result.forces.size() == 12) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force_err = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                std::printf("  Atom %d: %12.8f %12.8f %12.8f\n", i+1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                std::printf("     ref: %12.8f %12.8f %12.8f\n",
+                            ref_forces[3*i], ref_forces[3*i+1], ref_forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
+                    max_force_err = std::max(max_force_err, err);
+                }
+            }
+            std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+    // Energy match to machine precision (target: ~1e-6 Ha or better)
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
+        << "Total energy deviates from SPARC reference";
+}

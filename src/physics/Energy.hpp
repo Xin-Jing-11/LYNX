@@ -69,7 +69,9 @@ public:
         const MPIComm* kptcomm = nullptr,
         const MPIComm* spincomm = nullptr,
         int Nspin_global = 0,
-        const MPIComm* bandcomm = nullptr);
+        const MPIComm* bandcomm = nullptr,
+        const double* tau = nullptr,      // mGGA kinetic energy density
+        const double* vtau = nullptr);    // mGGA d(nε)/dτ potential
 };
 
 } // namespace lynx
