@@ -2,7 +2,6 @@
 // Builtin implementation backed up to XCFunctional_builtin.cpp.bak
 
 #include "xc/XCFunctional.hpp"
-#include "xc/SCANFunctional.hpp"
 #include "core/constants.hpp"
 #include <cmath>
 #include <cstring>
@@ -29,7 +28,7 @@ void XCFunctional::get_func_ids(int& xc_id, int& cc_id) const {
         case XCType::GGA_PBE:    xc_id = XC_GGA_X_PBE; cc_id = XC_GGA_C_PBE; break;
         case XCType::GGA_PBEsol: xc_id = XC_GGA_X_PBE_SOL; cc_id = XC_GGA_C_PBE_SOL; break;
         case XCType::GGA_RPBE:   xc_id = XC_GGA_X_RPBE; cc_id = XC_GGA_C_PBE; break;
-        case XCType::MGGA_SCAN:  xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW; break; // placeholder — mGGA uses separate path
+        case XCType::MGGA_SCAN:  xc_id = XC_MGGA_X_SCAN; cc_id = XC_MGGA_C_SCAN; break;
         default:                 xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW;     break;
     }
 }
@@ -86,18 +85,29 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
             if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
 
-        // 3. Call hand-coded SCAN exchange and correlation
-        std::vector<double> ex(Nd_d), vx1(Nd_d), vx2(Nd_d), vx3(Nd_d);
-        std::vector<double> ec(Nd_d), vc1(Nd_d), vc2(Nd_d), vc3(Nd_d);
-        scan::scanx(Nd_d, rho, sigma.data(), tau_in, ex.data(), vx1.data(), vx2.data(), vx3.data());
-        scan::scanc(Nd_d, rho, sigma.data(), tau_in, ec.data(), vc1.data(), vc2.data(), vc3.data());
+        // 3. Evaluate SCAN via libxc
+        xc_func_type mgga_x, mgga_c;
+        xc_func_init(&mgga_x, XC_MGGA_X_SCAN, XC_UNPOLARIZED);
+        xc_func_init(&mgga_c, XC_MGGA_C_SCAN, XC_UNPOLARIZED);
 
-        // 4. Combine outputs
+        std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0), vsigma_x(Nd_d, 0.0), vlapl_x(Nd_d, 0.0), vtau_x(Nd_d, 0.0);
+        std::vector<double> zk_c(Nd_d, 0.0), vrho_c(Nd_d, 0.0), vsigma_c(Nd_d, 0.0), vlapl_c(Nd_d, 0.0), vtau_c(Nd_d, 0.0);
+        std::vector<double> lapl(Nd_d, 0.0);
+
+        xc_mgga_exc_vxc(&mgga_x, np, rho, sigma.data(), lapl.data(), tau_in,
+                         zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
+        xc_mgga_exc_vxc(&mgga_c, np, rho, sigma.data(), lapl.data(), tau_in,
+                         zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
+
+        xc_func_end(&mgga_x);
+        xc_func_end(&mgga_c);
+
+        // 4. Combine outputs: exc, Vxc, Dxcdgrho = 2*vsigma
         std::vector<double> v2xc(Nd_d);
         for (int i = 0; i < Nd_d; i++) {
-            exc[i] = ex[i] + ec[i];
-            Vxc[i] = vx1[i] + vc1[i];
-            v2xc[i] = vx2[i] + vc2[i];  // SPARC's v2 matches GGA convention: 2*vsigma
+            exc[i] = zk_x[i] + zk_c[i];
+            Vxc[i] = vrho_x[i] + vrho_c[i];
+            v2xc[i] = 2.0 * (vsigma_x[i] + vsigma_c[i]);
         }
 
         // 5. Output Dxcdgrho
@@ -137,7 +147,7 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         // 7. Output vtau
         if (vtau_out) {
             for (int i = 0; i < Nd_d; i++)
-                vtau_out[i] = vx3[i] + vc3[i];
+                vtau_out[i] = vtau_x[i] + vtau_c[i];
         }
 
     } else if (is_gga() && gradient_ && halo_) {
@@ -311,83 +321,100 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
 
-        // Call hand-coded SCAN exchange (spin)
-        std::vector<double> ex(Nd_d), vx1(2*Nd_d), vx2(2*Nd_d), vx3(2*Nd_d);
-        scan::scanx_spin(Nd_d, rho, sigma.data(), tau_in,
-                         ex.data(), vx1.data(), vx2.data(), vx3.data());
-
-        // Call hand-coded SCAN correlation (spin)
-        std::vector<double> ec(Nd_d), vc1(2*Nd_d), vc2(Nd_d), vc3(Nd_d);
-        scan::scanc_spin(Nd_d, rho, sigma.data(), tau_in,
-                         ec.data(), vc1.data(), vc2.data(), vc3.data());
-
-        // Combine: exc, Vxc (per-spin)
+        // Evaluate SCAN via libxc (spin-polarized)
+        // libxc uses interleaved layout: rho[2*np], sigma[3*np], tau[2*np]
+        // sigma_libxc: [σ_uu, σ_ud, σ_dd] per point
+        std::vector<double> sigma_libxc(3 * Nd_d);
+        std::vector<double> tau_libxc(2 * Nd_d, 0.0);
+        std::vector<double> lapl_libxc(2 * Nd_d, 0.0);
         for (int i = 0; i < Nd_d; i++) {
-            exc[i] = ex[i] + ec[i];
-            Vxc[i]        = vx1[i] + vc1[i];         // up
-            Vxc[Nd_d + i] = vx1[Nd_d + i] + vc1[Nd_d + i]; // down
+            int iu = Nd_d + i, id = 2*Nd_d + i;
+            sigma_libxc[3*i]     = sigma[iu];  // σ_uu = |∇ρ_up|²
+            sigma_libxc[3*i + 1] = dot_metric(iu, id);  // σ_ud = ∇ρ_up · ∇ρ_dn
+            sigma_libxc[3*i + 2] = sigma[id];  // σ_dd = |∇ρ_dn|²
+            if (tau_in) {
+                tau_libxc[2*i]     = tau_in[Nd_d + i];   // τ_up
+                tau_libxc[2*i + 1] = tau_in[2*Nd_d + i]; // τ_dn
+            }
         }
 
-        // Dxcdgrho: [vc2(Nd_d) | vx2_up(Nd_d) | vx2_dn(Nd_d)]
+        xc_func_type mgga_x, mgga_c;
+        xc_func_init(&mgga_x, XC_MGGA_X_SCAN, XC_POLARIZED);
+        xc_func_init(&mgga_c, XC_MGGA_C_SCAN, XC_POLARIZED);
+
+        std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0), vsigma_x(3*Nd_d, 0.0), vlapl_x(2*Nd_d, 0.0), vtau_x(2*Nd_d, 0.0);
+        std::vector<double> zk_c(Nd_d, 0.0), vrho_c(2*Nd_d, 0.0), vsigma_c(3*Nd_d, 0.0), vlapl_c(2*Nd_d, 0.0), vtau_c(2*Nd_d, 0.0);
+
+        xc_mgga_exc_vxc(&mgga_x, np, rho_libxc.data(), sigma_libxc.data(), lapl_libxc.data(), tau_libxc.data(),
+                         zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
+        xc_mgga_exc_vxc(&mgga_c, np, rho_libxc.data(), sigma_libxc.data(), lapl_libxc.data(), tau_libxc.data(),
+                         zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
+
+        xc_func_end(&mgga_x);
+        xc_func_end(&mgga_c);
+
+        // Combine: exc, Vxc (per-spin, de-interleave from libxc)
+        for (int i = 0; i < Nd_d; i++) {
+            exc[i] = zk_x[i] + zk_c[i];
+            Vxc[i]        = vrho_x[2*i] + vrho_c[2*i];         // up
+            Vxc[Nd_d + i] = vrho_x[2*i + 1] + vrho_c[2*i + 1]; // down
+        }
+
+        // Dxcdgrho: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
+        // v2c = 2*(vsigma_c_uu + 2*vsigma_c_ud + vsigma_c_dd) for total gradient
+        // v2x_up = 2*vsigma_x_uu, v2x_dn = 2*vsigma_x_dd
         if (Dxcdgrho_out) {
             for (int i = 0; i < Nd_d; i++) {
-                Dxcdgrho_out[i] = vc2[i];
-                Dxcdgrho_out[Nd_d + i] = vx2[i];
-                Dxcdgrho_out[2*Nd_d + i] = vx2[Nd_d + i];
+                Dxcdgrho_out[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
+                Dxcdgrho_out[Nd_d + i] = 2.0 * vsigma_x[3*i];
+                Dxcdgrho_out[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
             }
         }
 
-        // vtau: [up(Nd_d) | dn(Nd_d)]
-        // vx3 is per-spin (2*Nd_d), vc3 is per-total (Nd_d)
+        // vtau: [up(Nd_d) | dn(Nd_d)] (de-interleave from libxc)
         if (vtau_out) {
             for (int i = 0; i < Nd_d; i++) {
-                vtau_out[i]        = vx3[i] + vc3[i];         // up
-                vtau_out[Nd_d + i] = vx3[Nd_d + i] + vc3[i];  // dn (note: vc3[i] not vc3[Nd_d+i])
+                vtau_out[i]        = vtau_x[2*i] + vtau_c[2*i];         // up
+                vtau_out[Nd_d + i] = vtau_x[2*i + 1] + vtau_c[2*i + 1]; // dn
             }
         }
 
-        // GGA divergence correction for spin
-        // For exchange: v2x[i] is for up, v2x[Nd_d+i] is for dn (each w.r.t. own gradient)
-        // For correlation: v2c[i] is for total (w.r.t. total gradient)
-        // The divergence applies to per-spin potentials
-        // Up: Vxc_up -= div(vx2_up * lapcT * grad_rho_up) + div(vc2 * lapcT * grad_rho_total) [correlation uses total gradient -> applies equally to up and dn]
-        // Actually SPARC convention: vc2 = d(n*eps_c)/d|grad n_total| / |grad n_total|
-        // The divergence term for correlation is the same for both spins since it uses total gradient
+        // GGA divergence correction for spin (same structure as GGA spin path)
+        // Uses Dxcdgrho layout: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
+        // Allocate temporary Dxcdgrho if not provided by caller
+        std::vector<double> dxc_tmp;
+        double* dxc = Dxcdgrho_out;
+        if (!dxc) {
+            dxc_tmp.resize(3 * Nd_d);
+            for (int i = 0; i < Nd_d; i++) {
+                dxc_tmp[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
+                dxc_tmp[Nd_d + i] = 2.0 * vsigma_x[3*i];
+                dxc_tmp[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
+            }
+            dxc = dxc_tmp.data();
+        }
 
         std::vector<double> fx_up(Nd_d), fy_up(Nd_d), fz_up(Nd_d);
         std::vector<double> fx_dn(Nd_d), fy_dn(Nd_d), fz_dn(Nd_d);
 
         for (int i = 0; i < Nd_d; i++) {
             int iu = Nd_d + i, id = 2*Nd_d + i;
-
-            // Exchange contribution for up (uses grad_rho_up)
-            double ex_up_x, ex_up_y, ex_up_z;
-            double ex_dn_x, ex_dn_y, ex_dn_z;
-            // Correlation contribution (uses grad_rho_total)
-            double ec_x, ec_y, ec_z;
+            double v2c_i = dxc[i];           // correlation (total gradient)
+            double v2x_up = dxc[Nd_d + i];   // exchange up
+            double v2x_dn = dxc[2*Nd_d + i]; // exchange dn
 
             if (is_orth) {
-                ex_up_x = vx2[i] * Drho_x[iu];
-                ex_up_y = vx2[i] * Drho_y[iu];
-                ex_up_z = vx2[i] * Drho_z[iu];
-                ex_dn_x = vx2[Nd_d+i] * Drho_x[id];
-                ex_dn_y = vx2[Nd_d+i] * Drho_y[id];
-                ex_dn_z = vx2[Nd_d+i] * Drho_z[id];
-                ec_x = vc2[i] * Drho_x[i];
-                ec_y = vc2[i] * Drho_y[i];
-                ec_z = vc2[i] * Drho_z[i];
-                fx_up[i] = ex_up_x + ec_x;
-                fy_up[i] = ex_up_y + ec_y;
-                fz_up[i] = ex_up_z + ec_z;
-                fx_dn[i] = ex_dn_x + ec_x;
-                fy_dn[i] = ex_dn_y + ec_y;
-                fz_dn[i] = ex_dn_z + ec_z;
+                fx_up[i] = v2x_up * Drho_x[iu] + v2c_i * Drho_x[i];
+                fy_up[i] = v2x_up * Drho_y[iu] + v2c_i * Drho_y[i];
+                fz_up[i] = v2x_up * Drho_z[iu] + v2c_i * Drho_z[i];
+                fx_dn[i] = v2x_dn * Drho_x[id] + v2c_i * Drho_x[i];
+                fy_dn[i] = v2x_dn * Drho_y[id] + v2c_i * Drho_y[i];
+                fz_dn[i] = v2x_dn * Drho_z[id] + v2c_i * Drho_z[i];
             } else {
                 double du_x = Drho_x[iu], du_y = Drho_y[iu], du_z = Drho_z[iu];
                 double dd_x = Drho_x[id], dd_y = Drho_y[id], dd_z = Drho_z[id];
                 double dt_x = Drho_x[i], dt_y = Drho_y[i], dt_z = Drho_z[i];
 
-                // Apply metric tensor and multiply by v2
                 auto metric_mul = [&](double gx, double gy, double gz, double v2,
                                       double& out_x, double& out_y, double& out_z) {
                     out_x = (lapcT(0,0)*gx + lapcT(0,1)*gy + lapcT(0,2)*gz) * v2;
@@ -396,9 +423,9 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
                 };
 
                 double fxu_x, fxu_y, fxu_z, fxd_x, fxd_y, fxd_z, fc_x, fc_y, fc_z;
-                metric_mul(du_x, du_y, du_z, vx2[i], fxu_x, fxu_y, fxu_z);
-                metric_mul(dd_x, dd_y, dd_z, vx2[Nd_d+i], fxd_x, fxd_y, fxd_z);
-                metric_mul(dt_x, dt_y, dt_z, vc2[i], fc_x, fc_y, fc_z);
+                metric_mul(du_x, du_y, du_z, v2x_up, fxu_x, fxu_y, fxu_z);
+                metric_mul(dd_x, dd_y, dd_z, v2x_dn, fxd_x, fxd_y, fxd_z);
+                metric_mul(dt_x, dt_y, dt_z, v2c_i, fc_x, fc_y, fc_z);
 
                 fx_up[i] = fxu_x + fc_x; fy_up[i] = fxu_y + fc_y; fz_up[i] = fxu_z + fc_z;
                 fx_dn[i] = fxd_x + fc_x; fy_dn[i] = fxd_y + fc_y; fz_dn[i] = fxd_z + fc_z;
