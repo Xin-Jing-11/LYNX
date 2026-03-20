@@ -862,39 +862,68 @@ double SCF::run(Wavefunction& wfn,
             std::printf("DUMP_EBAND=%.15e\n", Energy::band_energy(wfn, kpt_weights, Nspin, kpt_start_));
         }
 
-        // 3. Compute energy BEFORE mixing, using rho_in (the density that
-        //    generated the current potentials). This matches reference LYNX,
-        //    which computes energy based on rho_in for faster convergence.
-        energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
-                                       exc_.data(), Vxc_.data(), rho_b,
-                                       Eself, Ec, beta, params_.smearing,
-                                       kpt_weights, Nd_d, grid_->dV(),
-                                       rho_core, Ef_, kpt_start_,
-                                       kptcomm_, spincomm_, Nspin, nullptr,
-                                       (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
-                                       (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
-
-        // 4. For potential mixing: compute Veff_out from rho_out now
-        //    (needed for both SCF error and mixing)
+        // 3. For potential mixing: compute Veff_out from rho_out, energy with Escc correction
+        //    For density mixing: compute energy using rho_in
         bool use_potential_mixing = (params_.mixing_var == MixingVariable::Potential) && !is_soc_;
         NDArray<double> Veff_out;
+
         if (use_potential_mixing) {
-            // Save Veff_in (current)
+            // Save Veff_in
             NDArray<double> Veff_in(Nd_d * Nspin);
             std::memcpy(Veff_in.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
 
-            // Set density_ to rho_out for Veff computation
+            // Update density_ to rho_out
             std::memcpy(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
             for (int s = 0; s < Nspin; ++s)
                 std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
 
+            // Compute Veff_out from rho_out
             compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
-            // Veff_ is now Veff_out
             Veff_out = NDArray<double>(Nd_d * Nspin);
             std::memcpy(Veff_out.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
 
-            // Restore Veff_in (mixer needs it)
+            // Compute energy using rho_out and Veff_out (current potentials)
+            energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
+                                           exc_.data(), Vxc_.data(), rho_b,
+                                           Eself, Ec, beta, params_.smearing,
+                                           kpt_weights, Nd_d, grid_->dV(),
+                                           rho_core, Ef_, kpt_start_,
+                                           kptcomm_, spincomm_, Nspin, nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
+
+            // Self-consistency correction: Escc = ∫ ρ_out · (Veff_out - Veff_in) dV
+            // This corrects for the fact that Eband was computed with Veff_in
+            // but energy uses rho_out.
+            double Escc = 0.0;
+            if (Nspin == 2) {
+                for (int s = 0; s < Nspin; ++s) {
+                    const double* rho_s = density_.rho(s).data();
+                    for (int i = 0; i < Nd_d; ++i) {
+                        Escc += rho_s[i] * (Veff_out.data()[s*Nd_d + i] - Veff_in.data()[s*Nd_d + i]);
+                    }
+                }
+            } else {
+                const double* rho_tot = density_.rho_total().data();
+                for (int i = 0; i < Nd_d; ++i) {
+                    Escc += rho_tot[i] * (Veff_out.data()[i] - Veff_in.data()[i]);
+                }
+            }
+            Escc *= grid_->dV();
+            energy_.Etotal += Escc;
+
+            // Restore Veff_in for mixer
             std::memcpy(Veff_.data(), Veff_in.data(), Nd_d * Nspin * sizeof(double));
+        } else {
+            // Density mixing: energy using rho_in
+            energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
+                                           exc_.data(), Vxc_.data(), rho_b,
+                                           Eself, Ec, beta, params_.smearing,
+                                           kpt_weights, Nd_d, grid_->dV(),
+                                           rho_core, Ef_, kpt_start_,
+                                           kptcomm_, spincomm_, Nspin, nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
         }
 
         // 5. Evaluate SCF error
