@@ -35,11 +35,11 @@
   "scf": {
     "max_iter": 100,
     "tolerance": 1e-6,
-    "mixing": "potential",
+    "mixing": "density",
     "preconditioner": "kerker",
     "mixing_history": 7,
     "mixing_parameter": 0.3,
-    "cheb_degree": 40
+    "cheb_degree": 20
   },
   "output": {
     "print_forces": true,

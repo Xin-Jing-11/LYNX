@@ -624,6 +624,88 @@ TEST(SCANFunctional, TauNormalization) {
 }
 
 // ============================================================
+// Test mGGA Hamiltonian term: for ψ=Acos(kx) and constant vtau=v0,
+// H_mGGA ψ = 0.5 * v0 * k² * ψ
+// ============================================================
+#include "operators/Hamiltonian.hpp"
+
+TEST(SCANFunctional, mGGAHamiltonianTerm) {
+    int Nx = 40, Ny = 40, Nz = 40;
+    double L = 10.0;
+    int fd_order = 12;
+
+    Mat3 lv;
+    lv(0,0) = L; lv(1,1) = L; lv(2,2) = L;
+    Lattice lattice(lv, CellType::Orthogonal);
+    FDGrid grid(Nx, Ny, Nz, lattice, BCType::Periodic, BCType::Periodic, BCType::Periodic);
+    FDStencil stencil(fd_order, grid, lattice);
+    DomainVertices verts;
+    verts.xs = 0; verts.xe = Nx - 1;
+    verts.ys = 0; verts.ye = Ny - 1;
+    verts.zs = 0; verts.ze = Nz - 1;
+    Domain domain(grid, verts);
+    HaloExchange halo(domain, stencil.FDn());
+
+    int Nd_d = domain.Nd_d();
+    double dV = grid.dV();
+    double dx = L / Nx;
+    double V = L * L * L;
+    double A = std::sqrt(2.0 / V);
+    double k = 2.0 * M_PI / L;
+    double v0 = 0.05; // constant vtau
+
+    // Setup Hamiltonian with vtau
+    Hamiltonian ham;
+    ham.setup(stencil, domain, grid, halo, nullptr);
+    std::vector<double> vtau_arr(Nd_d, v0);
+    ham.set_vtau(vtau_arr.data());
+
+    // Create ψ = A cos(kx)
+    std::vector<double> psi(Nd_d), Hpsi(Nd_d, 0.0);
+    for (int kk = 0; kk < Nz; ++kk)
+    for (int j = 0; j < Ny; ++j)
+    for (int i = 0; i < Nx; ++i) {
+        int idx = i + j * Nx + kk * Nx * Ny;
+        psi[idx] = A * std::cos(k * i * dx);
+    }
+
+    // Apply ONLY mGGA term (not full Hamiltonian)
+    ham.apply_mgga(psi.data(), Hpsi.data(), 1);
+
+    // Expected: H_mGGA ψ = 0.5 * v0 * k² * ψ
+    double expected_eigenvalue = 0.5 * v0 * k * k;
+    std::printf("  Expected mGGA eigenvalue: 0.5*v0*k² = %.10e\n", expected_eigenvalue);
+
+    // Check: Hpsi[i] should be proportional to psi[i]
+    // Compute eigenvalue as <ψ|H_mGGA|ψ> / <ψ|ψ>
+    double num = 0, den = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        num += psi[i] * Hpsi[i];
+        den += psi[i] * psi[i];
+    }
+    num *= dV;
+    den *= dV;
+    double computed_eigenvalue = num / den;
+    std::printf("  Computed mGGA eigenvalue: <ψ|H|ψ>/<ψ|ψ> = %.10e\n", computed_eigenvalue);
+    std::printf("  Relative error: %.6e\n", std::abs(computed_eigenvalue - expected_eigenvalue) / std::abs(expected_eigenvalue));
+
+    EXPECT_NEAR(computed_eigenvalue, expected_eigenvalue, 1e-6 * std::abs(expected_eigenvalue))
+        << "mGGA Hamiltonian eigenvalue doesn't match analytical result";
+
+    // Also check that Hpsi is proportional to psi (eigenvector check)
+    double max_ratio_err = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        if (std::abs(psi[i]) > 1e-10 * A) {
+            double ratio = Hpsi[i] / psi[i];
+            double err = std::abs(ratio - expected_eigenvalue) / std::abs(expected_eigenvalue);
+            max_ratio_err = std::max(max_ratio_err, err);
+        }
+    }
+    std::printf("  Max Hpsi/psi ratio error: %.6e\n", max_ratio_err);
+    EXPECT_LT(max_ratio_err, 1e-4) << "H_mGGA ψ is not proportional to ψ";
+}
+
+// ============================================================
 // Compare LYNX SCAN XC operator against SPARC dump
 // Uses binary dump from SPARC at SCF iteration 2
 // ============================================================

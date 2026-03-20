@@ -65,7 +65,7 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         gradient_->apply(rho_ex.data(), Drho_y.data(), 1, 1);
         gradient_->apply(rho_ex.data(), Drho_z.data(), 2, 1);
 
-        // 2. sigma = |grad rho|^2
+        // 2. sigma = |grad rho|^2 with floor to prevent division by zero in SCAN v2
         bool is_orth = grid_->lattice().is_orthogonal();
         const Mat3& lapcT = grid_->lattice().lapc_T();
 
@@ -79,6 +79,11 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
                 sigma[i] = lapcT(0,0)*dx*dx + lapcT(1,1)*dy*dy + lapcT(2,2)*dz*dz
                          + 2.0*lapcT(0,1)*dx*dy + 2.0*lapcT(0,2)*dx*dz + 2.0*lapcT(1,2)*dy*dz;
             }
+        }
+        // Floor sigma to prevent division by zero in SCAN v2 = d(nε)/d|∇n| / |∇n|
+        // Matches SPARC's exchangeCorrelation.c line 170: if (sigma < 1E-14) sigma = 1E-14
+        for (int i = 0; i < Nd_d; i++) {
+            if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
 
         // 3. Call hand-coded SCAN exchange and correlation
@@ -300,6 +305,10 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             int iu = Nd_d + i, id = 2*Nd_d + i;
             sigma[Nd_d + i] = dot_metric(iu, iu);    // |grad rho_up|^2
             sigma[2*Nd_d + i] = dot_metric(id, id);  // |grad rho_dn|^2
+        }
+        // Floor sigma (matching SPARC)
+        for (int i = 0; i < 3 * Nd_d; i++) {
+            if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
 
         // Call hand-coded SCAN exchange (spin)
