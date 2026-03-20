@@ -535,6 +535,95 @@ TEST(SCANFunctional, GridXCOperator_NonSpin) {
 }
 
 // ============================================================
+// Tau normalization test: verify tau from known wavefunctions
+// For ψ = A*cos(2πx/L), |∇ψ|² = A²*(2π/L)²*sin²(2πx/L)
+// ∫ |∇ψ|² dV = (2π/L)²/2 (since ∫sin²=V/2 and A²*V=1)
+// ============================================================
+#include "electronic/Wavefunction.hpp"
+#include "electronic/ElectronDensity.hpp"
+
+TEST(SCANFunctional, TauNormalization) {
+    int Nx = 20, Ny = 20, Nz = 20;
+    double L = 10.0;
+    int fd_order = 12;
+
+    Mat3 lv;
+    lv(0,0) = L; lv(1,1) = L; lv(2,2) = L;
+    Lattice lattice(lv, CellType::Orthogonal);
+    FDGrid grid(Nx, Ny, Nz, lattice, BCType::Periodic, BCType::Periodic, BCType::Periodic);
+    FDStencil stencil(fd_order, grid, lattice);
+    DomainVertices verts;
+    verts.xs = 0; verts.xe = Nx - 1;
+    verts.ys = 0; verts.ye = Ny - 1;
+    verts.zs = 0; verts.ze = Nz - 1;
+    Domain domain(grid, verts);
+    Gradient gradient(stencil, domain);
+    HaloExchange halo(domain, stencil.FDn());
+
+    int Nd_d = domain.Nd_d();
+    double dV = grid.dV();
+    double dx = L / Nx;
+
+    // Create wavefunction: ψ = A*cos(2πx/L), normalized so ∫|ψ|²dV=1
+    // A = sqrt(2/V) for cos (∫cos²=V/2)
+    double V = L * L * L;
+    double A = std::sqrt(2.0 / V);
+    double k = 2.0 * M_PI / L;
+
+    // Fill wavefunction array
+    std::vector<double> psi(Nd_d);
+    for (int kk = 0; kk < Nz; ++kk)
+    for (int j = 0; j < Ny; ++j)
+    for (int i = 0; i < Nx; ++i) {
+        int idx = i + j * Nx + kk * Nx * Ny;
+        double x = i * dx;
+        psi[idx] = A * std::cos(k * x);
+    }
+
+    // Check normalization: ∫|ψ|²dV should be 1
+    double norm2 = 0;
+    for (int i = 0; i < Nd_d; ++i) norm2 += psi[i] * psi[i];
+    norm2 *= dV;
+    std::printf("  Psi norm² = %.10e (should be 1.0)\n", norm2);
+    EXPECT_NEAR(norm2, 1.0, 1e-4);
+
+    // Compute |∇ψ|² using gradient operator
+    int nd_ex = halo.nx_ex() * halo.ny_ex() * halo.nz_ex();
+    std::vector<double> psi_ex(nd_ex), dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+    halo.execute(psi.data(), psi_ex.data(), 1);
+    gradient.apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+    gradient.apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+    gradient.apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+    // tau = |∇ψ|² (just one band, occ=1, no spin_fac, no /dV)
+    double tau_integral = 0;
+    for (int i = 0; i < Nd_d; ++i) {
+        double grad2 = dpsi_x[i]*dpsi_x[i] + dpsi_y[i]*dpsi_y[i] + dpsi_z[i]*dpsi_z[i];
+        tau_integral += grad2;
+    }
+    tau_integral *= dV;
+
+    // Expected: ∫|∇ψ|²dV = k² = (2π/L)² (since A²=2/V and ∫sin²=V/2, so A²k²V/2 = k²)
+    double expected = k * k;
+    std::printf("  ∫|∇ψ|²dV = %.10e (expected k²/2 = %.10e)\n", tau_integral, expected);
+    std::printf("  Relative error = %.6e\n", std::abs(tau_integral - expected) / expected);
+    EXPECT_NEAR(tau_integral, expected, 1e-4 * expected);
+
+    // Now check: for density ρ = 2*f*|ψ|² = 2*|ψ|² (spin_fac=2 for non-spin)
+    // ∫ρ*dV = 2*∫|ψ|²*dV = 2 → 2 electrons
+    double rho_integral = 0;
+    for (int i = 0; i < Nd_d; ++i) rho_integral += 2.0 * psi[i] * psi[i] * dV;
+    std::printf("  ∫ρ*dV = %.10e (expected 2.0)\n", rho_integral);
+
+    // The SCAN functional sees: ρ[i] and τ[i]
+    // For uniform gas: τ_unif(ρ) = (3/10)(3π²)^(2/3) * ρ^(5/3)
+    // α = (τ - τ_w)/τ_unif
+    // At a point where ρ = 2|ψ|² and τ = |∇ψ|²:
+    // τ_w = |∇ρ|²/(8ρ) = |2ψ∇ψ*2|²/(8*2|ψ|²) ... complex
+    // Just verify that τ is internally consistent with ρ
+}
+
+// ============================================================
 // Compare LYNX SCAN XC operator against SPARC dump
 // Uses binary dump from SPARC at SCF iteration 2
 // ============================================================

@@ -195,6 +195,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     scf_params.mixing_param = config.mixing_param;
     scf_params.smearing = config.smearing;
     scf_params.elec_temp = config.elec_temp;
+    scf_params.cheb_degree = config.cheb_degree;
 
     int Nspin_local = parallel.Nspin_local();
     int Nkpts_local = parallel.Nkpts_local();
