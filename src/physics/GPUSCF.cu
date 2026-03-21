@@ -1470,12 +1470,41 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         // sigma = |nabla rho|^2
         sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
-        if (is_mgga_) {
+        if (is_mgga_ && tau_valid_) {
             // SCAN mGGA kernel: (rho_xc, sigma, tau) -> (exc, Vxc, v2xc, vtau)
             gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
         } else {
             // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
+            // Also used for first mGGA iteration before tau is computed (matching CPU PBE-first logic)
             gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        }
+
+        // Dump pre-divergence XC data for GPU vs CPU kernel comparison
+        static int scan_dump_count = 0;
+        if (is_mgga_ && tau_valid_ && scan_dump_count == 0) {
+            scan_dump_count++;
+            CUDA_CHECK(cudaDeviceSynchronize());
+            std::vector<double> h_rho(Nd), h_sig(Nd), h_tau(Nd), h_exc(Nd), h_vxc(Nd), h_v2xc(Nd), h_vtau(Nd);
+            CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho_xc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_sig.data(), d_sigma, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_tau.data(), d_tau_, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_exc.data(), d_exc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_vxc.data(), d_Vxc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_v2xc.data(), d_v2xc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_vtau.data(), d_vtau_, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            FILE* fp = fopen("/tmp/gpu_scan_kernel_dump.bin", "wb");
+            if (fp) {
+                fwrite(&Nd, sizeof(int), 1, fp);
+                fwrite(h_rho.data(), sizeof(double), Nd, fp);
+                fwrite(h_sig.data(), sizeof(double), Nd, fp);
+                fwrite(h_tau.data(), sizeof(double), Nd, fp);
+                fwrite(h_exc.data(), sizeof(double), Nd, fp);
+                fwrite(h_vxc.data(), sizeof(double), Nd, fp);
+                fwrite(h_v2xc.data(), sizeof(double), Nd, fp);
+                fwrite(h_vtau.data(), sizeof(double), Nd, fp);
+                fclose(fp);
+                printf("GPU_SCAN_KERNEL: dumped %d points (rho,sigma,tau,exc,vxc,v2xc,vtau)\n", Nd);
+            }
         }
 
         // Divergence correction: Vxc += -div(v2xc * nabla rho)
@@ -1566,7 +1595,7 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         int grid3 = gpu::ceildiv(3 * Nd, bs);
         sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
 
-        if (is_mgga_) {
+        if (is_mgga_ && tau_valid_) {
             // SCAN spin mGGA kernel
             // sigma layout: [total|up|dn], rho_xc: [total|up|dn]
             // d_tau_: [up(Nd)|dn(Nd)], d_vtau_: [up(Nd)|dn(Nd)]
@@ -2983,6 +3012,16 @@ double GPUSCFRunner::run(
 
             tau_valid_ = true;
             CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Debug: dump tau at first computation
+            if (scf_iter == 0) {
+                std::vector<double> h_tau_dbg(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_tau_dbg.data(), d_tau_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                double tau_sum = 0;
+                for (int i = 0; i < Nd_; i++) tau_sum += h_tau_dbg[i];
+                printf("GPU_TAU iter1: sum=%.10e sum*dV=%.10e tau[0]=%.10e tau[100]=%.10e\n",
+                       tau_sum, tau_sum * dV_, h_tau_dbg[0], h_tau_dbg[100]);
+            }
         }
 
         // Step 3: Compute energy (D2H for energy components)
@@ -3258,6 +3297,44 @@ double GPUSCFRunner::run(
                 gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
             } else {
                 gpu_xc_evaluate(d_rho, d_exc, d_Vxc, Nd_);
+            }
+
+            // Debug: dump XC outputs at iter 2
+            if (scf_iter == 1) {
+                std::vector<double> h_exc(Nd_), h_vxc(Nd_), h_tau(Nd_), h_vtau(Nd_), h_rho(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_exc.data(), d_exc, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_vxc.data(), d_Vxc, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                if (d_tau_) CUDA_CHECK(cudaMemcpy(h_tau.data(), d_tau_, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                if (d_vtau_) CUDA_CHECK(cudaMemcpy(h_vtau.data(), d_vtau_, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                double exc_sum = 0, vxc_sum = 0, tau_sum = 0, vtau_sum = 0, rho_sum = 0;
+                for (int i = 0; i < Nd_; i++) {
+                    exc_sum += h_exc[i]; vxc_sum += h_vxc[i]; rho_sum += h_rho[i];
+                    tau_sum += h_tau[i]; vtau_sum += h_vtau[i];
+                }
+                printf("GPU_XC iter2: tau_valid=%d exc_sum=%.10e vxc_sum=%.10e rho_sum=%.10e\n",
+                       (int)tau_valid_, exc_sum, vxc_sum, rho_sum);
+                printf("GPU_XC iter2: tau_sum=%.10e vtau_sum=%.10e tau[0]=%.10e vtau[0]=%.10e\n",
+                       tau_sum, vtau_sum, h_tau[0], h_vtau[0]);
+                printf("GPU_XC iter2: exc[0]=%.10e vxc[0]=%.10e rho[0]=%.10e\n",
+                       h_exc[0], h_vxc[0], h_rho[0]);
+                // Dump GPU XC inputs to binary for offline comparison with CPU
+                {
+                    std::vector<double> h_sigma(Nd_);
+                    CUDA_CHECK(cudaMemcpy(h_sigma.data(), ctx.buf.aar_r, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                    FILE* fp = fopen("/tmp/gpu_xc_dump.bin", "wb");
+                    if (fp) {
+                        fwrite(&Nd_, sizeof(int), 1, fp);
+                        fwrite(h_rho.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_sigma.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_tau.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_exc.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_vxc.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_vtau.data(), sizeof(double), Nd_, fp);
+                        fclose(fp);
+                        printf("GPU_XC: dumped %d points to /tmp/gpu_xc_dump.bin\n", Nd_);
+                    }
+                }
             }
 
             // Non-SOC Poisson

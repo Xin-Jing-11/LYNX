@@ -672,7 +672,7 @@ TEST(EndToEnd, PtAu_SOC) {
 //   Ef     = 0.010348992 Ha
 // ============================================================
 TEST(EndToEnd, Si4_gamma_SCAN) {
-    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_gamma.json";
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan-gpu/tests/data/Si4_scan_gamma.json";
 
     std::ifstream f(json_file);
     if (!f.good()) {
@@ -758,7 +758,7 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
 //   Etotal = -15.663154820 Ha
 // ============================================================
 TEST(EndToEnd, Si4_kpt_SCAN) {
-    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_kpt.json";
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan-gpu/tests/data/Si4_scan_kpt.json";
 
     std::ifstream f(json_file);
     if (!f.good()) {
