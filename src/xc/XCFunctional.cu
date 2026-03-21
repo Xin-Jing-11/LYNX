@@ -742,6 +742,677 @@ void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
     gga_pbe_spin_kernel<<<grid, bs>>>(d_rho, d_sigma, d_exc, d_vxc, d_v2xc, N);
 }
 
+// ============================================================
+// SCAN metaGGA Exchange + Correlation — fused kernel (non-spin)
+// Hand-coded from SCANFunctional.cpp.bak reference
+// ============================================================
+__global__ void mgga_scan_kernel(
+    const double* __restrict__ rho,
+    const double* __restrict__ sigma,
+    const double* __restrict__ tau,
+    double* __restrict__ exc,
+    double* __restrict__ vxc,
+    double* __restrict__ v2xc,
+    double* __restrict__ vtau,
+    int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    double r = rho[i];
+    if (r < 1e-30) {
+        exc[i] = 0.0;
+        vxc[i] = 0.0;
+        v2xc[i] = 0.0;
+        vtau[i] = 0.0;
+        return;
+    }
+
+    double sig = sigma[i];
+    if (sig < 1e-14) sig = 1e-14;
+    double normDrho = sqrt(sig);
+    double tau_val = tau[i];
+
+    // ============ basic_MGGA_variables ============
+    constexpr double PI_val = 3.14159265358979323846;
+    double threeMPi2_1o3 = cbrt(3.0 * PI_val * PI_val);
+    double threeMPi2_2o3 = threeMPi2_1o3 * threeMPi2_1o3;
+
+    double rho_4o3 = r * cbrt(r);
+    double s = normDrho / (2.0 * threeMPi2_1o3 * rho_4o3);
+    double tauw = normDrho * normDrho / (8.0 * r);
+    double tauUnif = 3.0 / 10.0 * threeMPi2_2o3 * r * cbrt(r * r); // rho^(5/3)
+    double alpha = (tau_val - tauw) / tauUnif;
+
+    double rho_7o3 = rho_4o3 * r;
+    double dsdn = -2.0 * normDrho / (3.0 * threeMPi2_1o3 * rho_7o3);
+    double dsddn = 1.0 / (2.0 * threeMPi2_1o3 * rho_4o3);
+    double DtauwDn = -normDrho * normDrho / (8.0 * r * r);
+    double DtauwDDn = normDrho / (4.0 * r);
+    double rho_2o3 = cbrt(r * r);
+    double DtauUnifDn = threeMPi2_2o3 / 2.0 * rho_2o3;
+    double daddn = (-DtauwDDn) / tauUnif;
+    double dadtau = 1.0 / tauUnif;
+    double dadn = (-DtauwDn * tauUnif - (tau_val - tauw) * DtauUnifDn) / (tauUnif * tauUnif);
+
+    // ============ Calculate_scanx (exchange) ============
+    constexpr double k1 = 0.065;
+    constexpr double mu_ak = 10.0 / 81.0;
+    constexpr double b2_x = 0.12090550348328691; // sqrt(5913.0/405000.0)
+    constexpr double b1_x = 0.15668913490814561; // 511.0/13500.0/(2.0*b2_x)
+    constexpr double b3_x = 0.5;
+    constexpr double b4_x = -0.0057613672245924465; // mu_ak^2/k1 - 1606/18225 - b1_x^2
+    constexpr double hx0 = 1.174;
+    constexpr double c1x = 0.667;
+    constexpr double c2x = 0.8;
+    constexpr double dx_x = 1.24;
+    constexpr double a1_x = 4.9479;
+
+    double s2 = s * s;
+    double epsilon_xUnif = -3.0 / (4.0 * PI_val) * cbrt(3.0 * PI_val * PI_val * r);
+
+    // compose h_x^1
+    double term1 = 1.0 + b4_x * s2 / mu_ak * exp(-fabs(b4_x) * s2 / mu_ak);
+    double xFir = mu_ak * s2 * term1;
+    double term3 = 2.0 * (b1_x * s2 + b2_x * (1.0 - alpha) * exp(-b3_x * (1.0 - alpha) * (1.0 - alpha)));
+    double xSec = (term3 / 2.0) * (term3 / 2.0);
+    double hx1 = 1.0 + k1 - k1 / (1.0 + (xFir + xSec) / k1);
+
+    double fx;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        fx = 0.0;
+    } else if (alpha > 1.0) {
+        fx = -dx_x * exp(c2x / (1.0 - alpha));
+    } else {
+        fx = exp(-c1x * alpha / (1.0 - alpha));
+    }
+
+    double sqrt_s = sqrt(s);
+    double gx = 1.0 - exp(-a1_x / (sqrt_s + 1e-30));
+    double Fx = (hx1 + fx * (hx0 - hx1)) * gx;
+    double epsilonx = epsilon_xUnif * Fx;
+
+    // Derivatives of exchange
+    double term2 = s2 * (b4_x / mu_ak * exp(-fabs(b4_x) * s2 / mu_ak) + b4_x * s2 / mu_ak * exp(-fabs(b4_x) * s2 / mu_ak) * (-fabs(b4_x) / mu_ak));
+    double term4 = b2_x * (-exp(-b3_x * (1.0 - alpha) * (1.0 - alpha)) + (1.0 - alpha) * exp(-b3_x * (1.0 - alpha) * (1.0 - alpha)) * (2.0 * b3_x * (1.0 - alpha)));
+    double DxDs = 2.0 * s * (mu_ak * (term1 + term2) + b1_x * term3);
+    double DxDalpha = term3 * term4;
+    double DxDn = dsdn * DxDs + dadn * DxDalpha;
+    double DxDDn = dsddn * DxDs + daddn * DxDalpha;
+    double DxDtau = dadtau * DxDalpha;
+
+    double exp_gx = exp(-a1_x / (sqrt_s + 1e-30));
+    double DgxDn = -exp_gx * (a1_x / 2.0 / (sqrt_s + 1e-30) / (s + 1e-30)) * dsdn;
+    double DgxDDn = -exp_gx * (a1_x / 2.0 / (sqrt_s + 1e-30) / (s + 1e-30)) * dsddn;
+    double Dhx1Dx = 1.0 / ((1.0 + (xFir + xSec) / k1) * (1.0 + (xFir + xSec) / k1));
+    double Dhx1Dn = DxDn * Dhx1Dx;
+    double Dhx1DDn = DxDDn * Dhx1Dx;
+    double Dhx1Dtau = DxDtau * Dhx1Dx;
+
+    double DfxDalpha;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        DfxDalpha = 0.0;
+    } else if (alpha > 1.0) {
+        DfxDalpha = -dx_x * exp(c2x / (1.0 - alpha)) * (c2x / ((1.0 - alpha) * (1.0 - alpha)));
+    } else {
+        DfxDalpha = exp(-c1x * alpha / (1.0 - alpha)) * (-c1x / ((1.0 - alpha) * (1.0 - alpha)));
+    }
+
+    double DfxDn = DfxDalpha * dadn;
+    double DfxDDn = DfxDalpha * daddn;
+    double DfxDtau = DfxDalpha * dadtau;
+    double DFxDn = (hx1 + fx * (hx0 - hx1)) * DgxDn + gx * (1.0 - fx) * Dhx1Dn + gx * (hx0 - hx1) * DfxDn;
+    double DFxDDn = (hx1 + fx * (hx0 - hx1)) * DgxDDn + gx * (1.0 - fx) * Dhx1DDn + gx * (hx0 - hx1) * DfxDDn;
+    double DFxDtau = gx * (1.0 - fx) * Dhx1Dtau + gx * (hx0 - hx1) * DfxDtau;
+
+    double Depsilon_xUnifDn = -cbrt(3.0 * PI_val * PI_val) / (4.0 * PI_val) * pow(r, -2.0 / 3.0);
+    double vx1 = (epsilon_xUnif + r * Depsilon_xUnifDn) * Fx + r * epsilon_xUnif * DFxDn;
+    double vx2 = r * epsilon_xUnif * DFxDDn;
+    double vx3 = r * epsilon_xUnif * DFxDtau;
+
+    // ============ Calculate_scanc (correlation) ============
+    constexpr double b1c = 0.0285764;
+    constexpr double b2c = 0.0889;
+    constexpr double b3c = 0.125541;
+    constexpr double betaConst = 0.06672455060314922;
+    constexpr double betaRsInf = betaConst * 0.1 / 0.1778;
+    constexpr double f0 = -0.9;
+    constexpr double AA = 0.0310907;
+    constexpr double alpha1 = 0.21370;
+    constexpr double beta1 = 7.5957;
+    constexpr double beta2 = 3.5876;
+    constexpr double beta3 = 1.6382;
+    constexpr double beta4 = 0.49294;
+    constexpr double r_c = 0.031091;
+    constexpr double c1c = 0.64;
+    constexpr double c2c = 1.5;
+    constexpr double dc = 0.7;
+
+    double rs = cbrt(0.75 / (PI_val * r));
+    double sqrRs = sqrt(rs);
+
+    // epsilon_c^0 (alpha approach 0)
+    double ecLDA0 = -b1c / (1.0 + b2c * sqrRs + b3c * rs);
+    double cx0 = -3.0 / (4.0 * PI_val) * cbrt(9.0 * PI_val / 4.0);
+    // zeta=0, phi=1, dx=1 for non-spin
+    double Gc = 1.0; // (1 - 2.3631*(1-1))*(1 - 0^12) = 1
+    double w0 = exp(-ecLDA0 / b1c) - 1.0;
+    double xiInf0 = cbrt(3.0 * PI_val * PI_val / 16.0) * cbrt(3.0 * PI_val * PI_val / 16.0) * (betaRsInf / (cx0 - f0));
+    double gInf0s = pow(1.0 + 4.0 * xiInf0 * s2, -0.25);
+    double H0 = b1c * log(1.0 + w0 * (1.0 - gInf0s));
+    double ec0 = (ecLDA0 + H0) * Gc;
+
+    // epsilon_c^1 (alpha approach 1)
+    double beta_c = betaConst * (1.0 + 0.1 * rs) / (1.0 + 0.1778 * rs);
+    double ec_q0 = -2.0 * AA * (1.0 + alpha1 * rs);
+    double ec_q1 = 2.0 * AA * (beta1 * sqrRs + beta2 * rs + beta3 * rs * sqrRs + beta4 * rs * rs);
+    double ec_den = 1.0 / (ec_q1 * ec_q1 + ec_q1);
+    double ec_log = -log(ec_q1 * ec_q1 * ec_den);
+    double ec_lsda1 = ec_q0 * ec_log;
+
+    // H1
+    double phi = 1.0; // no spin
+    double rPhi3 = r_c * phi * phi * phi;
+    double w1 = exp(-ec_lsda1 / rPhi3) - 1.0;
+    double Ac = beta_c / (r_c * w1);
+    double t = cbrt(3.0 * PI_val * PI_val / 16.0) * s / (phi * sqrRs);
+    double g = pow(1.0 + 4.0 * Ac * t * t, -0.25);
+    double H1 = rPhi3 * log(1.0 + w1 * (1.0 - g));
+    double ec1 = ec_lsda1 + H1;
+
+    // interpolate
+    double fc;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        fc = 0.0;
+    } else if (alpha > 1.0) {
+        fc = -dc * exp(c2c / (1.0 - alpha));
+    } else {
+        fc = exp(-c1c * alpha / (1.0 - alpha));
+    }
+    double epsilonc = ec1 + fc * (ec0 - ec1);
+
+    // Derivatives of correlation
+    double DrsDn = -4.0 * PI_val / 9.0 * pow(4.0 * PI_val / 3.0 * r, -4.0 / 3.0);
+    // ec0 derivatives (non-spin: DzetaDn=0, DGcDn=0, Gc=1)
+    double DgInf0sDs = -0.25 * pow(1.0 + 4.0 * xiInf0 * s2, -1.25) * (4.0 * xiInf0 * 2.0 * s);
+    double DgInf0sDn = DgInf0sDs * dsdn;
+    double DgInf0sDDn = DgInf0sDs * dsddn;
+    double DecLDA0Dn = b1c * (0.5 * b2c / sqrRs + b3c) / ((1.0 + b2c * sqrRs + b3c * rs) * (1.0 + b2c * sqrRs + b3c * rs)) * DrsDn;
+    double Dw0Dn = (w0 + 1.0) * (-DecLDA0Dn / b1c);
+    double DH0Dn = b1c * (Dw0Dn * (1.0 - gInf0s) - w0 * DgInf0sDn) / (1.0 + w0 * (1.0 - gInf0s));
+    double DH0DDn = b1c * (-w0 * DgInf0sDDn) / (1.0 + w0 * (1.0 - gInf0s));
+    double Dec0Dn = (DecLDA0Dn + DH0Dn) * Gc;
+    double Dec0DDn = DH0DDn * Gc;
+
+    // ec1 derivatives
+    double denominatorInLogLSDA1 = 2.0 * AA * (beta1 * sqrRs + beta2 * rs + beta3 * sqrRs * rs + beta4 * rs * rs);
+    double Dec_lsda1Dn = -(rs / r / 3.0) * (-2.0 * AA * alpha1 * log(1.0 + 1.0 / denominatorInLogLSDA1)
+        - ((-2.0 * AA * (1.0 + alpha1 * rs)) * (AA * (beta1 / sqrRs + 2.0 * beta2 + 3.0 * beta3 * sqrRs + 2.0 * 2.0 * beta4 * rs)))
+        / (denominatorInLogLSDA1 * denominatorInLogLSDA1 + denominatorInLogLSDA1));
+    double DbetaDn = 0.066725 * (0.1 * (1.0 + 0.1778 * rs) - 0.1778 * (1.0 + 0.1 * rs)) / ((1.0 + 0.1778 * rs) * (1.0 + 0.1778 * rs)) * DrsDn;
+    // DphiDn = 0 (no spin), but keep DtDn
+    double DtDn = cbrt(3.0 * PI_val * PI_val / 16.0) * (phi * sqrRs * dsdn - s * (phi * DrsDn / (2.0 * sqrRs))) / (phi * phi * rs);
+    double DtDDn = t * dsddn / s;
+    double Dw1Dn = (w1 + 1.0) * (-(rPhi3 * Dec_lsda1Dn) / (rPhi3 * rPhi3));
+    double DADn = (w1 * DbetaDn - beta_c * Dw1Dn) / (r_c * w1 * w1);
+    double DgDn = -0.25 * pow(1.0 + 4.0 * Ac * t * t, -1.25) * (4.0 * (DADn * t * t + 2.0 * Ac * t * DtDn));
+    double DgDDn = -0.25 * pow(1.0 + 4.0 * Ac * t * t, -1.25) * (4.0 * 2.0 * Ac * t * DtDDn);
+    double DH1Dn = rPhi3 * (Dw1Dn * (1.0 - g) - w1 * DgDn) / (1.0 + w1 * (1.0 - g));
+    double DH1DDn = rPhi3 * (-w1 * DgDDn) / (1.0 + w1 * (1.0 - g));
+    double Dec1Dn = Dec_lsda1Dn + DH1Dn;
+    double Dec1DDn = DH1DDn;
+
+    // fc derivatives
+    double DfcDalpha;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        DfcDalpha = 0.0;
+    } else if (alpha > 1.0) {
+        DfcDalpha = fc * (c2c / ((1.0 - alpha) * (1.0 - alpha)));
+    } else {
+        DfcDalpha = fc * (-c1c / ((1.0 - alpha) * (1.0 - alpha)));
+    }
+    double DfcDn = DfcDalpha * dadn;
+    double DfcDDn = DfcDalpha * daddn;
+    double DfcDtau = DfcDalpha * dadtau;
+    double DepsiloncDn = Dec1Dn + fc * (Dec0Dn - Dec1Dn) + DfcDn * (ec0 - ec1);
+    double DepsiloncDDn = Dec1DDn + fc * (Dec0DDn - Dec1DDn) + DfcDDn * (ec0 - ec1);
+    double DepsiloncDtau = DfcDtau * (ec0 - ec1);
+
+    double vc1 = epsilonc + r * DepsiloncDn;
+    double vc2 = r * DepsiloncDDn;
+    double vc3 = r * DepsiloncDtau;
+
+    // ============ Combine and output ============
+    exc[i] = epsilonx + epsilonc;
+    vxc[i] = vx1 + vc1;
+    // v2xc = (vx2 + vc2) / normDrho = d(n*eps)/d|grad n| / |grad n| = 2*vsigma
+    v2xc[i] = (vx2 + vc2) / normDrho;
+    vtau[i] = vx3 + vc3;
+}
+
+void mgga_scan_gpu(const double* d_rho, const double* d_sigma, const double* d_tau,
+                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N) {
+    int bs = 256;
+    int grid = (N + bs - 1) / bs;
+    mgga_scan_kernel<<<grid, bs>>>(d_rho, d_sigma, d_tau, d_exc, d_vxc, d_v2xc, d_vtau, N);
+}
+
+// ============================================================
+// SCAN metaGGA Exchange + Correlation — fused kernel (spin-polarized)
+// Hand-coded from SCANFunctional.cpp.bak reference
+// ============================================================
+
+// Helper device function: compute SCAN exchange for a single spin channel
+// theRho = 2*rho_s, theNormDrho = 2*normDrho_s, theTau = 2*tau_s
+// Returns: epsilonx_s (per particle of 2*rho_s), vx1, vx2, vx3 wrt (theRho, theNormDrho, theTau)
+__device__ void scan_exchange_single(
+    double theRho, double theNormDrho, double theTau,
+    double &epsx, double &vx1_out, double &vx2_out, double &vx3_out)
+{
+    constexpr double PI_val = 3.14159265358979323846;
+    double threeMPi2_1o3 = cbrt(3.0 * PI_val * PI_val);
+    double threeMPi2_2o3 = threeMPi2_1o3 * threeMPi2_1o3;
+
+    double rho_4o3 = theRho * cbrt(theRho);
+    double s = theNormDrho / (2.0 * threeMPi2_1o3 * rho_4o3);
+    double tauw = theNormDrho * theNormDrho / (8.0 * theRho);
+    double tauUnif = 3.0 / 10.0 * threeMPi2_2o3 * theRho * cbrt(theRho * theRho);
+    double alpha = (theTau - tauw) / tauUnif;
+
+    double rho_7o3 = rho_4o3 * theRho;
+    double dsdn = -2.0 * theNormDrho / (3.0 * threeMPi2_1o3 * rho_7o3);
+    double dsddn = 1.0 / (2.0 * threeMPi2_1o3 * rho_4o3);
+    double DtauwDn = -theNormDrho * theNormDrho / (8.0 * theRho * theRho);
+    double DtauwDDn = theNormDrho / (4.0 * theRho);
+    double DtauUnifDn = threeMPi2_2o3 / 2.0 * cbrt(theRho * theRho);
+    double dadn = (-DtauwDn * tauUnif - (theTau - tauw) * DtauUnifDn) / (tauUnif * tauUnif);
+    double daddn = (-DtauwDDn) / tauUnif;
+    double dadtau = 1.0 / tauUnif;
+
+    constexpr double k1 = 0.065;
+    constexpr double mu_ak = 10.0 / 81.0;
+    constexpr double b2_x = 0.12090550348328691;
+    constexpr double b1_x = 0.15668913490814561;
+    constexpr double b3_x = 0.5;
+    constexpr double b4_x = -0.0057613672245924465;
+    constexpr double hx0 = 1.174;
+    constexpr double c1x = 0.667;
+    constexpr double c2x = 0.8;
+    constexpr double dx_x = 1.24;
+    constexpr double a1_x = 4.9479;
+
+    double s2 = s * s;
+    double epsilon_xUnif = -3.0 / (4.0 * PI_val) * cbrt(3.0 * PI_val * PI_val * theRho);
+
+    double term1 = 1.0 + b4_x * s2 / mu_ak * exp(-fabs(b4_x) * s2 / mu_ak);
+    double xFir = mu_ak * s2 * term1;
+    double term3 = 2.0 * (b1_x * s2 + b2_x * (1.0 - alpha) * exp(-b3_x * (1.0 - alpha) * (1.0 - alpha)));
+    double xSec = (term3 / 2.0) * (term3 / 2.0);
+    double hx1 = 1.0 + k1 - k1 / (1.0 + (xFir + xSec) / k1);
+
+    double fx;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        fx = 0.0;
+    } else if (alpha > 1.0) {
+        fx = -dx_x * exp(c2x / (1.0 - alpha));
+    } else {
+        fx = exp(-c1x * alpha / (1.0 - alpha));
+    }
+
+    double sqrt_s = sqrt(s);
+    double gx = 1.0 - exp(-a1_x / (sqrt_s + 1e-30));
+    double Fx = (hx1 + fx * (hx0 - hx1)) * gx;
+    epsx = epsilon_xUnif * Fx;
+
+    double term2 = s2 * (b4_x / mu_ak * exp(-fabs(b4_x) * s2 / mu_ak) + b4_x * s2 / mu_ak * exp(-fabs(b4_x) * s2 / mu_ak) * (-fabs(b4_x) / mu_ak));
+    double term4 = b2_x * (-exp(-b3_x * (1.0 - alpha) * (1.0 - alpha)) + (1.0 - alpha) * exp(-b3_x * (1.0 - alpha) * (1.0 - alpha)) * (2.0 * b3_x * (1.0 - alpha)));
+    double DxDs = 2.0 * s * (mu_ak * (term1 + term2) + b1_x * term3);
+    double DxDalpha = term3 * term4;
+    double DxDn = dsdn * DxDs + dadn * DxDalpha;
+    double DxDDn = dsddn * DxDs + daddn * DxDalpha;
+    double DxDtau = dadtau * DxDalpha;
+
+    double exp_gx = exp(-a1_x / (sqrt_s + 1e-30));
+    double DgxDn = -exp_gx * (a1_x / 2.0 / (sqrt_s + 1e-30) / (s + 1e-30)) * dsdn;
+    double DgxDDn = -exp_gx * (a1_x / 2.0 / (sqrt_s + 1e-30) / (s + 1e-30)) * dsddn;
+    double Dhx1Dx = 1.0 / ((1.0 + (xFir + xSec) / k1) * (1.0 + (xFir + xSec) / k1));
+    double Dhx1Dn = DxDn * Dhx1Dx;
+    double Dhx1DDn = DxDDn * Dhx1Dx;
+    double Dhx1Dtau = DxDtau * Dhx1Dx;
+
+    double DfxDalpha;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        DfxDalpha = 0.0;
+    } else if (alpha > 1.0) {
+        DfxDalpha = -dx_x * exp(c2x / (1.0 - alpha)) * (c2x / ((1.0 - alpha) * (1.0 - alpha)));
+    } else {
+        DfxDalpha = exp(-c1x * alpha / (1.0 - alpha)) * (-c1x / ((1.0 - alpha) * (1.0 - alpha)));
+    }
+
+    double DfxDn = DfxDalpha * dadn;
+    double DfxDDn = DfxDalpha * daddn;
+    double DfxDtau = DfxDalpha * dadtau;
+    double DFxDn = (hx1 + fx * (hx0 - hx1)) * DgxDn + gx * (1.0 - fx) * Dhx1Dn + gx * (hx0 - hx1) * DfxDn;
+    double DFxDDn = (hx1 + fx * (hx0 - hx1)) * DgxDDn + gx * (1.0 - fx) * Dhx1DDn + gx * (hx0 - hx1) * DfxDDn;
+    double DFxDtau = gx * (1.0 - fx) * Dhx1Dtau + gx * (hx0 - hx1) * DfxDtau;
+
+    double Depsilon_xUnifDn = -cbrt(3.0 * PI_val * PI_val) / (4.0 * PI_val) * pow(theRho, -2.0 / 3.0);
+    vx1_out = (epsilon_xUnif + theRho * Depsilon_xUnifDn) * Fx + theRho * epsilon_xUnif * DFxDn;
+    vx2_out = theRho * epsilon_xUnif * DFxDDn;
+    vx3_out = theRho * epsilon_xUnif * DFxDtau;
+}
+
+__global__ void mgga_scan_spin_kernel(
+    const double* __restrict__ rho_up,
+    const double* __restrict__ rho_dn,
+    const double* __restrict__ sigma_uu,
+    const double* __restrict__ sigma_dd,
+    const double* __restrict__ sigma_tot,
+    const double* __restrict__ tau_up,
+    const double* __restrict__ tau_dn,
+    double* __restrict__ exc,
+    double* __restrict__ vxc_up,
+    double* __restrict__ vxc_dn,
+    double* __restrict__ v2xc_c,
+    double* __restrict__ v2xc_x_up,
+    double* __restrict__ v2xc_x_dn,
+    double* __restrict__ vtau_up,
+    double* __restrict__ vtau_dn,
+    int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+
+    double ru = rho_up[i];
+    double rd = rho_dn[i];
+    double rt = ru + rd;
+
+    if (rt < 1e-30) {
+        exc[i] = 0.0;
+        vxc_up[i] = 0.0;
+        vxc_dn[i] = 0.0;
+        v2xc_c[i] = 0.0;
+        v2xc_x_up[i] = 0.0;
+        v2xc_x_dn[i] = 0.0;
+        vtau_up[i] = 0.0;
+        vtau_dn[i] = 0.0;
+        return;
+    }
+
+    constexpr double PI_val = 3.14159265358979323846;
+
+    double sig_uu = sigma_uu[i];
+    double sig_dd = sigma_dd[i];
+    double sig_tt = sigma_tot[i];
+    if (sig_uu < 1e-14) sig_uu = 1e-14;
+    if (sig_dd < 1e-14) sig_dd = 1e-14;
+    if (sig_tt < 1e-14) sig_tt = 1e-14;
+    double normDrho_up = sqrt(sig_uu);
+    double normDrho_dn = sqrt(sig_dd);
+    double normDrho_tot = sqrt(sig_tt);
+
+    // ============ EXCHANGE (per spin channel, doubled density) ============
+    double epsx_up, vx1_up, vx2_up, vx3_up;
+    double epsx_dn, vx1_dn, vx2_dn, vx3_dn;
+
+    if (ru > 1e-30) {
+        scan_exchange_single(2.0 * ru, 2.0 * normDrho_up, 2.0 * tau_up[i],
+                             epsx_up, vx1_up, vx2_up, vx3_up);
+    } else {
+        epsx_up = 0.0; vx1_up = 0.0; vx2_up = 0.0; vx3_up = 0.0;
+    }
+
+    if (rd > 1e-30) {
+        scan_exchange_single(2.0 * rd, 2.0 * normDrho_dn, 2.0 * tau_dn[i],
+                             epsx_dn, vx1_dn, vx2_dn, vx3_dn);
+    } else {
+        epsx_dn = 0.0; vx1_dn = 0.0; vx2_dn = 0.0; vx3_dn = 0.0;
+    }
+
+    // Exchange energy per particle of total density
+    double ex_total = (ru * epsx_up + rd * epsx_dn) / rt;
+
+    // Exchange v2: divide by normDrho per spin (like CPU line 607)
+    double v2x_up_out = vx2_up / normDrho_up;
+    double v2x_dn_out = vx2_dn / normDrho_dn;
+
+    // ============ CORRELATION (spin-polarized) ============
+    // basic_MGSGA_variables_correlation for total density
+    double threeMPi2_1o3 = cbrt(3.0 * PI_val * PI_val);
+    double threeMPi2_2o3 = threeMPi2_1o3 * threeMPi2_1o3;
+
+    double rho_4o3 = rt * cbrt(rt);
+    double s = normDrho_tot / (2.0 * threeMPi2_1o3 * rho_4o3);
+    double zeta = (ru - rd) / rt;
+    zeta = fmin(fmax(zeta, -1.0 + 1e-14), 1.0 - 1e-14);
+    double ds_val = (pow(1.0 + zeta, 5.0 / 3.0) + pow(1.0 - zeta, 5.0 / 3.0)) / 2.0;
+    double tauw = normDrho_tot * normDrho_tot / (8.0 * rt);
+    double tauUnif = 3.0 / 10.0 * threeMPi2_2o3 * rt * cbrt(rt * rt) * ds_val;
+    double tau_tot = tau_up[i] + tau_dn[i];
+    double alpha = (tau_tot - tauw) / tauUnif;
+
+    // derivatives: s, zeta, alpha wrt nup, ndn, |grad n|, tau
+    double rho_7o3 = rho_4o3 * rt;
+    double dsdn = -2.0 * normDrho_tot / (3.0 * threeMPi2_1o3 * rho_7o3);
+    double dsddn = 1.0 / (2.0 * threeMPi2_1o3 * rho_4o3);
+    double DzetaDnup = 2.0 * rd / (rt * rt);
+    double DzetaDndn = -2.0 * ru / (rt * rt);
+    double DtauwDn = -normDrho_tot * normDrho_tot / (8.0 * rt * rt);
+    double DtauwDDn = normDrho_tot / (4.0 * rt);
+
+    double zetp_2o3 = pow(1.0 + zeta, 2.0 / 3.0);
+    double zetm_2o3 = pow(1.0 - zeta, 2.0 / 3.0);
+    double DdsDnup = 5.0 / 3.0 * (zetp_2o3 - zetm_2o3) * DzetaDnup / 2.0;
+    double DdsDndn = 5.0 / 3.0 * (zetp_2o3 - zetm_2o3) * DzetaDndn / 2.0;
+    double rho_2o3 = cbrt(rt * rt);
+    double rho_5o3 = rt * rho_2o3;
+    double DtauUnifDnup = threeMPi2_2o3 / 2.0 * rho_2o3 * ds_val + 3.0 / 10.0 * threeMPi2_2o3 * rho_5o3 * DdsDnup;
+    double DtauUnifDndn = threeMPi2_2o3 / 2.0 * rho_2o3 * ds_val + 3.0 / 10.0 * threeMPi2_2o3 * rho_5o3 * DdsDndn;
+    double dadnup = (-DtauwDn * tauUnif - (tau_tot - tauw) * DtauUnifDnup) / (tauUnif * tauUnif);
+    double dadndn = (-DtauwDn * tauUnif - (tau_tot - tauw) * DtauUnifDndn) / (tauUnif * tauUnif);
+    double daddn_c = (-DtauwDDn) / tauUnif;
+    double dadtau_c = 1.0 / tauUnif;
+
+    // SCAN correlation constants
+    constexpr double b1c = 0.0285764;
+    constexpr double b2c = 0.0889;
+    constexpr double b3c = 0.125541;
+    constexpr double betaConst = 0.06672455060314922;
+    constexpr double betaRsInf = betaConst * 0.1 / 0.1778;
+    constexpr double f0 = -0.9;
+    constexpr double r_c = 0.031091;
+    constexpr double c1c = 0.64;
+    constexpr double c2c = 1.5;
+    constexpr double dc = 0.7;
+
+    // PW92 spin-resolved LDA constants
+    constexpr double AA0 = 0.0310907, alpha10 = 0.21370;
+    constexpr double beta10 = 7.5957, beta20 = 3.5876, beta30 = 1.6382, beta40 = 0.49294;
+    constexpr double AAac = 0.0168869, alpha1ac = 0.11125;
+    constexpr double beta1ac = 10.357, beta2ac = 3.6231, beta3ac = 0.88026, beta4ac = 0.49671;
+    constexpr double AA1 = 0.01554535, alpha11 = 0.20548;
+    constexpr double beta11 = 14.1189, beta21 = 6.1977, beta31 = 3.3662, beta41 = 0.62517;
+    constexpr double factf_inv = 1.0 / 1.709920934161365;
+
+    double phi = (pow(1.0 + zeta, 2.0 / 3.0) + pow(1.0 - zeta, 2.0 / 3.0)) / 2.0;
+    double dx_c = (pow(1.0 + zeta, 4.0 / 3.0) + pow(1.0 - zeta, 4.0 / 3.0)) / 2.0;
+
+    double rs = cbrt(0.75 / (PI_val * rt));
+    double sqrRs = sqrt(rs);
+    double rsmHalf = 1.0 / sqrRs;
+
+    // epsilon_c^0
+    double ecLDA0 = -b1c / (1.0 + b2c * sqrRs + b3c * rs);
+    double cx0 = -3.0 / (4.0 * PI_val) * cbrt(9.0 * PI_val / 4.0);
+    double Gc = (1.0 - 2.3631 * (dx_c - 1.0)) * (1.0 - pow(zeta, 12.0));
+    double w0 = exp(-ecLDA0 / b1c) - 1.0;
+    double xiInf0 = pow(3.0 * PI_val * PI_val / 16.0, 2.0 / 3.0) * (betaRsInf / (cx0 - f0));
+    double s2 = s * s;
+    double gInf0s = pow(1.0 + 4.0 * xiInf0 * s2, -0.25);
+    double H0 = b1c * log(1.0 + w0 * (1.0 - gInf0s));
+    double ec0 = (ecLDA0 + H0) * Gc;
+
+    // epsilon_c^1 (spin-resolved PW92)
+    double beta_c = betaConst * (1.0 + 0.1 * rs) / (1.0 + 0.1778 * rs);
+
+    // ecrs0 (unpolarized)
+    double ecrs0_q0 = -2.0 * AA0 * (1.0 + alpha10 * rs);
+    double ecrs0_q1 = 2.0 * AA0 * (beta10 * sqrRs + beta20 * rs + beta30 * rs * sqrRs + beta40 * rs * rs);
+    double ecrs0_q1p = AA0 * (beta10 * rsmHalf + 2.0 * beta20 + 3.0 * beta30 * sqrRs + 4.0 * beta40 * rs);
+    double ecrs0_den = 1.0 / (ecrs0_q1 * ecrs0_q1 + ecrs0_q1);
+    double ecrs0_log = -log(ecrs0_q1 * ecrs0_q1 * ecrs0_den);
+    double ecrs0 = ecrs0_q0 * ecrs0_log;
+    double Decrs0_Drs = -2.0 * AA0 * alpha10 * ecrs0_log - ecrs0_q0 * ecrs0_q1p * ecrs0_den;
+
+    // ac (spin stiffness)
+    double ac_q0 = -2.0 * AAac * (1.0 + alpha1ac * rs);
+    double ac_q1 = 2.0 * AAac * (beta1ac * sqrRs + beta2ac * rs + beta3ac * rs * sqrRs + beta4ac * rs * rs);
+    double ac_q1p = AAac * (beta1ac * rsmHalf + 2.0 * beta2ac + 3.0 * beta3ac * sqrRs + 4.0 * beta4ac * rs);
+    double ac_den = 1.0 / (ac_q1 * ac_q1 + ac_q1);
+    double ac_log = -log(ac_q1 * ac_q1 * ac_den);
+    double ac = ac_q0 * ac_log;
+    double Dac_Drs = -2.0 * AAac * alpha1ac * ac_log - ac_q0 * ac_q1p * ac_den;
+
+    // ecrs1 (fully polarized)
+    double ecrs1_q0 = -2.0 * AA1 * (1.0 + alpha11 * rs);
+    double ecrs1_q1 = 2.0 * AA1 * (beta11 * sqrRs + beta21 * rs + beta31 * rs * sqrRs + beta41 * rs * rs);
+    double ecrs1_q1p = AA1 * (beta11 * rsmHalf + 2.0 * beta21 + 3.0 * beta31 * sqrRs + 4.0 * beta41 * rs);
+    double ecrs1_den = 1.0 / (ecrs1_q1 * ecrs1_q1 + ecrs1_q1);
+    double ecrs1_log = -log(ecrs1_q1 * ecrs1_q1 * ecrs1_den);
+    double ecrs1 = ecrs1_q0 * ecrs1_log;
+    double Decrs1_Drs = -2.0 * AA1 * alpha11 * ecrs1_log - ecrs1_q0 * ecrs1_q1p * ecrs1_den;
+
+    double f_zeta = (pow(1.0 + zeta, 4.0 / 3.0) + pow(1.0 - zeta, 4.0 / 3.0) - 2.0) / (pow(2.0, 4.0 / 3.0) - 2.0);
+    double fp_zeta = (pow(1.0 + zeta, 1.0 / 3.0) - pow(1.0 - zeta, 1.0 / 3.0)) * 4.0 / 3.0 / (pow(2.0, 4.0 / 3.0) - 2.0);
+    double zeta4 = zeta * zeta * zeta * zeta;
+    double gcrs = ecrs1 - ecrs0 + ac / 1.709921;
+    double ec_lsda1 = ecrs0 + f_zeta * (zeta4 * gcrs - ac / 1.709921);
+
+    // H1
+    double rPhi3 = r_c * phi * phi * phi;
+    double w1 = exp(-ec_lsda1 / rPhi3) - 1.0;
+    double Ac = beta_c / (r_c * w1);
+    double t = cbrt(3.0 * PI_val * PI_val / 16.0) * s / (phi * sqrRs);
+    double g = pow(1.0 + 4.0 * Ac * t * t, -0.25);
+    double H1 = rPhi3 * log(1.0 + w1 * (1.0 - g));
+    double ec1 = ec_lsda1 + H1;
+
+    // interpolate
+    double fc;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        fc = 0.0;
+    } else if (alpha > 1.0) {
+        fc = -dc * exp(c2c / (1.0 - alpha));
+    } else {
+        fc = exp(-c1c * alpha / (1.0 - alpha));
+    }
+    double epsilonc = ec1 + fc * (ec0 - ec1);
+
+    // ---- Correlation derivatives ----
+    double DrsDn = -4.0 * PI_val / 9.0 * pow(4.0 * PI_val / 3.0 * rt, -4.0 / 3.0);
+    double zetp_1o3 = pow(1.0 + zeta, 1.0 / 3.0);
+    double zetm_1o3 = pow(1.0 - zeta, 1.0 / 3.0);
+    double Ddx_term = (4.0 / 3.0 * zetp_1o3 - 4.0 / 3.0 * zetm_1o3) / 2.0;
+    double DdxDnup = Ddx_term * DzetaDnup;
+    double DdxDndn = Ddx_term * DzetaDndn;
+    double DGcDnup = -2.3631 * DdxDnup * (1.0 - pow(zeta, 12.0)) + (1.0 - 2.3631 * (dx_c - 1.0)) * (-12.0 * pow(zeta, 11.0) * DzetaDnup);
+    double DGcDndn = -2.3631 * DdxDndn * (1.0 - pow(zeta, 12.0)) + (1.0 - 2.3631 * (dx_c - 1.0)) * (-12.0 * pow(zeta, 11.0) * DzetaDndn);
+    double DgInf0sDs = -0.25 * pow(1.0 + 4.0 * xiInf0 * s2, -1.25) * (4.0 * xiInf0 * 2.0 * s);
+    double DgInf0sDn = DgInf0sDs * dsdn;
+    double DgInf0sDDn = DgInf0sDs * dsddn;
+    double DecLDA0Dn = b1c * (0.5 * b2c / sqrRs + b3c) / ((1.0 + b2c * sqrRs + b3c * rs) * (1.0 + b2c * sqrRs + b3c * rs)) * DrsDn;
+    double Dw0Dn = (w0 + 1.0) * (-DecLDA0Dn / b1c);
+    double DH0Dn = b1c * (Dw0Dn * (1.0 - gInf0s) - w0 * DgInf0sDn) / (1.0 + w0 * (1.0 - gInf0s));
+    double DH0DDn = b1c * (-w0 * DgInf0sDDn) / (1.0 + w0 * (1.0 - gInf0s));
+    double Dec0Dnup = (DecLDA0Dn + DH0Dn) * Gc + (ecLDA0 + H0) * DGcDnup;
+    double Dec0Dndn = (DecLDA0Dn + DH0Dn) * Gc + (ecLDA0 + H0) * DGcDndn;
+    double Dec0DDn = DH0DDn * Gc;
+
+    // ec1 derivatives
+    double DgcrsDrs = Decrs1_Drs - Decrs0_Drs + Dac_Drs / 1.709921;
+    double Dec_lsda1_Drs = Decrs0_Drs + f_zeta * (zeta4 * DgcrsDrs - Dac_Drs / 1.709921);
+    double Dfzeta4_Dzeta = 4.0 * (zeta * zeta * zeta) * f_zeta + fp_zeta * zeta4;
+    double Dec_lsda1_Dzeta = Dfzeta4_Dzeta * gcrs - fp_zeta * ac / 1.709921;
+    double Dec_lsda1Dnup = (-rs / 3.0 * Dec_lsda1_Drs - zeta * Dec_lsda1_Dzeta + Dec_lsda1_Dzeta) / rt;
+    double Dec_lsda1Dndn = (-rs / 3.0 * Dec_lsda1_Drs - zeta * Dec_lsda1_Dzeta - Dec_lsda1_Dzeta) / rt;
+
+    double DbetaDn = 0.066725 * (0.1 * (1.0 + 0.1778 * rs) - 0.1778 * (1.0 + 0.1 * rs)) / ((1.0 + 0.1778 * rs) * (1.0 + 0.1778 * rs)) * DrsDn;
+    double Dphi_term = 0.5 * (2.0 / 3.0 * pow(1.0 + zeta, -1.0 / 3.0) - 2.0 / 3.0 * pow(1.0 - zeta, -1.0 / 3.0));
+    double DphiDnup = Dphi_term * DzetaDnup;
+    double DphiDndn = Dphi_term * DzetaDndn;
+    double threePi2_16_1o3 = cbrt(3.0 * PI_val * PI_val / 16.0);
+    double DtDnup = threePi2_16_1o3 * (phi * sqrRs * dsdn - s * (DphiDnup * sqrRs + phi * DrsDn / (2.0 * sqrRs))) / (phi * phi * rs);
+    double DtDndn = threePi2_16_1o3 * (phi * sqrRs * dsdn - s * (DphiDndn * sqrRs + phi * DrsDn / (2.0 * sqrRs))) / (phi * phi * rs);
+    double DtDDn = t * dsddn / s;
+    double Dw1Dnup = (w1 + 1.0) * (-(rPhi3 * Dec_lsda1Dnup - r_c * ec_lsda1 * (3.0 * phi * phi * DphiDnup)) / (rPhi3 * rPhi3));
+    double Dw1Dndn = (w1 + 1.0) * (-(rPhi3 * Dec_lsda1Dndn - r_c * ec_lsda1 * (3.0 * phi * phi * DphiDndn)) / (rPhi3 * rPhi3));
+    double DADnup = (w1 * DbetaDn - beta_c * Dw1Dnup) / (r_c * w1 * w1);
+    double DADndn = (w1 * DbetaDn - beta_c * Dw1Dndn) / (r_c * w1 * w1);
+    double DgDnup = -0.25 * pow(1.0 + 4.0 * Ac * t * t, -1.25) * (4.0 * (DADnup * t * t + 2.0 * Ac * t * DtDnup));
+    double DgDndn = -0.25 * pow(1.0 + 4.0 * Ac * t * t, -1.25) * (4.0 * (DADndn * t * t + 2.0 * Ac * t * DtDndn));
+    double DgDDn = -0.25 * pow(1.0 + 4.0 * Ac * t * t, -1.25) * (4.0 * 2.0 * Ac * t * DtDDn);
+    double log_w1g = log(1.0 + w1 * (1.0 - g));
+    double DH1Dnup = 3.0 * r_c * phi * phi * DphiDnup * log_w1g + rPhi3 * (Dw1Dnup * (1.0 - g) - w1 * DgDnup) / (1.0 + w1 * (1.0 - g));
+    double DH1Dndn = 3.0 * r_c * phi * phi * DphiDndn * log_w1g + rPhi3 * (Dw1Dndn * (1.0 - g) - w1 * DgDndn) / (1.0 + w1 * (1.0 - g));
+    double DH1DDn = rPhi3 * (-w1 * DgDDn) / (1.0 + w1 * (1.0 - g));
+    double Dec1Dnup = Dec_lsda1Dnup + DH1Dnup;
+    double Dec1Dndn = Dec_lsda1Dndn + DH1Dndn;
+    double Dec1DDn = DH1DDn;
+
+    // fc derivatives
+    double DfcDalpha;
+    if (fabs(alpha - 1.0) < 1e-14) {
+        DfcDalpha = 0.0;
+    } else if (alpha > 1.0) {
+        DfcDalpha = fc * (c2c / ((1.0 - alpha) * (1.0 - alpha)));
+    } else {
+        DfcDalpha = fc * (-c1c / ((1.0 - alpha) * (1.0 - alpha)));
+    }
+    double DfcDnup = DfcDalpha * dadnup;
+    double DfcDndn = DfcDalpha * dadndn;
+    double DfcDDn = DfcDalpha * daddn_c;
+    double DfcDtau = DfcDalpha * dadtau_c;
+    double DepsiloncDnup = Dec1Dnup + fc * (Dec0Dnup - Dec1Dnup) + DfcDnup * (ec0 - ec1);
+    double DepsiloncDndn = Dec1Dndn + fc * (Dec0Dndn - Dec1Dndn) + DfcDndn * (ec0 - ec1);
+    double DepsiloncDDn = Dec1DDn + fc * (Dec0DDn - Dec1DDn) + DfcDDn * (ec0 - ec1);
+    double DepsiloncDtau = DfcDtau * (ec0 - ec1);
+
+    double vc1_up = epsilonc + rt * DepsiloncDnup;
+    double vc1_dn = epsilonc + rt * DepsiloncDndn;
+    double vc2_c = rt * DepsiloncDDn;
+    double vc3 = rt * DepsiloncDtau;
+
+    // Correlation v2: divide by normDrho_tot (like CPU line 630)
+    double v2c_out = vc2_c / normDrho_tot;
+
+    // ============ Combine outputs ============
+    exc[i] = ex_total + epsilonc;
+    vxc_up[i] = vx1_up + vc1_up;
+    vxc_dn[i] = vx1_dn + vc1_dn;
+    v2xc_c[i] = v2c_out;
+    v2xc_x_up[i] = v2x_up_out;
+    v2xc_x_dn[i] = v2x_dn_out;
+    vtau_up[i] = vx3_up + vc3;
+    vtau_dn[i] = vx3_dn + vc3;
+}
+
+void mgga_scan_spin_gpu(
+    const double* d_rho_up, const double* d_rho_dn,
+    const double* d_sigma_uu, const double* d_sigma_dd, const double* d_sigma_tot,
+    const double* d_tau_up, const double* d_tau_dn,
+    double* d_exc, double* d_vxc_up, double* d_vxc_dn,
+    double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
+    double* d_vtau_up, double* d_vtau_dn, int N) {
+    int bs = 256;
+    int grid = (N + bs - 1) / bs;
+    mgga_scan_spin_kernel<<<grid, bs>>>(
+        d_rho_up, d_rho_dn, d_sigma_uu, d_sigma_dd, d_sigma_tot,
+        d_tau_up, d_tau_dn,
+        d_exc, d_vxc_up, d_vxc_dn,
+        d_v2xc_c, d_v2xc_x_up, d_v2xc_x_dn,
+        d_vtau_up, d_vtau_dn, N);
+}
+
 } // namespace gpu
 } // namespace lynx
 

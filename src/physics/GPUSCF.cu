@@ -227,6 +227,17 @@ void lda_pw_spin_gpu(const double* d_rho_up, const double* d_rho_dn,
 void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
                        double* d_exc, double* d_vxc, double* d_v2xc, int N);
 
+// SCAN metaGGA
+void mgga_scan_gpu(const double* d_rho, const double* d_sigma, const double* d_tau,
+                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N);
+void mgga_scan_spin_gpu(
+    const double* d_rho_up, const double* d_rho_dn,
+    const double* d_sigma_uu, const double* d_sigma_dd, const double* d_sigma_tot,
+    const double* d_tau_up, const double* d_tau_dn,
+    double* d_exc, double* d_vxc_up, double* d_vxc_dn,
+    double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
+    double* d_vtau_up, double* d_vtau_dn, int N);
+
 // SOC operators
 void spinor_offdiag_veff_gpu(
     cuDoubleComplex* d_Hpsi, const cuDoubleComplex* d_psi,
