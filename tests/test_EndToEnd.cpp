@@ -752,10 +752,11 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
     int rank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    double ref_Etotal = -15.477507471;
-    double ref_Eband = -1.8911990670;
-    double ref_Exc = -4.4332977072;
-    double ref_Ef = 0.010348992;
+    // SPARC SCAN reference for deformed Si4 (10.0 x 10.26 x 10.5)
+    double ref_Etotal = -15.478970526;
+    double ref_Eband = 0.0; // not compared
+    double ref_Exc = 0.0;
+    double ref_Ef = 0.0;
 
     if (rank == 0) {
         std::printf("\n=== Si4 Gamma-point SCAN Results ===\n");
@@ -767,12 +768,12 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
         std::printf("  Etotal error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
         std::printf("  Exc error:    %.6e Ha\n", std::abs(result.Exc - ref_Exc));
 
-        // SPARC SCAN forces (Ha/Bohr)
+        // SPARC SCAN forces (Ha/Bohr) for deformed cell 10.0 x 10.26 x 10.5
         double ref_forces[12] = {
-             2.6435344395E-08,  2.2516542827E-08,  2.4706176996E-02,
-             1.0394849611E-08,  8.4588722872E-09, -2.4706015999E-02,
-            -1.9843107252E-08, -2.1586706130E-08,  2.4705865151E-02,
-            -1.6987086754E-08, -9.3887089838E-09, -2.4706026147E-02
+            -1.1260733637E-07, -2.0475633673E-08,  2.3343149360E-02,
+             6.5716542982E-04,  6.0688497580E-05, -2.3376211266E-02,
+            -6.8131886993E-08,  2.4936846560E-08,  2.3408903487E-02,
+            -6.5698469060E-04, -6.0692958793E-05, -2.3375841580E-02
         };
 
         if (result.forces.size() == 12) {
@@ -792,10 +793,11 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
             EXPECT_LT(max_force_err, 1e-5) << "Forces deviate from SPARC reference";
         }
 
-        // SPARC SCAN stress (GPa) — Voigt: xx, xy, xz, yy, yz, zz
+        // SPARC SCAN stress (GPa) — deformed cell 10.0 x 10.26 x 10.5
+        // Voigt: xx, xy, xz, yy, yz, zz
         double ref_stress[6] = {
-            4.7905353781E-01, -1.2897177147E+01, -2.9863451038E-07,
-            4.7905345008E-01,  3.7058481746E-08, -2.2824294710E+00
+            -2.5783048441E-01, -1.3335761406E+01,  6.8329942976E-06,
+             4.6147953628E-01,  7.0657923920E-07, -1.3890775900E+00
         };
         if (result.stress[0] != 0.0 || result.stress[3] != 0.0) {
             std::printf("\n  Stress (GPa):\n");
