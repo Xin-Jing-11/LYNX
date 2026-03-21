@@ -3442,14 +3442,19 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
         }
     }
     // Download per-k-point complex psi from GPU to CPU wfn (for forces/stress)
+    // GPU stores psi as (Nd, Nband) contiguous with stride Nd.
+    // CPU NDArray has padded leading dimension ld >= Nd.  Copy per-column.
     if (is_kpt_ && !d_psi_z_kpt_.empty()) {
         int Nkpts = (int)d_psi_z_kpt_.size() / std::max(Nspin_local_, 1);
-        size_t psi_bytes = 2 * (size_t)Nd_ * Nband * sizeof(double);
+        size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
         for (int s = 0; s < Nspin_local_; s++) {
             for (int k = 0; k < Nkpts; k++) {
-                CUDA_CHECK(cudaMemcpy(wfn.psi_kpt(s, k).data(),
-                                       d_psi_z_kpt_[s * Nkpts + k],
-                                       psi_bytes, cudaMemcpyDeviceToHost));
+                auto& psi_sk = wfn.psi_kpt(s, k);
+                auto* d_src = static_cast<const char*>(d_psi_z_kpt_[s * Nkpts + k]);
+                for (int n = 0; n < Nband; n++) {
+                    CUDA_CHECK(cudaMemcpy(psi_sk.col(n), d_src + n * col_bytes,
+                                           col_bytes, cudaMemcpyDeviceToHost));
+                }
             }
         }
     }
