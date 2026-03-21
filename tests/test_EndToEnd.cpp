@@ -733,14 +733,17 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
              4.6147953628E-01,  7.0657923920E-07, -1.3890775900E+00
         };
         if (result.stress[0] != 0.0 || result.stress[3] != 0.0) {
+            const double au_to_gpa = 29421.01569650548;
+            double s[6];
+            for (int i = 0; i < 6; i++) s[i] = result.stress[i] * au_to_gpa;
             std::printf("\n  Stress (GPa):\n");
-            std::printf("    LYNX:  %10.6f %10.6f %10.6f\n", result.stress[0], result.stress[1], result.stress[2]);
-            std::printf("           %10.6f %10.6f %10.6f\n", result.stress[3], result.stress[4], result.stress[5]);
+            std::printf("    LYNX:  %10.6f %10.6f %10.6f\n", s[0], s[1], s[2]);
+            std::printf("           %10.6f %10.6f %10.6f\n", s[3], s[4], s[5]);
             std::printf("    ref:   %10.6f %10.6f %10.6f\n", ref_stress[0], ref_stress[1], ref_stress[2]);
             std::printf("           %10.6f %10.6f %10.6f\n", ref_stress[3], ref_stress[4], ref_stress[5]);
             double max_stress_err = 0.0;
             for (int i = 0; i < 6; ++i) {
-                double err = std::abs(result.stress[i] - ref_stress[i]);
+                double err = std::abs(s[i] - ref_stress[i]);
                 max_stress_err = std::max(max_stress_err, err);
             }
             std::printf("    Max stress error: %.6e GPa\n", max_stress_err);
