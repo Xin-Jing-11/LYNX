@@ -114,7 +114,7 @@ std::array<double, 6> Stress::compute(
         int nd_ex = halo.nd_ex();
         bool is_orth = grid.lattice().is_orthogonal();
         const Mat3& gradT = grid.lattice().grad_T();
-        double spin_fac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
+        double occfac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
         bool is_kpt = wfn.is_complex();
 
         std::array<double, 6> stress_mgga = {};
@@ -130,7 +130,7 @@ std::array<double, 6> Stress::compute(
                 for (int n = 0; n < Nband_loc; ++n) {
                     double fn = occ(band_start + n);
                     if (fn < 1e-16) continue;
-                    double g_nk = spin_fac * wk * fn;
+                    double g_nk = wk * fn;  // no occfac here, applied at end
 
                     // Compute ∇ψ in 3 directions
                     if (is_kpt) {
@@ -163,7 +163,7 @@ std::array<double, 6> Stress::compute(
                                     }
                                 }
                                 sum *= grid.dV();
-                                stress_mgga[voigt[a][b]] += -g_nk * sum;
+                                stress_mgga[voigt[a][b]] += g_nk * sum;
                             }
                         }
                     } else {
@@ -191,12 +191,20 @@ std::array<double, 6> Stress::compute(
                                     }
                                 }
                                 sum *= grid.dV();
-                                stress_mgga[voigt[a][b]] += -g_nk * sum;
+                                stress_mgga[voigt[a][b]] += g_nk * sum;
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Debug: print mGGA stress before normalization
+        {
+            const double au2gpa = 29421.01569650548;
+            std::printf("  mGGA_stress raw (GPa): xx=%.4f xy=%.4f yy=%.4f zz=%.4f\n",
+                        stress_mgga[0]*au2gpa, stress_mgga[1]*au2gpa, stress_mgga[3]*au2gpa, stress_mgga[5]*au2gpa);
+            std::printf("  cell_measure=%.6f dV=%.6e Nd=%d\n", cell_measure_, grid.dV(), Nd_d);
         }
 
         // Allreduce over band, kpt, spin communicators
@@ -206,6 +214,10 @@ std::array<double, 6> Stress::compute(
             kptcomm.allreduce_sum(stress_mgga.data(), 6);
         if (!spincomm.is_null() && spincomm.size() > 1)
             spincomm.allreduce_sum(stress_mgga.data(), 6);
+
+        // Multiply by -occfac (matching SPARC mGGAstress.c)
+        for (int i = 0; i < 6; i++)
+            stress_mgga[i] *= -occfac;
 
         // Normalize by cell_measure and add to stress_xc
         for (int i = 0; i < 6; i++) {
