@@ -167,8 +167,15 @@ private:
     // XC type and NLCC flag
     bool has_nlcc_ = false;
     bool is_gga_ = false;
+    bool is_mgga_ = false;
     bool is_orth_ = true;
     bool has_mixed_deriv_ = false;  // non-orth mixed derivative terms
+
+    // mGGA (SCAN) device buffers and state
+    double* d_tau_ = nullptr;       // [Nd] or [2*Nd] for spin
+    double* d_vtau_ = nullptr;      // [Nd] or [2*Nd] for spin
+    double* d_vtau_active_ = nullptr;  // points to d_vtau_ or d_vtau_ + Nd_ for per-spin Hamiltonian
+    bool tau_valid_ = false;        // set true after first tau computation
 
     // Spin/k-point parameters
     int Nspin_ = 1;

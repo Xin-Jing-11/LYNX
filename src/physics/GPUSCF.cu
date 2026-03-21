@@ -98,6 +98,12 @@ void gradient_gpu(
     int nx_ex, int ny_ex,
     int direction, int ncol);
 
+void gradient_z_gpu(
+    const cuDoubleComplex* d_x_ex, cuDoubleComplex* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    int direction, int ncol);
+
 void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
                   double* d_exc, double* d_vxc, double* d_v2xc, int N);
 
@@ -389,6 +395,83 @@ __global__ void divergence_sub_kernel(
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N) Vxc[i] -= DDrho[i];
+}
+
+// mGGA tau accumulation kernel (real, gamma-point)
+// tau[i] += weight * (dpsi_x[i]^2 + dpsi_y[i]^2 + dpsi_z[i]^2)
+__global__ void tau_accumulate_kernel(
+    const double* __restrict__ dpsi_x,
+    const double* __restrict__ dpsi_y,
+    const double* __restrict__ dpsi_z,
+    double* __restrict__ tau,
+    double weight, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    tau[i] += weight * (dpsi_x[i]*dpsi_x[i] + dpsi_y[i]*dpsi_y[i] + dpsi_z[i]*dpsi_z[i]);
+}
+
+// mGGA tau accumulation kernel (complex, k-point)
+__global__ void tau_accumulate_z_kernel(
+    const cuDoubleComplex* __restrict__ dpsi_x,
+    const cuDoubleComplex* __restrict__ dpsi_y,
+    const cuDoubleComplex* __restrict__ dpsi_z,
+    double* __restrict__ tau,
+    double weight, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double dx2 = dpsi_x[i].x*dpsi_x[i].x + dpsi_x[i].y*dpsi_x[i].y;
+    double dy2 = dpsi_y[i].x*dpsi_y[i].x + dpsi_y[i].y*dpsi_y[i].y;
+    double dz2 = dpsi_z[i].x*dpsi_z[i].x + dpsi_z[i].y*dpsi_z[i].y;
+    tau[i] += weight * (dx2 + dy2 + dz2);
+}
+
+// mGGA Hamiltonian: multiply gradient component by vtau (real)
+// out[i] = vtau[i] * dpsi[i]
+__global__ void vtau_multiply_kernel(
+    const double* __restrict__ dpsi,
+    const double* __restrict__ vtau,
+    double* __restrict__ out, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) out[i] = vtau[i] * dpsi[i];
+}
+
+// mGGA Hamiltonian: multiply gradient component by vtau (complex)
+// out[i] = vtau[i] * dpsi[i]  (real vtau * complex dpsi)
+__global__ void vtau_multiply_z_kernel(
+    const cuDoubleComplex* __restrict__ dpsi,
+    const double* __restrict__ vtau,
+    cuDoubleComplex* __restrict__ out, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        out[i].x = vtau[i] * dpsi[i].x;
+        out[i].y = vtau[i] * dpsi[i].y;
+    }
+}
+
+// mGGA Hamiltonian: subtract 0.5 * divergence from Hpsi (real)
+// Hpsi[i] -= 0.5 * div[i]
+__global__ void mgga_ham_sub_kernel(
+    double* __restrict__ Hpsi,
+    const double* __restrict__ div, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) Hpsi[i] -= 0.5 * div[i];
+}
+
+// mGGA Hamiltonian: subtract 0.5 * divergence from Hpsi (complex)
+__global__ void mgga_ham_sub_z_kernel(
+    cuDoubleComplex* __restrict__ Hpsi,
+    const cuDoubleComplex* __restrict__ div, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        Hpsi[i].x -= 0.5 * div[i].x;
+        Hpsi[i].y -= 0.5 * div[i].y;
+    }
 }
 
 // f[i] = scale * r[i]
