@@ -175,6 +175,15 @@ private:
     double* d_tau_ = nullptr;       // [Nd] or [2*Nd] for spin
     double* d_vtau_ = nullptr;      // [Nd] or [2*Nd] for spin
     double* d_vtau_active_ = nullptr;  // points to d_vtau_ or d_vtau_ + Nd_ for per-spin Hamiltonian
+    // Persistent mGGA Hamiltonian work buffers (avoid scratch pool pressure for k-point)
+    double* d_mgga_dpsi_ = nullptr;    // [Nd] gradient of psi (real)
+    double* d_mgga_vtdpsi_ = nullptr;  // [Nd] vtau * gradient
+    double* d_mgga_div_ = nullptr;     // [Nd] divergence accumulator
+    double* d_mgga_vt_ex_ = nullptr;   // [nd_ex] halo of vtau product (real)
+    void* d_mgga_dpsi_z_ = nullptr;    // [Nd] complex gradient
+    void* d_mgga_vtdpsi_z_ = nullptr;  // [Nd] complex vtau product
+    void* d_mgga_div_z_ = nullptr;     // [Nd] complex divergence
+    void* d_mgga_vt_ex_z_ = nullptr;   // [nd_ex] complex halo
     bool tau_valid_ = false;        // set true after first tau computation
 
     // Spin/k-point parameters

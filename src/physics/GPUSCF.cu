@@ -1086,19 +1086,16 @@ void GPUSCFRunner::hamiltonian_apply_cb(
     // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * grad(psi))
     if (s->d_vtau_active_) {
         auto& ctx = gpu::GPUContext::instance();
-        auto& sp = ctx.scratch_pool;
-        size_t sp_cp = sp.checkpoint();
         int Nd = s->Nd_;
         int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
         int bs = 256;
         int gs = gpu::ceildiv(Nd, bs);
 
-        double* d_dpsi   = sp.alloc<double>(Nd);  // gradient component
-        double* d_vtdpsi = sp.alloc<double>(Nd);  // vtau * gradient component
-        double* d_div    = sp.alloc<double>(Nd);  // divergence accumulator
-
-        // Allocate separate halo buffer for vtau products (d_x_ex is shared with psi halo)
-        double* d_vt_ex = sp.alloc<double>(nx_ex * ny_ex * (s->nz_ + 2 * s->FDn_));
+        // Use persistent buffers (not scratch pool) to avoid memory pressure
+        double* d_dpsi   = s->d_mgga_dpsi_;
+        double* d_vtdpsi = s->d_mgga_vtdpsi_;
+        double* d_div    = s->d_mgga_div_;
+        double* d_vt_ex  = s->d_mgga_vt_ex_;
 
         for (int n = 0; n < ncol; n++) {
             const double* d_psi_n = d_psi + (size_t)n * Nd;
@@ -1122,8 +1119,6 @@ void GPUSCFRunner::hamiltonian_apply_cb(
             // Hpsi -= 0.5 * div
             mgga_ham_sub_kernel<<<gs, bs>>>(d_Hpsi_n, d_div, Nd);
         }
-
-        sp.restore(sp_cp);
     }
 }
 
@@ -1163,18 +1158,16 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
     // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * grad(psi))
     if (s->d_vtau_active_) {
         auto& ctx = gpu::GPUContext::instance();
-        auto& sp = ctx.scratch_pool;
-        size_t sp_cp = sp.checkpoint();
         int Nd = s->Nd_;
         int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
         int bs = 256;
         int gs = gpu::ceildiv(Nd, bs);
 
-        cuDoubleComplex* d_dpsi_z   = sp.alloc<cuDoubleComplex>(Nd);
-        cuDoubleComplex* d_vtdpsi_z = sp.alloc<cuDoubleComplex>(Nd);
-        cuDoubleComplex* d_div_z    = sp.alloc<cuDoubleComplex>(Nd);
-        int nz_ex = s->nz_ + 2 * s->FDn_;
-        cuDoubleComplex* d_vt_ex_z  = sp.alloc<cuDoubleComplex>(nx_ex * ny_ex * nz_ex);
+        // Use persistent buffers
+        cuDoubleComplex* d_dpsi_z   = (cuDoubleComplex*)s->d_mgga_dpsi_z_;
+        cuDoubleComplex* d_vtdpsi_z = (cuDoubleComplex*)s->d_mgga_vtdpsi_z_;
+        cuDoubleComplex* d_div_z    = (cuDoubleComplex*)s->d_mgga_div_z_;
+        cuDoubleComplex* d_vt_ex_z  = (cuDoubleComplex*)s->d_mgga_vt_ex_z_;
 
         for (int n = 0; n < ncol; n++) {
             const cuDoubleComplex* d_psi_n = d_psi + (size_t)n * Nd;
@@ -1199,8 +1192,6 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
             // Hpsi -= 0.5 * div
             mgga_ham_sub_z_kernel<<<gs, bs>>>(d_Hpsi_n, d_div_z, Nd);
         }
-
-        sp.restore(sp_cp);
     }
 }
 
@@ -2033,14 +2024,27 @@ double GPUSCFRunner::run(
     CUDA_CHECK(cudaMallocAsync(&d_pseudocharge_, Nd_ * sizeof(double), 0));
     CUDA_CHECK(cudaMemcpy(d_pseudocharge_, rho_b, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
 
-    // Allocate mGGA tau/vtau buffers
+    // Allocate mGGA tau/vtau buffers and Hamiltonian work buffers
     if (is_mgga_) {
         int tau_size = (Nspin >= 2) ? 2 * Nd_ : Nd_;
         CUDA_CHECK(cudaMallocAsync(&d_tau_, tau_size * sizeof(double), 0));
         CUDA_CHECK(cudaMallocAsync(&d_vtau_, tau_size * sizeof(double), 0));
         CUDA_CHECK(cudaMemset(d_tau_, 0, tau_size * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_vtau_, 0, tau_size * sizeof(double)));
-        d_vtau_active_ = nullptr;  // set per-spin before CheFSI
+        d_vtau_active_ = nullptr;
+        // Persistent Hamiltonian work buffers (avoid scratch pool pressure)
+        int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_, nz_ex = nz_ + 2 * FDn_;
+        int nd_ex = nx_ex * ny_ex * nz_ex;
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_div_, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_, nd_ex * sizeof(double), 0));
+        if (is_kpt) {
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_div_z_, Nd_ * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_z_, nd_ex * sizeof(cuDoubleComplex), 0));
+        }
     }
 
     // Allocate mixer persistent buffer
@@ -3940,6 +3944,14 @@ void GPUSCFRunner::cleanup() {
     if (d_tau_) { cudaFreeAsync(d_tau_, 0); d_tau_ = nullptr; }
     if (d_vtau_) { cudaFreeAsync(d_vtau_, 0); d_vtau_ = nullptr; }
     d_vtau_active_ = nullptr;
+    if (d_mgga_dpsi_) { cudaFreeAsync(d_mgga_dpsi_, 0); d_mgga_dpsi_ = nullptr; }
+    if (d_mgga_vtdpsi_) { cudaFreeAsync(d_mgga_vtdpsi_, 0); d_mgga_vtdpsi_ = nullptr; }
+    if (d_mgga_div_) { cudaFreeAsync(d_mgga_div_, 0); d_mgga_div_ = nullptr; }
+    if (d_mgga_vt_ex_) { cudaFreeAsync(d_mgga_vt_ex_, 0); d_mgga_vt_ex_ = nullptr; }
+    if (d_mgga_dpsi_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_dpsi_z_, 0); d_mgga_dpsi_z_ = nullptr; }
+    if (d_mgga_vtdpsi_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_vtdpsi_z_, 0); d_mgga_vtdpsi_z_ = nullptr; }
+    if (d_mgga_div_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_div_z_, 0); d_mgga_div_z_ = nullptr; }
+    if (d_mgga_vt_ex_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_vt_ex_z_, 0); d_mgga_vt_ex_z_ = nullptr; }
 
     if (s_instance_ == this) s_instance_ = nullptr;
 }
