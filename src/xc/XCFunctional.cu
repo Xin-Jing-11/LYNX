@@ -798,10 +798,10 @@ __global__ void mgga_scan_kernel(
     // ============ Calculate_scanx (exchange) ============
     constexpr double k1 = 0.065;
     constexpr double mu_ak = 10.0 / 81.0;
-    constexpr double b2_x = 0.12090550348328691; // sqrt(5913.0/405000.0)
-    constexpr double b1_x = 0.15668913490814561; // 511.0/13500.0/(2.0*b2_x)
+    double b2_x = sqrt(5913.0 / 405000.0);
+    double b1_x = 511.0 / 13500.0 / (2.0 * b2_x);
     constexpr double b3_x = 0.5;
-    constexpr double b4_x = -0.0057613672245924465; // mu_ak^2/k1 - 1606/18225 - b1_x^2
+    double b4_x = mu_ak * mu_ak / k1 - 1606.0 / 18225.0 - b1_x * b1_x;
     constexpr double hx0 = 1.174;
     constexpr double c1x = 0.667;
     constexpr double c2x = 0.8;
@@ -1031,10 +1031,10 @@ __device__ void scan_exchange_single(
 
     constexpr double k1 = 0.065;
     constexpr double mu_ak = 10.0 / 81.0;
-    constexpr double b2_x = 0.12090550348328691;
-    constexpr double b1_x = 0.15668913490814561;
+    double b2_x = sqrt(5913.0 / 405000.0);
+    double b1_x = 511.0 / 13500.0 / (2.0 * b2_x);
     constexpr double b3_x = 0.5;
-    constexpr double b4_x = -0.0057613672245924465;
+    double b4_x = mu_ak * mu_ak / k1 - 1606.0 / 18225.0 - b1_x * b1_x;
     constexpr double hx0 = 1.174;
     constexpr double c1x = 0.667;
     constexpr double c2x = 0.8;

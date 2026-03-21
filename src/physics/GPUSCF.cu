@@ -1097,21 +1097,23 @@ void GPUSCFRunner::hamiltonian_apply_cb(
         double* d_vtdpsi = sp.alloc<double>(Nd);  // vtau * gradient component
         double* d_div    = sp.alloc<double>(Nd);  // divergence accumulator
 
+        // Allocate separate halo buffer for vtau products (d_x_ex is shared with psi halo)
+        double* d_vt_ex = sp.alloc<double>(nx_ex * ny_ex * (s->nz_ + 2 * s->FDn_));
+
         for (int n = 0; n < ncol; n++) {
             const double* d_psi_n = d_psi + (size_t)n * Nd;
             double* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
 
             CUDA_CHECK(cudaMemset(d_div, 0, Nd * sizeof(double)));
 
-            // Halo exchange psi column
-            gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-
-            // For each direction: gradient -> multiply by vtau -> halo -> gradient -> accumulate divergence
+            // For each direction: halo(psi) -> gradient -> multiply by vtau -> halo(product) -> gradient -> accumulate
             for (int dir = 0; dir < 3; dir++) {
+                // Halo exchange psi (fresh each direction to avoid buffer conflicts)
+                gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
                 gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
                 vtau_multiply_kernel<<<gs, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd);
-                gpu::halo_exchange_gpu(d_vtdpsi, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                gpu::gradient_gpu(d_vt_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
                 // Accumulate: div += d2(vtau * dpsi)/ddir^2
                 double one = 1.0;
                 cublasDaxpy(ctx.cublas, Nd, &one, d_dpsi, 1, d_div, 1);
@@ -1171,6 +1173,8 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
         cuDoubleComplex* d_dpsi_z   = sp.alloc<cuDoubleComplex>(Nd);
         cuDoubleComplex* d_vtdpsi_z = sp.alloc<cuDoubleComplex>(Nd);
         cuDoubleComplex* d_div_z    = sp.alloc<cuDoubleComplex>(Nd);
+        int nz_ex = s->nz_ + 2 * s->FDn_;
+        cuDoubleComplex* d_vt_ex_z  = sp.alloc<cuDoubleComplex>(nx_ex * ny_ex * nz_ex);
 
         for (int n = 0; n < ncol; n++) {
             const cuDoubleComplex* d_psi_n = d_psi + (size_t)n * Nd;
@@ -1178,16 +1182,15 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
 
             CUDA_CHECK(cudaMemset(d_div_z, 0, Nd * sizeof(cuDoubleComplex)));
 
-            // Halo exchange psi column (complex with Bloch phases)
-            gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
-                                     true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
-
             for (int dir = 0; dir < 3; dir++) {
-                gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
-                gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                // Halo exchange psi (fresh each direction)
+                gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
                                          true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
                 gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
+                gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                gpu::gradient_z_gpu(d_vt_ex_z, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
                 // Accumulate: div += d2(vtau * dpsi)/ddir^2
                 cuDoubleComplex one = {1.0, 0.0};
                 cublasZaxpy(ctx.cublas, Nd, &one, d_dpsi_z, 1, d_div_z, 1);
