@@ -167,8 +167,24 @@ private:
     // XC type and NLCC flag
     bool has_nlcc_ = false;
     bool is_gga_ = false;
+    bool is_mgga_ = false;
     bool is_orth_ = true;
     bool has_mixed_deriv_ = false;  // non-orth mixed derivative terms
+
+    // mGGA (SCAN) device buffers and state
+    double* d_tau_ = nullptr;       // [Nd] or [2*Nd] for spin
+    double* d_vtau_ = nullptr;      // [Nd] or [2*Nd] for spin
+    double* d_vtau_active_ = nullptr;  // points to d_vtau_ or d_vtau_ + Nd_ for per-spin Hamiltonian
+    // Persistent mGGA Hamiltonian work buffers (avoid scratch pool pressure for k-point)
+    double* d_mgga_dpsi_ = nullptr;    // [Nd] gradient of psi (real)
+    double* d_mgga_vtdpsi_ = nullptr;  // [Nd] vtau * gradient
+    double* d_mgga_div_ = nullptr;     // [Nd] divergence accumulator
+    double* d_mgga_vt_ex_ = nullptr;   // [nd_ex] halo of vtau product (real)
+    void* d_mgga_dpsi_z_ = nullptr;    // [Nd] complex gradient
+    void* d_mgga_vtdpsi_z_ = nullptr;  // [Nd] complex vtau product
+    void* d_mgga_div_z_ = nullptr;     // [Nd] complex divergence
+    void* d_mgga_vt_ex_z_ = nullptr;   // [nd_ex] complex halo
+    bool tau_valid_ = false;        // set true after first tau computation
 
     // Spin/k-point parameters
     int Nspin_ = 1;
@@ -178,6 +194,10 @@ private:
     int kpt_start_ = 0;
     const KPoints* kpoints_ = nullptr;
     double* d_Y_s1_ = nullptr;  // separate d_Y for spin-down (when Nspin=2)
+
+    // Per-k-point complex psi on GPU (stays on device; no CPU round-trip)
+    // Layout: d_psi_z_kpt_[s * Nkpts + k], each is (Nd, Nband) cuDoubleComplex
+    std::vector<void*> d_psi_z_kpt_;
 
     // K-point Bloch phase state (set per k-point in inner loop)
     double kxLx_ = 0, kyLy_ = 0, kzLz_ = 0;

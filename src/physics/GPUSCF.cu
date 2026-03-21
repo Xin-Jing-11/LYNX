@@ -98,6 +98,12 @@ void gradient_gpu(
     int nx_ex, int ny_ex,
     int direction, int ncol);
 
+void gradient_z_gpu(
+    const cuDoubleComplex* d_x_ex, cuDoubleComplex* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    int direction, int ncol);
+
 void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
                   double* d_exc, double* d_vxc, double* d_v2xc, int N);
 
@@ -226,6 +232,17 @@ void lda_pw_spin_gpu(const double* d_rho_up, const double* d_rho_dn,
                       double* d_exc, double* d_vxc_up, double* d_vxc_dn, int N);
 void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
                        double* d_exc, double* d_vxc, double* d_v2xc, int N);
+
+// SCAN metaGGA
+void mgga_scan_gpu(const double* d_rho, const double* d_sigma, const double* d_tau,
+                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N);
+void mgga_scan_spin_gpu(
+    const double* d_rho_up, const double* d_rho_dn,
+    const double* d_sigma_uu, const double* d_sigma_dd, const double* d_sigma_tot,
+    const double* d_tau_up, const double* d_tau_dn,
+    double* d_exc, double* d_vxc_up, double* d_vxc_dn,
+    double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
+    double* d_vtau_up, double* d_vtau_dn, int N);
 
 // SOC operators
 void spinor_offdiag_veff_gpu(
@@ -378,6 +395,83 @@ __global__ void divergence_sub_kernel(
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N) Vxc[i] -= DDrho[i];
+}
+
+// mGGA tau accumulation kernel (real, gamma-point)
+// tau[i] += weight * (dpsi_x[i]^2 + dpsi_y[i]^2 + dpsi_z[i]^2)
+__global__ void tau_accumulate_kernel(
+    const double* __restrict__ dpsi_x,
+    const double* __restrict__ dpsi_y,
+    const double* __restrict__ dpsi_z,
+    double* __restrict__ tau,
+    double weight, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    tau[i] += weight * (dpsi_x[i]*dpsi_x[i] + dpsi_y[i]*dpsi_y[i] + dpsi_z[i]*dpsi_z[i]);
+}
+
+// mGGA tau accumulation kernel (complex, k-point)
+__global__ void tau_accumulate_z_kernel(
+    const cuDoubleComplex* __restrict__ dpsi_x,
+    const cuDoubleComplex* __restrict__ dpsi_y,
+    const cuDoubleComplex* __restrict__ dpsi_z,
+    double* __restrict__ tau,
+    double weight, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double dx2 = dpsi_x[i].x*dpsi_x[i].x + dpsi_x[i].y*dpsi_x[i].y;
+    double dy2 = dpsi_y[i].x*dpsi_y[i].x + dpsi_y[i].y*dpsi_y[i].y;
+    double dz2 = dpsi_z[i].x*dpsi_z[i].x + dpsi_z[i].y*dpsi_z[i].y;
+    tau[i] += weight * (dx2 + dy2 + dz2);
+}
+
+// mGGA Hamiltonian: multiply gradient component by vtau (real)
+// out[i] = vtau[i] * dpsi[i]
+__global__ void vtau_multiply_kernel(
+    const double* __restrict__ dpsi,
+    const double* __restrict__ vtau,
+    double* __restrict__ out, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) out[i] = vtau[i] * dpsi[i];
+}
+
+// mGGA Hamiltonian: multiply gradient component by vtau (complex)
+// out[i] = vtau[i] * dpsi[i]  (real vtau * complex dpsi)
+__global__ void vtau_multiply_z_kernel(
+    const cuDoubleComplex* __restrict__ dpsi,
+    const double* __restrict__ vtau,
+    cuDoubleComplex* __restrict__ out, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        out[i].x = vtau[i] * dpsi[i].x;
+        out[i].y = vtau[i] * dpsi[i].y;
+    }
+}
+
+// mGGA Hamiltonian: subtract 0.5 * divergence from Hpsi (real)
+// Hpsi[i] -= 0.5 * div[i]
+__global__ void mgga_ham_sub_kernel(
+    double* __restrict__ Hpsi,
+    const double* __restrict__ div, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) Hpsi[i] -= 0.5 * div[i];
+}
+
+// mGGA Hamiltonian: subtract 0.5 * divergence from Hpsi (complex)
+__global__ void mgga_ham_sub_z_kernel(
+    cuDoubleComplex* __restrict__ Hpsi,
+    const cuDoubleComplex* __restrict__ div, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        Hpsi[i].x -= 0.5 * div[i].x;
+        Hpsi[i].y -= 0.5 * div[i].y;
+    }
 }
 
 // f[i] = scale * r[i]
@@ -988,6 +1082,44 @@ void GPUSCFRunner::hamiltonian_apply_cb(
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
     }
+
+    // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * grad(psi))
+    if (s->d_vtau_active_) {
+        auto& ctx = gpu::GPUContext::instance();
+        int Nd = s->Nd_;
+        int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
+        int bs = 256;
+        int gs = gpu::ceildiv(Nd, bs);
+
+        // Use persistent buffers (not scratch pool) to avoid memory pressure
+        double* d_dpsi   = s->d_mgga_dpsi_;
+        double* d_vtdpsi = s->d_mgga_vtdpsi_;
+        double* d_div    = s->d_mgga_div_;
+        double* d_vt_ex  = s->d_mgga_vt_ex_;
+
+        for (int n = 0; n < ncol; n++) {
+            const double* d_psi_n = d_psi + (size_t)n * Nd;
+            double* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
+
+            CUDA_CHECK(cudaMemset(d_div, 0, Nd * sizeof(double)));
+
+            // For each direction: halo(psi) -> gradient -> multiply by vtau -> halo(product) -> gradient -> accumulate
+            for (int dir = 0; dir < 3; dir++) {
+                // Halo exchange psi (fresh each direction to avoid buffer conflicts)
+                gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                vtau_multiply_kernel<<<gs, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd);
+                gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                gpu::gradient_gpu(d_vt_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                // Accumulate: div += d2(vtau * dpsi)/ddir^2
+                double one = 1.0;
+                cublasDaxpy(ctx.cublas, Nd, &one, d_dpsi, 1, d_div, 1);
+            }
+
+            // Hpsi -= 0.5 * div
+            mgga_ham_sub_kernel<<<gs, bs>>>(d_Hpsi_n, d_div, Nd);
+        }
+    }
 }
 
 // ============================================================
@@ -1021,6 +1153,45 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
             s->Nd_, ncol, s->dV_,
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+    }
+
+    // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * grad(psi))
+    if (s->d_vtau_active_) {
+        auto& ctx = gpu::GPUContext::instance();
+        int Nd = s->Nd_;
+        int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
+        int bs = 256;
+        int gs = gpu::ceildiv(Nd, bs);
+
+        // Use persistent buffers
+        cuDoubleComplex* d_dpsi_z   = (cuDoubleComplex*)s->d_mgga_dpsi_z_;
+        cuDoubleComplex* d_vtdpsi_z = (cuDoubleComplex*)s->d_mgga_vtdpsi_z_;
+        cuDoubleComplex* d_div_z    = (cuDoubleComplex*)s->d_mgga_div_z_;
+        cuDoubleComplex* d_vt_ex_z  = (cuDoubleComplex*)s->d_mgga_vt_ex_z_;
+
+        for (int n = 0; n < ncol; n++) {
+            const cuDoubleComplex* d_psi_n = d_psi + (size_t)n * Nd;
+            cuDoubleComplex* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
+
+            CUDA_CHECK(cudaMemset(d_div_z, 0, Nd * sizeof(cuDoubleComplex)));
+
+            for (int dir = 0; dir < 3; dir++) {
+                // Halo exchange psi (fresh each direction)
+                gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
+                gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                gpu::gradient_z_gpu(d_vt_ex_z, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                // Accumulate: div += d2(vtau * dpsi)/ddir^2
+                cuDoubleComplex one = {1.0, 0.0};
+                cublasZaxpy(ctx.cublas, Nd, &one, d_dpsi_z, 1, d_div_z, 1);
+            }
+
+            // Hpsi -= 0.5 * div
+            mgga_ham_sub_z_kernel<<<gs, bs>>>(d_Hpsi_n, d_div_z, Nd);
+        }
     }
 }
 
@@ -1266,8 +1437,8 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
     int grid_sz = gpu::ceildiv(Nd, bs);
     int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
 
-    if (is_gga_) {
-        // GGA path (PBE)
+    if (is_mgga_ || is_gga_) {
+        // GGA / mGGA path (shared gradient + sigma pipeline)
         double* d_Drho_x = ctx.buf.grad_rho;
         double* d_Drho_y = ctx.buf.grad_rho + Nd;
         double* d_Drho_z = ctx.buf.grad_rho + 2 * Nd;
@@ -1293,8 +1464,42 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         // sigma = |nabla rho|^2
         sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
-        // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
-        gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        if (is_mgga_ && tau_valid_) {
+            // SCAN mGGA kernel: (rho_xc, sigma, tau) -> (exc, Vxc, v2xc, vtau)
+            gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
+        } else {
+            // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
+            // Also used for first mGGA iteration before tau is computed (matching CPU PBE-first logic)
+            gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        }
+
+        // Dump pre-divergence XC data for GPU vs CPU kernel comparison
+        static int scan_dump_count = 0;
+        if (is_mgga_ && tau_valid_ && scan_dump_count == 0) {
+            scan_dump_count++;
+            CUDA_CHECK(cudaDeviceSynchronize());
+            std::vector<double> h_rho(Nd), h_sig(Nd), h_tau(Nd), h_exc(Nd), h_vxc(Nd), h_v2xc(Nd), h_vtau(Nd);
+            CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho_xc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_sig.data(), d_sigma, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_tau.data(), d_tau_, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_exc.data(), d_exc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_vxc.data(), d_Vxc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_v2xc.data(), d_v2xc, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_vtau.data(), d_vtau_, Nd*sizeof(double), cudaMemcpyDeviceToHost));
+            FILE* fp = fopen("/tmp/gpu_scan_kernel_dump.bin", "wb");
+            if (fp) {
+                fwrite(&Nd, sizeof(int), 1, fp);
+                fwrite(h_rho.data(), sizeof(double), Nd, fp);
+                fwrite(h_sig.data(), sizeof(double), Nd, fp);
+                fwrite(h_tau.data(), sizeof(double), Nd, fp);
+                fwrite(h_exc.data(), sizeof(double), Nd, fp);
+                fwrite(h_vxc.data(), sizeof(double), Nd, fp);
+                fwrite(h_v2xc.data(), sizeof(double), Nd, fp);
+                fwrite(h_vtau.data(), sizeof(double), Nd, fp);
+                fclose(fp);
+                printf("GPU_SCAN_KERNEL: dumped %d points (rho,sigma,tau,exc,vxc,v2xc,vtau)\n", Nd);
+            }
+        }
 
         // Divergence correction: Vxc += -div(v2xc * nabla rho)
         // Scale gradients by v2xc (in place)
@@ -1347,8 +1552,8 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
     double* d_rho_up = d_rho;
     double* d_rho_dn = d_rho + Nd;
 
-    if (is_gga_) {
-        // Spin GGA path
+    if (is_mgga_ || is_gga_) {
+        // Spin GGA / mGGA path
         // Need workspace for rho_xc[3*Nd], sigma[3*Nd], Drho_x/y/z[3*Nd], v2xc[3*Nd]
         auto& sp = ctx.scratch_pool;
         size_t sp_cp = sp.checkpoint();
@@ -1384,8 +1589,21 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         int grid3 = gpu::ceildiv(3 * Nd, bs);
         sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
 
-        // Fused spin PBE kernel: (rho_xc[3*Nd], sigma[3*Nd]) -> (exc, Vxc[2*Nd], v2xc[3*Nd])
-        gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        if (is_mgga_ && tau_valid_) {
+            // SCAN spin mGGA kernel
+            // sigma layout: [total|up|dn], rho_xc: [total|up|dn]
+            // d_tau_: [up(Nd)|dn(Nd)], d_vtau_: [up(Nd)|dn(Nd)]
+            gpu::mgga_scan_spin_gpu(
+                d_rho_xc + Nd, d_rho_xc + 2 * Nd,          // rho_up, rho_dn
+                d_sigma + Nd, d_sigma + 2 * Nd, d_sigma,    // sigma_uu, sigma_dd, sigma_tot
+                d_tau_, d_tau_ + Nd,                         // tau_up, tau_dn
+                d_exc, d_Vxc, d_Vxc + Nd,                   // exc, vxc_up, vxc_dn
+                d_v2xc, d_v2xc + Nd, d_v2xc + 2 * Nd,      // v2xc_c, v2xc_x_up, v2xc_x_dn
+                d_vtau_, d_vtau_ + Nd, Nd);                  // vtau_up, vtau_dn
+        } else {
+            // Fused spin PBE kernel: (rho_xc[3*Nd], sigma[3*Nd]) -> (exc, Vxc[2*Nd], v2xc[3*Nd])
+            gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        }
 
         // Divergence correction for 3 columns
         // Scale: Drho_dir[col] *= v2xc[col]
@@ -1727,6 +1945,10 @@ double GPUSCFRunner::run(
     Nd_ = domain.Nd_d();
     dV_ = grid.dV();
     is_gga_ = is_gga;
+    is_mgga_ = (xc_type == XCType::MGGA_SCAN);
+    tau_valid_ = false;
+    // For mGGA, also set GGA flag since gradient pipeline is shared
+    if (is_mgga_) is_gga_ = true;
     is_orth_ = grid.lattice().is_orthogonal();
     has_mixed_deriv_ = !is_orth_;  // non-orth has xy/xz/yz mixed derivatives
     has_nlcc_ = (rho_core != nullptr);
@@ -1802,6 +2024,29 @@ double GPUSCFRunner::run(
     CUDA_CHECK(cudaMallocAsync(&d_pseudocharge_, Nd_ * sizeof(double), 0));
     CUDA_CHECK(cudaMemcpy(d_pseudocharge_, rho_b, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
 
+    // Allocate mGGA tau/vtau buffers and Hamiltonian work buffers
+    if (is_mgga_) {
+        int tau_size = (Nspin >= 2) ? 2 * Nd_ : Nd_;
+        CUDA_CHECK(cudaMallocAsync(&d_tau_, tau_size * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_vtau_, tau_size * sizeof(double), 0));
+        CUDA_CHECK(cudaMemset(d_tau_, 0, tau_size * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_vtau_, 0, tau_size * sizeof(double)));
+        d_vtau_active_ = nullptr;
+        // Persistent Hamiltonian work buffers (avoid scratch pool pressure)
+        int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_, nz_ex = nz_ + 2 * FDn_;
+        int nd_ex = nx_ex * ny_ex * nz_ex;
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_div_, Nd_ * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_, nd_ex * sizeof(double), 0));
+        if (is_kpt) {
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_div_z_, Nd_ * sizeof(cuDoubleComplex), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_z_, nd_ex * sizeof(cuDoubleComplex), 0));
+        }
+    }
+
     // Allocate mixer persistent buffer
     int mix_N = has_soc_ ? Nd_ * 4 : Nd_ * ((Nspin >= 2) ? 2 : 1);
     CUDA_CHECK(cudaMallocAsync(&d_mix_fkm1_, mix_N * sizeof(double), 0));
@@ -1866,6 +2111,16 @@ double GPUSCFRunner::run(
     if (is_kpt_ && gpu_vnl_.total_phys_nproj > 0) {
         CUDA_CHECK(cudaMallocAsync(&d_alpha_z_,
             (size_t)gpu_vnl_.total_phys_nproj * Nband * sizeof(cuDoubleComplex), 0));
+    }
+
+    // Allocate per-k-point psi buffers on GPU (psi stays on device; no CPU round-trip)
+    if (is_kpt_) {
+        int total_kpt_bufs = Nspin_local_ * Nkpts;
+        d_psi_z_kpt_.resize(total_kpt_bufs, nullptr);
+        size_t psi_kpt_bytes = (size_t)Nd_ * Nband * sizeof(cuDoubleComplex);
+        for (int i = 0; i < total_kpt_bufs; i++) {
+            CUDA_CHECK(cudaMallocAsync(&d_psi_z_kpt_[i], psi_kpt_bytes, 0));
+        }
     }
 
     // Allocate d_Y_s1_ if spin-polarized (non-SOC)
@@ -1941,10 +2196,12 @@ double GPUSCFRunner::run(
         std::vector<double> h_Vxc(vxc_size), h_exc(Nd_), h_phi(Nd_), h_Veff(veff_size);
 
         // XC on CPU — initial only
+        // For mGGA SCAN, use PBE for initial Veff (no tau yet, matching SPARC)
         {
             Gradient gradient_cpu(stencil, domain);
             XCFunctional xcfunc;
-            xcfunc.setup(xc_type, domain, grid, &gradient_cpu, &halo);
+            XCType init_xc = is_mgga_ ? XCType::GGA_PBE : xc_type;
+            xcfunc.setup(init_xc, domain, grid, &gradient_cpu, &halo);
 
             if (Nspin == 2 && rho_up_init && rho_dn_init) {
                 // Spin-polarized: build rho_xc = [total | up | down]
@@ -2440,8 +2697,15 @@ double GPUSCFRunner::run(
                 int s_glob = spin_start_ + s;
                 double* d_Veff_s = d_Veff + s_glob * Nd_;
 
+                // Set vtau for mGGA Hamiltonian (per-spin)
+                if (is_mgga_ && tau_valid_) {
+                    d_vtau_active_ = d_vtau_ + s_glob * Nd_;
+                } else {
+                    d_vtau_active_ = nullptr;
+                }
+
                 if (is_kpt_) {
-                    // Complex k-point path
+                    // Complex k-point path — psi stays on GPU in per-k buffers
                     for (int k = 0; k < Nkpts; k++) {
                         int k_glob = kpt_start_ + k;
                         Vec3 kpt = kpoints_->kpts_cart()[k_glob];
@@ -2452,19 +2716,19 @@ double GPUSCFRunner::run(
                         kzLz_ = kpt.z * cell_lengths.z;
                         setup_bloch_factors(nloc_influence, crystal, kpt);
 
-                        // Upload complex psi from CPU if first pass of first iter
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+
+                        // Randomize and upload only on very first pass
                         if (scf_iter == 0 && pass == 0) {
                             wfn.randomize_kpt(s, k, 42 + s * Nkpts + k);
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            auto* psi_c = wfn.psi_kpt(s, k).data();
-                            // cuDoubleComplex layout matches std::complex<double>
-                            std::memcpy(h_psi_z.data(), psi_c, 2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                            size_t psi_bytes = 2 * (size_t)Nd_ * Nband * sizeof(double);
+                            CUDA_CHECK(cudaMemcpy(d_psi_sk, wfn.psi_kpt(s, k).data(),
+                                                   psi_bytes, cudaMemcpyHostToDevice));
                         }
 
                         gpu::eigensolver_solve_z_gpu(
-                            d_psi_z, d_eigvals_arr[s_glob], d_Veff_s,
+                            d_psi_sk, d_eigvals_arr[s_glob], d_Veff_s,
                             reinterpret_cast<cuDoubleComplex*>(d_Y_arr[s_glob]),
                             d_Xold_z, d_Xnew_z,
                             d_Hpsi_z, d_x_ex_z,
@@ -2474,22 +2738,12 @@ double GPUSCFRunner::run(
                             cheb_degree, dV_,
                             hamiltonian_apply_z_cb);
 
-                        // Download eigenvalues + complex psi back to CPU wfn
+                        // Download eigenvalues only (tiny; needed for occupations on CPU)
                         CUDA_CHECK(cudaDeviceSynchronize());
-                        {
-                            // Store eigenvalues per (s, k)
-                            CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals_arr[s_glob],
-                                                   Nband * sizeof(double), cudaMemcpyDeviceToHost));
-                            for (int n = 0; n < Nband; n++)
-                                wfn.eigenvalues(s, k)(n) = h_eigvals[n];
-                        }
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            CUDA_CHECK(cudaMemcpy(h_psi_z.data(), d_psi_z,
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost));
-                            std::memcpy(wfn.psi_kpt(s, k).data(), h_psi_z.data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                        }
+                        CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals_arr[s_glob],
+                                               Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                        for (int n = 0; n < Nband; n++)
+                            wfn.eigenvalues(s, k)(n) = h_eigvals[n];
                     }
                 } else {
                     // Real gamma-point path
@@ -2633,14 +2887,14 @@ double GPUSCFRunner::run(
                 if (is_kpt_) {
                     for (int k = 0; k < Nkpts; k++) {
                         double wk = kpt_weights[k];
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
-                        }
-                        gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+                        // Per-k-point occupations for spin-polarized
+                        for (int n = 0; n < Nband; n++)
+                            h_occ[n] = wfn.occupations(s, k)(n);
+                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                                               Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
                                                    d_rho_spin_target, Nd_, Nband, occfac * wk);
                     }
                 } else {
@@ -2658,14 +2912,14 @@ double GPUSCFRunner::run(
                 if (is_kpt_) {
                     for (int k = 0; k < Nkpts; k++) {
                         double wk = kpt_weights[k];
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
-                        }
-                        gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+                        // Per-k-point occupations (different k-points can differ near Ef)
+                        for (int n = 0; n < Nband; n++)
+                            h_occ[n] = wfn.occupations(s, k)(n);
+                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                                               Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
                                                    d_rho_new_total, Nd_, Nband, occfac * wk);
                     }
                 } else {
@@ -2675,6 +2929,103 @@ double GPUSCFRunner::run(
             }
         }
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        // Step 2b: Compute tau for mGGA (after density, before energy)
+        if (is_mgga_) {
+            int tau_size = (Nspin >= 2) ? 2 * Nd_ : Nd_;
+            CUDA_CHECK(cudaMemset(d_tau_, 0, tau_size * sizeof(double)));
+
+            int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
+            int bs_tau = 256;
+            int gs_tau = gpu::ceildiv(Nd_, bs_tau);
+
+            auto& sp_tau = ctx.scratch_pool;
+            size_t sp_tau_cp = sp_tau.checkpoint();
+
+            if (is_kpt_) {
+                // Complex k-point tau computation
+                cuDoubleComplex* d_dpsi_x_z = sp_tau.alloc<cuDoubleComplex>(Nd_);
+                cuDoubleComplex* d_dpsi_y_z = sp_tau.alloc<cuDoubleComplex>(Nd_);
+                cuDoubleComplex* d_dpsi_z_z = sp_tau.alloc<cuDoubleComplex>(Nd_);
+
+                for (int s = 0; s < Nspin_local_; s++) {
+                    int s_glob = spin_start_ + s;
+                    double* d_tau_s = d_tau_ + s_glob * Nd_;
+
+                    for (int k = 0; k < Nkpts; k++) {
+                        double wk = kpt_weights[k];
+                        int k_glob = kpt_start_ + k;
+                        Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+                        double kxLx = kpt.x * cell_lengths.x;
+                        double kyLy = kpt.y * cell_lengths.y;
+                        double kzLz = kpt.z * cell_lengths.z;
+
+                        // Psi stays on GPU in per-k buffer
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+
+                        for (int n = 0; n < Nband; n++) {
+                            double occ_n = wfn.occupations(s, k)(n);
+                            if (occ_n < 1e-16) continue;
+                            double weight = occ_n * wk;
+
+                            const cuDoubleComplex* d_psi_n = d_psi_sk + (size_t)n * Nd_;
+                            // Use x_ex_z (allocated for Nd_ex*Ns complex entries),
+                            // NOT aar_x_ex (only Nd_ex doubles — half the needed size)
+                            cuDoubleComplex* d_xex_z = static_cast<cuDoubleComplex*>(ctx.buf.x_ex_z);
+                            gpu::halo_exchange_z_gpu(d_psi_n, d_xex_z,
+                                nx_, ny_, nz_, FDn_, 1, true, true, true,
+                                kxLx, kyLy, kzLz);
+                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_x_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
+                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_y_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
+                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_z_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+                            tau_accumulate_z_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
+                                                                        d_tau_s, weight, Nd_);
+                        }
+                    }
+                }
+                sp_tau.restore(sp_tau_cp);
+            } else {
+                // Real gamma-point tau computation
+                double* d_dpsi_x = sp_tau.alloc<double>(Nd_);
+                double* d_dpsi_y = sp_tau.alloc<double>(Nd_);
+                double* d_dpsi_z = sp_tau.alloc<double>(Nd_);
+
+                for (int s = 0; s < Nspin_local_; s++) {
+                    int s_glob = spin_start_ + s;
+                    double* d_tau_s = d_tau_ + s_glob * Nd_;
+
+                    for (int n = 0; n < Nband; n++) {
+                        double occ_n = wfn.occupations(s, 0)(n);
+                        if (occ_n < 1e-16) continue;
+                        double weight = occ_n;  // gamma: wk=1, no spin_fac for tau
+
+                        const double* d_psi_n = d_psi_arr[s_glob] + (size_t)n * Nd_;
+                        gpu::halo_exchange_gpu(d_psi_n, ctx.buf.aar_x_ex,
+                            nx_, ny_, nz_, FDn_, 1, true, true, true);
+                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_x, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
+                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
+                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+                        tau_accumulate_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
+                                                                   d_tau_s, weight, Nd_);
+                    }
+                }
+                sp_tau.restore(sp_tau_cp);
+            }
+
+            tau_valid_ = true;
+            CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Debug: dump tau at first computation
+            if (scf_iter == 0) {
+                std::vector<double> h_tau_dbg(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_tau_dbg.data(), d_tau_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                double tau_sum = 0;
+                for (int i = 0; i < Nd_; i++) tau_sum += h_tau_dbg[i];
+                printf("GPU_TAU iter1: sum=%.10e sum*dV=%.10e tau[0]=%.10e tau[100]=%.10e\n",
+                       tau_sum, tau_sum * dV_, h_tau_dbg[0], h_tau_dbg[100]);
+            }
+        }
 
         // Step 3: Compute energy (D2H for energy components)
         {
@@ -2733,6 +3084,20 @@ double GPUSCFRunner::run(
                 std::memcpy(dens_in.rho(0).data(), h_rho_in.data(), Nd_ * sizeof(double));
             }
 
+            // Download tau/vtau for mGGA energy double-counting correction
+            const double* h_tau_ptr = nullptr;
+            const double* h_vtau_ptr = nullptr;
+            std::vector<double> h_tau_e, h_vtau_e;
+            if (is_mgga_ && tau_valid_) {
+                int tau_size = Nspin_energy * Nd_;
+                h_tau_e.resize(tau_size);
+                h_vtau_e.resize(tau_size);
+                CUDA_CHECK(cudaMemcpy(h_tau_e.data(), d_tau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_vtau_e.data(), d_vtau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost));
+                h_tau_ptr = h_tau_e.data();
+                h_vtau_ptr = h_vtau_e.data();
+            }
+
             energy_ = Energy::compute_all(
                 wfn, dens_in, h_Veff_e.data(), h_phi_e.data(),
                 h_exc_e.data(), h_Vxc_e.data(), rho_b,
@@ -2740,7 +3105,8 @@ double GPUSCFRunner::run(
                 params.smearing,
                 kpt_weights, Nd_, dV_,
                 has_nlcc_ ? h_rho_core_vec.data() : nullptr, Ef_prev_, kpt_start_,
-                nullptr, nullptr, Nspin_energy);
+                nullptr, nullptr, Nspin_energy, nullptr,
+                h_tau_ptr, h_vtau_ptr);
 
             // SCF error: ||rho_out_total - rho_in_total|| / ||rho_out_total||
             std::vector<double> h_rho_new(Nd_);
@@ -2936,6 +3302,44 @@ double GPUSCFRunner::run(
                 gpu_xc_evaluate(d_rho, d_exc, d_Vxc, Nd_);
             }
 
+            // Debug: dump XC outputs at iter 2
+            if (scf_iter == 1) {
+                std::vector<double> h_exc(Nd_), h_vxc(Nd_), h_tau(Nd_), h_vtau(Nd_), h_rho(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_exc.data(), d_exc, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_vxc.data(), d_Vxc, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                if (d_tau_) CUDA_CHECK(cudaMemcpy(h_tau.data(), d_tau_, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                if (d_vtau_) CUDA_CHECK(cudaMemcpy(h_vtau.data(), d_vtau_, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                double exc_sum = 0, vxc_sum = 0, tau_sum = 0, vtau_sum = 0, rho_sum = 0;
+                for (int i = 0; i < Nd_; i++) {
+                    exc_sum += h_exc[i]; vxc_sum += h_vxc[i]; rho_sum += h_rho[i];
+                    tau_sum += h_tau[i]; vtau_sum += h_vtau[i];
+                }
+                printf("GPU_XC iter2: tau_valid=%d exc_sum=%.10e vxc_sum=%.10e rho_sum=%.10e\n",
+                       (int)tau_valid_, exc_sum, vxc_sum, rho_sum);
+                printf("GPU_XC iter2: tau_sum=%.10e vtau_sum=%.10e tau[0]=%.10e vtau[0]=%.10e\n",
+                       tau_sum, vtau_sum, h_tau[0], h_vtau[0]);
+                printf("GPU_XC iter2: exc[0]=%.10e vxc[0]=%.10e rho[0]=%.10e\n",
+                       h_exc[0], h_vxc[0], h_rho[0]);
+                // Dump GPU XC inputs to binary for offline comparison with CPU
+                {
+                    std::vector<double> h_sigma(Nd_);
+                    CUDA_CHECK(cudaMemcpy(h_sigma.data(), ctx.buf.aar_r, Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+                    FILE* fp = fopen("/tmp/gpu_xc_dump.bin", "wb");
+                    if (fp) {
+                        fwrite(&Nd_, sizeof(int), 1, fp);
+                        fwrite(h_rho.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_sigma.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_tau.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_exc.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_vxc.data(), sizeof(double), Nd_, fp);
+                        fwrite(h_vtau.data(), sizeof(double), Nd_, fp);
+                        fclose(fp);
+                        printf("GPU_XC: dumped %d points to /tmp/gpu_xc_dump.bin\n", Nd_);
+                    }
+                }
+            }
+
             // Non-SOC Poisson
             if (Nspin >= 2) {
                 int bs = 256;
@@ -3037,7 +3441,18 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
                 std::memcpy(wfn.psi(s, 0).col(j), h_psi.data() + j * Nd_, Nd_ * sizeof(double));
         }
     }
-    // For k-point, complex psi is already downloaded into wfn during SCF loop
+    // Download per-k-point complex psi from GPU to CPU wfn (for forces/stress)
+    if (is_kpt_ && !d_psi_z_kpt_.empty()) {
+        int Nkpts = (int)d_psi_z_kpt_.size() / std::max(Nspin_local_, 1);
+        size_t psi_bytes = 2 * (size_t)Nd_ * Nband * sizeof(double);
+        for (int s = 0; s < Nspin_local_; s++) {
+            for (int k = 0; k < Nkpts; k++) {
+                CUDA_CHECK(cudaMemcpy(wfn.psi_kpt(s, k).data(),
+                                       d_psi_z_kpt_[s * Nkpts + k],
+                                       psi_bytes, cudaMemcpyDeviceToHost));
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -3533,6 +3948,19 @@ void GPUSCFRunner::cleanup() {
     if (d_mix_fkm1_) { cudaFreeAsync(d_mix_fkm1_, 0); d_mix_fkm1_ = nullptr; }
     if (d_bloch_fac_) { cudaFreeAsync(d_bloch_fac_, 0); d_bloch_fac_ = nullptr; }
     if (d_alpha_z_) { cudaFreeAsync(d_alpha_z_, 0); d_alpha_z_ = nullptr; }
+    for (auto& p : d_psi_z_kpt_) { if (p) cudaFreeAsync(p, 0); }
+    d_psi_z_kpt_.clear();
+    if (d_tau_) { cudaFreeAsync(d_tau_, 0); d_tau_ = nullptr; }
+    if (d_vtau_) { cudaFreeAsync(d_vtau_, 0); d_vtau_ = nullptr; }
+    d_vtau_active_ = nullptr;
+    if (d_mgga_dpsi_) { cudaFreeAsync(d_mgga_dpsi_, 0); d_mgga_dpsi_ = nullptr; }
+    if (d_mgga_vtdpsi_) { cudaFreeAsync(d_mgga_vtdpsi_, 0); d_mgga_vtdpsi_ = nullptr; }
+    if (d_mgga_div_) { cudaFreeAsync(d_mgga_div_, 0); d_mgga_div_ = nullptr; }
+    if (d_mgga_vt_ex_) { cudaFreeAsync(d_mgga_vt_ex_, 0); d_mgga_vt_ex_ = nullptr; }
+    if (d_mgga_dpsi_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_dpsi_z_, 0); d_mgga_dpsi_z_ = nullptr; }
+    if (d_mgga_vtdpsi_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_vtdpsi_z_, 0); d_mgga_vtdpsi_z_ = nullptr; }
+    if (d_mgga_div_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_div_z_, 0); d_mgga_div_z_ = nullptr; }
+    if (d_mgga_vt_ex_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_vt_ex_z_, 0); d_mgga_vt_ex_z_ = nullptr; }
 
     if (s_instance_ == this) s_instance_ = nullptr;
 }
