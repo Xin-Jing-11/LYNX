@@ -245,6 +245,21 @@ static DFTResult run_single_point(const std::string& json_file) {
     result.Ef = scf.fermi_energy();
     result.converged = scf.converged();
 
+    // Dump all energy components for debugging
+    int dump_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &dump_rank);
+    if (dump_rank == 0) {
+        std::printf("\n=== Energy Components ===\n");
+        std::printf("  Eband   = %.15e\n", scf.energy().Eband);
+        std::printf("  Exc     = %.15e\n", scf.energy().Exc);
+        std::printf("  Ehart   = %.15e\n", scf.energy().Ehart);
+        std::printf("  Eself   = %.15e\n", scf.energy().Eself);
+        std::printf("  Ec      = %.15e\n", scf.energy().Ec);
+        std::printf("  Entropy = %.15e\n", scf.energy().Entropy);
+        std::printf("  Etotal  = %.15e\n", scf.energy().Etotal);
+        std::printf("  Eself+Ec= %.15e\n", scf.energy().Eself + scf.energy().Ec);
+    }
+
     // Forces
     if (config.print_forces) {
         std::vector<double> kpt_weights = kpoints.normalized_weights();

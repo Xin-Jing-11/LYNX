@@ -24,7 +24,7 @@
   "electronic": {
     "xc": "SCAN",
     "spin": "none",
-    "temperature": 300,
+    "temperature": -1,
     "smearing": "gaussian",
     "Nstates": 15
   },
