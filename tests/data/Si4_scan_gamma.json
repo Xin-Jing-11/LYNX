@@ -1,0 +1,49 @@
+{
+  "lattice": {
+    "vectors": [[10.0, 0, 0], [0, 10.26, 0], [0, 0, 10.5]],
+    "cell_type": "orthogonal"
+  },
+  "grid": {
+    "Nx": 25, "Ny": 26, "Nz": 27,
+    "fd_order": 12,
+    "boundary_conditions": ["periodic", "periodic", "periodic"]
+  },
+  "atoms": [
+    {
+      "element": "Si",
+      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/tests/xc/mgga_tests/Si4_kpt_scan/Si-4-2.4_LDA.psp8",
+      "fractional": true,
+      "coordinates": [
+        [0.00, 0.00, 0.00],
+        [0.25, 0.25, 0.25],
+        [0.50, 0.50, 0.00],
+        [0.75, 0.75, 0.25]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "SCAN",
+    "spin": "none",
+    "temperature": -1,
+    "smearing": "gaussian",
+    "Nstates": 15
+  },
+  "kpoints": {
+    "grid": [1, 1, 1],
+    "shift": [0.0, 0.0, 0.0]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-6,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3,
+    "cheb_degree": 40
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": true,
+    "calc_stress": true
+  }
+}

@@ -102,6 +102,150 @@ void SCF::set_initial_density(const double* rho_init, int Nd_d,
     }
 }
 
+void SCF::compute_tau(const Wavefunction& wfn,
+                       const std::vector<double>& kpt_weights,
+                       int kpt_start, int band_start) {
+    int Nd_d = domain_->Nd_d();
+    int Nband_loc = wfn.Nband();
+    int Nspin_local = wfn.Nspin();
+    int Nkpts = wfn.Nkpts();
+
+    // Zero tau
+    std::memset(tau_.data(), 0, tau_.size() * sizeof(double));
+
+    // NOTE: Do NOT apply spin_fac to tau. Unlike density which is ρ = spin_fac * Σ f_n |ψ|²,
+    // tau is τ = Σ f_n |∇ψ|² (no spin factor). SPARC uses g_nk = occ[n] for tau (no 2x).
+    // The factor of 2 in density accounts for spin degeneracy (2 electrons per orbital),
+    // but tau is the kinetic energy density which doesn't have this doubling.
+
+    // Gradient operator and halo exchange setup
+    int FDn = gradient_->stencil().FDn();
+    int nx = domain_->Nx_d(), ny = domain_->Ny_d(), nz = domain_->Nz_d();
+    int nd_ex = halo_->nx_ex() * halo_->ny_ex() * halo_->nz_ex();
+    bool is_orth = grid_->lattice().is_orthogonal();
+    const Mat3& lapcT = grid_->lattice().lapc_T();
+    Vec3 cell_lengths = grid_->lattice().lengths();
+
+    for (int s = 0; s < Nspin_local; ++s) {
+        int s_glob = spin_start_ + s;
+        double* tau_s = tau_.data() + s_glob * Nd_d;
+
+        for (int k = 0; k < Nkpts; ++k) {
+            const auto& occ = wfn.occupations(s, k);
+            double wk = kpt_weights[kpt_start + k];
+
+            if (wfn.is_complex()) {
+                // k-point (complex) path
+                const auto& psi_c = wfn.psi_kpt(s, k);
+                std::vector<Complex> psi_ex(nd_ex);
+                std::vector<Complex> dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+                Vec3 kpt = kpoints_->kpts_cart()[kpt_start + k];
+
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);
+                    if (fn < 1e-16) continue;
+                    double g_nk = wk * fn;
+
+                    const Complex* col = psi_c.col(n);
+                    halo_->execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
+
+                    gradient_->apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+                    if (is_orth) {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            tau_s[i] += g_nk * (std::norm(dpsi_x[i]) + std::norm(dpsi_y[i]) + std::norm(dpsi_z[i]));
+                        }
+                    } else {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            Complex dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+                            // |∇ψ|² with metric tensor: Re(conj(∇ψ) · lapcT · ∇ψ)
+                            double val = lapcT(0,0) * std::norm(dx) + lapcT(1,1) * std::norm(dy) + lapcT(2,2) * std::norm(dz)
+                                       + 2.0 * lapcT(0,1) * (std::conj(dx) * dy).real()
+                                       + 2.0 * lapcT(0,2) * (std::conj(dx) * dz).real()
+                                       + 2.0 * lapcT(1,2) * (std::conj(dy) * dz).real();
+                            tau_s[i] += g_nk * val;
+                        }
+                    }
+                }
+            } else {
+                // Gamma-point (real) path
+                const auto& psi = wfn.psi(s, k);
+                std::vector<double> psi_ex(nd_ex);
+                std::vector<double> dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);
+                    if (fn < 1e-16) continue;
+                    double g_nk = wk * fn;
+
+                    const double* col = psi.col(n);
+                    halo_->execute(col, psi_ex.data(), 1);
+
+                    gradient_->apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+                    gradient_->apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+                    if (is_orth) {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            tau_s[i] += g_nk * (dpsi_x[i]*dpsi_x[i] + dpsi_y[i]*dpsi_y[i] + dpsi_z[i]*dpsi_z[i]);
+                        }
+                    } else {
+                        for (int i = 0; i < Nd_d; ++i) {
+                            double dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+                            double val = lapcT(0,0)*dx*dx + lapcT(1,1)*dy*dy + lapcT(2,2)*dz*dz
+                                       + 2.0*lapcT(0,1)*dx*dy + 2.0*lapcT(0,2)*dx*dz + 2.0*lapcT(1,2)*dy*dz;
+                            tau_s[i] += g_nk * val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Allreduce over band communicator
+    if (!bandcomm_->is_null() && bandcomm_->size() > 1) {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start_ + s;
+            bandcomm_->allreduce_sum(tau_.data() + s_glob * Nd_d, Nd_d);
+        }
+    }
+
+    // Allreduce over kpt communicator
+    if (!kptcomm_->is_null() && kptcomm_->size() > 1) {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start_ + s;
+            kptcomm_->allreduce_sum(tau_.data() + s_glob * Nd_d, Nd_d);
+        }
+    }
+
+    // Exchange spin channels across spin communicator
+    if (spincomm_ && !spincomm_->is_null() && spincomm_->size() > 1 && Nspin_global_ == 2) {
+        int my_spin = spin_start_;
+        int other_spin = 1 - my_spin;
+        int partner = (spincomm_->rank() == 0) ? 1 : 0;
+        MPI_Sendrecv(tau_.data() + my_spin * Nd_d, Nd_d, MPI_DOUBLE, partner, 0,
+                     tau_.data() + other_spin * Nd_d, Nd_d, MPI_DOUBLE, partner, 0,
+                     spincomm_->comm(), MPI_STATUS_IGNORE);
+    }
+
+    // NOTE: No dV division needed. LYNX wavefunctions satisfy <ψ_m|ψ_n> = Σ_i ψ*_m(i) ψ_n(i) dV = δ_mn.
+    // Density is computed as ρ[i] = Σ_n g_nk |ψ_n(i)|² (no 1/dV) and integrates as Σ ρ*dV = Ne.
+    // Tau follows the same convention: τ[i] = Σ_n g_nk |∇ψ_n(i)|² (no 1/dV).
+    // (SPARC divides BOTH ρ and τ by dV; LYNX divides neither.)
+
+    // For spin-polarized: compute total = up + dn in the third slot
+    if (Nspin_global_ == 2) {
+        double* tau_up = tau_.data();
+        double* tau_dn = tau_.data() + Nd_d;
+        double* tau_tot = tau_.data() + 2 * Nd_d;
+        for (int i = 0; i < Nd_d; ++i) {
+            tau_tot[i] = tau_up[i] + tau_dn[i];
+        }
+    }
+}
+
 void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vloc) {
     int Nd_d = domain_->Nd_d();
 
@@ -110,12 +254,22 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
     XCFunctional xc;
     xc.setup(xc_type_, *domain_, *grid_, gradient_, halo_);
 
-    // Allocate Dxcdgrho_ if GGA
+    // Allocate Dxcdgrho_ if GGA or mGGA
     int dxc_ncol = (Nspin_global_ == 2) ? 3 : 1;  // 3 columns for spin: [v2c, v2x_up, v2x_down]
-    if (xc.is_gga() && Dxcdgrho_.size() == 0) {
+    if ((xc.is_gga() || xc.is_mgga()) && Dxcdgrho_.size() == 0) {
         Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
     }
-    double* dxc_ptr = xc.is_gga() ? Dxcdgrho_.data() : nullptr;
+    double* dxc_ptr = (xc.is_gga() || xc.is_mgga()) ? Dxcdgrho_.data() : nullptr;
+    // For the first Veff (before tau is computed from real wavefunctions),
+    // SPARC uses PBE instead of SCAN (exchangeCorrelation.c line 64-68).
+    // This avoids evaluating SCAN with tau=0 which produces poor potentials.
+    // After the first CheFSI + tau computation, switch to SCAN.
+    if (xc.is_mgga() && !tau_valid_) {
+        // Use PBE for the initial Veff (matching SPARC)
+        xc.setup(XCType::GGA_PBE, *domain_, *grid_, gradient_, halo_);
+    }
+    const double* tau_ptr = (xc.is_mgga() && tau_valid_) ? tau_.data() : nullptr;
+    double* vtau_ptr = (xc.is_mgga() && tau_valid_) ? vtau_.data() : nullptr;
 
     if (Nspin_global_ == 2) {
         // Spin-polarized: build rho_xc array [total | up | down] (3*Nd_d)
@@ -142,7 +296,7 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
             rho_xc[Nd_d + i] = ru;
             rho_xc[2*Nd_d + i] = rd;
         }
-        xc.evaluate_spin(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr);
+        xc.evaluate_spin(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr, tau_ptr, vtau_ptr);
     } else {
         // Non-spin-polarized
         if (rho_core_) {
@@ -152,9 +306,9 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
                 rho_xc[i] = rho[i] + rho_core_[i];
                 if (rho_xc[i] < xc_rhotol) rho_xc[i] = xc_rhotol;
             }
-            xc.evaluate(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr);
+            xc.evaluate(rho_xc.data(), Vxc_.data(), exc_.data(), Nd_d, dxc_ptr, tau_ptr, vtau_ptr);
         } else {
-            xc.evaluate(rho, Vxc_.data(), exc_.data(), Nd_d, dxc_ptr);
+            xc.evaluate(rho, Vxc_.data(), exc_.data(), Nd_d, dxc_ptr, tau_ptr, vtau_ptr);
         }
     }
 
@@ -197,6 +351,12 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
         }
     }
 
+    // 4. Set vtau on Hamiltonian for mGGA (only after tau has been computed)
+    if (xc_type_ == XCType::MGGA_SCAN && tau_valid_) {
+        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data());
+    } else if (xc_type_ == XCType::MGGA_SCAN) {
+        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(nullptr);
+    }
 }
 
 void SCF::compute_Veff_spinor(const ElectronDensity& density,
@@ -401,6 +561,12 @@ double SCF::run(Wavefunction& wfn,
     if (is_soc_) {
         Veff_spinor_ = NDArray<double>(4 * Nd_d);
     }
+    if (xc_type_ == XCType::MGGA_SCAN) {
+        int tau_size = (Nspin_global_ == 2) ? 3 * Nd_d : Nd_d;
+        int vtau_size = (Nspin_global_ == 2) ? 2 * Nd_d : Nd_d;
+        tau_ = NDArray<double>(tau_size);
+        vtau_ = NDArray<double>(vtau_size);
+    }
 
     // Initialize density if not already set
     if (is_soc_) {
@@ -451,10 +617,28 @@ double SCF::run(Wavefunction& wfn,
     std::vector<double> eigval_min(Nspin_local, 0.0), eigval_max(Nspin_local, 0.0);
 
     // Initial Veff from initial density
+    bool use_potential_mixing = (params_.mixing_var == MixingVariable::Potential) && !is_soc_;
+    if (use_potential_mixing) {
+        Veff_mean_.resize(Nspin, 0.0);
+    }
     if (is_soc_) {
         compute_Veff_spinor(density_, rho_b, Vloc_);
     } else {
         compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+    }
+    // For potential mixing: initialize Veff_mixed_ (zero-mean copy for mixer history)
+    // matching SPARC's Update_mixing_hist_xk
+    NDArray<double> Veff_mixed;  // zero-mean Veff for mixer (persistent across SCF loop)
+    if (use_potential_mixing) {
+        Veff_mixed = NDArray<double>(Nd_d * Nspin);
+        std::memcpy(Veff_mixed.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
+        for (int s = 0; s < Nspin; ++s) {
+            double mean = 0;
+            for (int i = 0; i < Nd_d; ++i) mean += Veff_mixed.data()[s*Nd_d + i];
+            mean /= grid_->Nd();
+            Veff_mean_[s] = mean;
+            for (int i = 0; i < Nd_d; ++i) Veff_mixed.data()[s*Nd_d + i] -= mean;
+        }
     }
 
     // Debug: dump initial state for comparison with reference
@@ -561,6 +745,15 @@ double SCF::run(Wavefunction& wfn,
         }
     }
 
+    // Debug: dump initial wavefunctions
+    if (rank_world == 0 && !is_kpt_) {
+        const double* psi0 = wfn.psi(0, 0).data();
+        std::printf("DUMP_PSI_INIT[0..4]= %.15e %.15e %.15e %.15e %.15e\n",
+                    psi0[0], psi0[1], psi0[2], psi0[3], psi0[4]);
+        std::printf("DUMP_PSI_INIT seed=%u Nd_d=%d Nband_loc=%d\n",
+                    rand_seed, Nd_d, wfn.Nband());
+    }
+
     double E_prev = 0.0;
     converged_ = false;
     if (Natom <= 0) Natom = std::max(1, Nelectron / 4);
@@ -605,6 +798,10 @@ double SCF::run(Wavefunction& wfn,
                 for (int s = 0; s < Nspin_local; ++s) {
                     int s_glob = spin_start_ + s;
                     double* Veff_s = Veff_.data() + s_glob * Nd_d;
+                    // Set per-spin vtau for mGGA
+                    if (xc_type_ == XCType::MGGA_SCAN && Nspin_global_ == 2) {
+                        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data() + s_glob * Nd_d);
+                    }
                     for (int k = 0; k < Nkpts; ++k) {
                         double* eig = wfn.eigenvalues(s, k).data();
 
@@ -669,6 +866,12 @@ double SCF::run(Wavefunction& wfn,
 
         }
 
+        // Compute tau for mGGA after CheFSI solve
+        if (xc_type_ == XCType::MGGA_SCAN) {
+            compute_tau(wfn, kpt_weights, kpt_start_, band_start_);
+            tau_valid_ = true;
+        }
+
         // 2. Compute new electron density
         ElectronDensity rho_new;
         if (is_soc_) {
@@ -692,21 +895,83 @@ double SCF::run(Wavefunction& wfn,
             std::printf("DUMP_EBAND=%.15e\n", Energy::band_energy(wfn, kpt_weights, Nspin, kpt_start_));
         }
 
-        // 3. Compute energy BEFORE mixing, using rho_in (the density that
-        //    generated the current potentials). This matches reference LYNX,
-        //    which computes energy based on rho_in for faster convergence.
-        energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
-                                       exc_.data(), Vxc_.data(), rho_b,
-                                       Eself, Ec, beta, params_.smearing,
-                                       kpt_weights, Nd_d, grid_->dV(),
-                                       rho_core, Ef_, kpt_start_,
-                                       kptcomm_, spincomm_, Nspin);
+        // 3. For potential mixing: compute Veff_out from rho_out, energy with Escc correction
+        //    For density mixing: compute energy using rho_in
+        NDArray<double> Veff_out;
 
-        // 4. Evaluate SCF error: ||rho_out - rho_in|| / ||rho_out||
-        //    Reference: Evaluate_scf_error in electronicGroundState.c
-        //    var_in = mixing_hist_xk (input density), var_out = electronDens (output density)
+        if (use_potential_mixing) {
+            // Save Veff_in
+            NDArray<double> Veff_in(Nd_d * Nspin);
+            std::memcpy(Veff_in.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
+
+            // Update density_ to rho_out
+            std::memcpy(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
+            for (int s = 0; s < Nspin; ++s)
+                std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
+
+            // Compute Veff_out from rho_out
+            compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+            Veff_out = NDArray<double>(Nd_d * Nspin);
+            std::memcpy(Veff_out.data(), Veff_.data(), Nd_d * Nspin * sizeof(double));
+
+            // Compute energy using rho_out and Veff_out (current potentials)
+            energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
+                                           exc_.data(), Vxc_.data(), rho_b,
+                                           Eself, Ec, beta, params_.smearing,
+                                           kpt_weights, Nd_d, grid_->dV(),
+                                           rho_core, Ef_, kpt_start_,
+                                           kptcomm_, spincomm_, Nspin, nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
+
+            // Self-consistency correction: Escc = ∫ ρ_out · (Veff_out - Veff_in) dV
+            // This corrects for the fact that Eband was computed with Veff_in
+            // but energy uses rho_out.
+            double Escc = 0.0;
+            if (Nspin == 2) {
+                for (int s = 0; s < Nspin; ++s) {
+                    const double* rho_s = density_.rho(s).data();
+                    for (int i = 0; i < Nd_d; ++i) {
+                        Escc += rho_s[i] * (Veff_out.data()[s*Nd_d + i] - Veff_in.data()[s*Nd_d + i]);
+                    }
+                }
+            } else {
+                const double* rho_tot = density_.rho_total().data();
+                for (int i = 0; i < Nd_d; ++i) {
+                    Escc += rho_tot[i] * (Veff_out.data()[i] - Veff_in.data()[i]);
+                }
+            }
+            Escc *= grid_->dV();
+            energy_.Etotal += Escc;
+
+            // Restore Veff_in for mixer
+            std::memcpy(Veff_.data(), Veff_in.data(), Nd_d * Nspin * sizeof(double));
+        } else {
+            // Density mixing: energy using rho_in
+            energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
+                                           exc_.data(), Vxc_.data(), rho_b,
+                                           Eself, Ec, beta, params_.smearing,
+                                           kpt_weights, Nd_d, grid_->dV(),
+                                           rho_core, Ef_, kpt_start_,
+                                           kptcomm_, spincomm_, Nspin, nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
+                                           (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
+        }
+
+        // 5. Evaluate SCF error
         double scf_error = 0.0;
-        {
+        if (use_potential_mixing) {
+            // ||Veff_out - Veff_in|| / ||Veff_out|| (using unshifted values)
+            double sum_sq_out = 0.0, sum_sq_diff = 0.0;
+            for (int i = 0; i < Nd_d * Nspin; ++i) {
+                // Veff_out and Veff_ are both unshifted at this point
+                double diff = Veff_out.data()[i] - Veff_.data()[i];
+                sum_sq_out += Veff_out.data()[i] * Veff_out.data()[i];
+                sum_sq_diff += diff * diff;
+            }
+            scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
+        } else {
+            // ||rho_out - rho_in|| / ||rho_out||
             const double* rho_in = density_.rho_total().data();
             const double* rho_out = rho_new.rho_total().data();
             double sum_sq_out = 0.0, sum_sq_diff = 0.0;
@@ -757,8 +1022,33 @@ double SCF::run(Wavefunction& wfn,
 
         E_prev = energy_.Etotal;
 
-        // 5. Mix density
-        if (is_soc_) {
+        // 6. Mix
+        if (use_potential_mixing) {
+            // Potential mixing matching SPARC's exact flow:
+            // Veff_mixed = zero-mean copy of the mixer's x_k (persistent, like mixing_hist_xk)
+            // Veff_out = zero-mean copy of g_k (output from compute_Veff, shifted here)
+            // After mixing, Veff_mixed is updated to x_kp1, and Veff_ = Veff_mixed + mean.
+
+            // Step 1: Shift Veff_out to zero-mean, save mean for later
+            for (int s = 0; s < Nspin; ++s) {
+                double mean = 0;
+                for (int i = 0; i < Nd_d; ++i) mean += Veff_out.data()[s*Nd_d + i];
+                mean /= grid_->Nd();
+                Veff_mean_[s] = mean;
+                for (int i = 0; i < Nd_d; ++i) Veff_out.data()[s*Nd_d + i] -= mean;
+            }
+
+            // Step 2: Mix. Veff_mixed is x_k (zero-mean), Veff_out is g_k (zero-mean).
+            // After mix(), Veff_mixed is updated to x_{k+1} (zero-mean).
+            mixer.mix(Veff_mixed.data(), Veff_out.data(), Nd_d, Nspin);
+
+            // Step 3: Veff_ = Veff_mixed + mean (for Hamiltonian)
+            for (int s = 0; s < Nspin; ++s) {
+                for (int i = 0; i < Nd_d; ++i) {
+                    Veff_.data()[s*Nd_d + i] = Veff_mixed.data()[s*Nd_d + i] + Veff_mean_[s];
+                }
+            }
+        } else if (is_soc_) {
             // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
             std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);
             std::memcpy(dens_in.data(), density_.rho_total().data(), Nd_d * sizeof(double));
@@ -859,11 +1149,14 @@ double SCF::run(Wavefunction& wfn,
             }
         }
 
-        // 6. Compute new Veff from mixed density
-        if (is_soc_) {
-            compute_Veff_spinor(density_, rho_b, Vloc_);
-        } else {
-            compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+        // 7. For density mixing: recompute Veff from mixed density
+        //    For potential mixing: Veff_ already contains the mixed potential
+        if (!use_potential_mixing) {
+            if (is_soc_) {
+                compute_Veff_spinor(density_, rho_b, Vloc_);
+            } else {
+                compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+            }
         }
     }
 

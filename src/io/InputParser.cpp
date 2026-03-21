@@ -43,6 +43,7 @@ XCType parse_xc(const std::string& s) {
     if (s == "GGA_PBE") return XCType::GGA_PBE;
     if (s == "GGA_PBEsol") return XCType::GGA_PBEsol;
     if (s == "GGA_RPBE") return XCType::GGA_RPBE;
+    if (s == "SCAN") return XCType::MGGA_SCAN;
     throw std::runtime_error("Unknown XC functional: " + s);
 }
 

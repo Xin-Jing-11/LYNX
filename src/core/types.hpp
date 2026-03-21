@@ -17,7 +17,7 @@ enum class MixingVariable { Density = 0, Potential = 1 };
 enum class MixingPrecond { None = 0, Kerker = 1 };
 enum class PoissonSolverType { AAR = 0, CG = 1 };
 enum class SmearingType { GaussianSmearing = 0, FermiDirac = 1 };
-enum class XCType { LDA_PZ, LDA_PW, GGA_PBE, GGA_PBEsol, GGA_RPBE };
+enum class XCType { LDA_PZ, LDA_PW, GGA_PBE, GGA_PBEsol, GGA_RPBE, MGGA_SCAN };
 
 // 3x3 matrix — row-major, trivially copyable (CUDA-friendly)
 struct Mat3 {

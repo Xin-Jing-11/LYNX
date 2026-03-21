@@ -61,6 +61,12 @@ add_test(NAME LibxcCompare
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_libxc_tests>)
 set_tests_properties(LibxcCompare PROPERTIES TIMEOUT 120)
 
+# SCAN functional unit tests (hand-coded + libxc comparison)
+add_executable(lynx_scan_tests test_SCANFunctional.cpp)
+target_link_libraries(lynx_scan_tests PRIVATE lynx_core GTest::gtest)
+add_test(NAME SCANFunctional COMMAND $<TARGET_FILE:lynx_scan_tests>)
+set_tests_properties(SCANFunctional PROPERTIES TIMEOUT 120)
+
 # GPU kernel tests
 if(USE_CUDA)
     add_executable(lynx_gpu_tests test_GPUKernels.cu)

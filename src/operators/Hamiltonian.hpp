@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "operators/FDStencil.hpp"
+#include "operators/Gradient.hpp"
 #include "operators/NonlocalProjector.hpp"
 #include "parallel/HaloExchange.hpp"
 #include <complex>
@@ -60,6 +61,15 @@ public:
                           int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
                           double c = 0.0) const;
 
+    // mGGA: set vtau potential (d(n*exc)/d(tau))
+    void set_vtau(const double* vtau) { vtau_ = vtau; }
+    const double* vtau() const { return vtau_; }
+
+    // mGGA term: H_mGGA ψ = -0.5 ∇·(vtau · ∇ψ)
+    void apply_mgga(const double* psi, double* y, int ncol) const;
+    void apply_mgga_kpt(const Complex* psi, Complex* y, int ncol,
+                         const Vec3& kpt_cart, const Vec3& cell_lengths) const;
+
     const FDStencil& stencil() const { return *stencil_; }
     const Domain& domain() const { return *domain_; }
 
@@ -70,6 +80,7 @@ private:
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;      // Gamma-point nonlocal
     const NonlocalProjector* vnl_kpt_ = nullptr;   // k-point nonlocal (complex Chi)
+    const double* vtau_ = nullptr;                  // mGGA vtau potential
 
     // Templated stencil application (shared between real and complex)
     template<typename T>

@@ -28,6 +28,7 @@ void XCFunctional::get_func_ids(int& xc_id, int& cc_id) const {
         case XCType::GGA_PBE:    xc_id = XC_GGA_X_PBE; cc_id = XC_GGA_C_PBE; break;
         case XCType::GGA_PBEsol: xc_id = XC_GGA_X_PBE_SOL; cc_id = XC_GGA_C_PBE_SOL; break;
         case XCType::GGA_RPBE:   xc_id = XC_GGA_X_RPBE; cc_id = XC_GGA_C_PBE; break;
+        case XCType::MGGA_SCAN:  xc_id = XC_MGGA_X_SCAN; cc_id = XC_MGGA_C_SCAN; break;
         default:                 xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW;     break;
     }
 }
@@ -36,7 +37,9 @@ void XCFunctional::get_func_ids(int& xc_id, int& cc_id) const {
 // Non-spin-polarized evaluation
 // ============================================================
 void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
-                             double* Dxcdgrho_out) const {
+                             double* Dxcdgrho_out,
+                             const double* tau_in,
+                             double* vtau_out) const {
     int xc_id, cc_id;
     get_func_ids(xc_id, cc_id);
 
@@ -46,7 +49,108 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
 
     size_t np = static_cast<size_t>(Nd_d);
 
-    if (is_gga() && gradient_ && halo_) {
+    if (is_mgga() && gradient_ && halo_) {
+        // mGGA (SCAN) path using hand-coded functional
+        // 1. Compute gradients (same as GGA)
+        int FDn = gradient_->stencil().FDn();
+        int nx = domain_->Nx_d(), ny = domain_->Ny_d(), nz = domain_->Nz_d();
+        int nd_ex = (nx + 2*FDn) * (ny + 2*FDn) * (nz + 2*FDn);
+
+        std::vector<double> rho_ex(nd_ex, 0.0);
+        halo_->execute(rho, rho_ex.data(), 1);
+
+        std::vector<double> Drho_x(Nd_d), Drho_y(Nd_d), Drho_z(Nd_d);
+        gradient_->apply(rho_ex.data(), Drho_x.data(), 0, 1);
+        gradient_->apply(rho_ex.data(), Drho_y.data(), 1, 1);
+        gradient_->apply(rho_ex.data(), Drho_z.data(), 2, 1);
+
+        // 2. sigma = |grad rho|^2 with floor to prevent division by zero in SCAN v2
+        bool is_orth = grid_->lattice().is_orthogonal();
+        const Mat3& lapcT = grid_->lattice().lapc_T();
+
+        std::vector<double> sigma(Nd_d);
+        if (is_orth) {
+            for (int i = 0; i < Nd_d; i++)
+                sigma[i] = Drho_x[i]*Drho_x[i] + Drho_y[i]*Drho_y[i] + Drho_z[i]*Drho_z[i];
+        } else {
+            for (int i = 0; i < Nd_d; i++) {
+                double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
+                sigma[i] = lapcT(0,0)*dx*dx + lapcT(1,1)*dy*dy + lapcT(2,2)*dz*dz
+                         + 2.0*lapcT(0,1)*dx*dy + 2.0*lapcT(0,2)*dx*dz + 2.0*lapcT(1,2)*dy*dz;
+            }
+        }
+        // Floor sigma to prevent division by zero in SCAN v2 = d(nε)/d|∇n| / |∇n|
+        // Matches SPARC's exchangeCorrelation.c line 170: if (sigma < 1E-14) sigma = 1E-14
+        for (int i = 0; i < Nd_d; i++) {
+            if (sigma[i] < 1e-14) sigma[i] = 1e-14;
+        }
+
+        // 3. Evaluate SCAN via libxc
+        xc_func_type mgga_x, mgga_c;
+        xc_func_init(&mgga_x, XC_MGGA_X_SCAN, XC_UNPOLARIZED);
+        xc_func_init(&mgga_c, XC_MGGA_C_SCAN, XC_UNPOLARIZED);
+
+        std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0), vsigma_x(Nd_d, 0.0), vlapl_x(Nd_d, 0.0), vtau_x(Nd_d, 0.0);
+        std::vector<double> zk_c(Nd_d, 0.0), vrho_c(Nd_d, 0.0), vsigma_c(Nd_d, 0.0), vlapl_c(Nd_d, 0.0), vtau_c(Nd_d, 0.0);
+        std::vector<double> lapl(Nd_d, 0.0);
+
+        xc_mgga_exc_vxc(&mgga_x, np, rho, sigma.data(), lapl.data(), tau_in,
+                         zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
+        xc_mgga_exc_vxc(&mgga_c, np, rho, sigma.data(), lapl.data(), tau_in,
+                         zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
+
+        xc_func_end(&mgga_x);
+        xc_func_end(&mgga_c);
+
+        // 4. Combine outputs: exc, Vxc, Dxcdgrho = 2*vsigma
+        std::vector<double> v2xc(Nd_d);
+        for (int i = 0; i < Nd_d; i++) {
+            exc[i] = zk_x[i] + zk_c[i];
+            Vxc[i] = vrho_x[i] + vrho_c[i];
+            v2xc[i] = 2.0 * (vsigma_x[i] + vsigma_c[i]);
+        }
+
+        // 5. Output Dxcdgrho
+        if (Dxcdgrho_out)
+            std::memcpy(Dxcdgrho_out, v2xc.data(), Nd_d * sizeof(double));
+
+        // 6. GGA divergence correction to Vxc (same as GGA)
+        std::vector<double> fx(Nd_d), fy(Nd_d), fz(Nd_d);
+        if (is_orth) {
+            for (int i = 0; i < Nd_d; i++) {
+                fx[i] = Drho_x[i] * v2xc[i];
+                fy[i] = Drho_y[i] * v2xc[i];
+                fz[i] = Drho_z[i] * v2xc[i];
+            }
+        } else {
+            for (int i = 0; i < Nd_d; i++) {
+                double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
+                fx[i] = (lapcT(0,0)*dx + lapcT(0,1)*dy + lapcT(0,2)*dz) * v2xc[i];
+                fy[i] = (lapcT(1,0)*dx + lapcT(1,1)*dy + lapcT(1,2)*dz) * v2xc[i];
+                fz[i] = (lapcT(2,0)*dx + lapcT(2,1)*dy + lapcT(2,2)*dz) * v2xc[i];
+            }
+        }
+
+        std::vector<double> f_ex(nd_ex), DDf(Nd_d);
+        halo_->execute(fx.data(), f_ex.data(), 1);
+        gradient_->apply(f_ex.data(), DDf.data(), 0, 1);
+        for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
+
+        halo_->execute(fy.data(), f_ex.data(), 1);
+        gradient_->apply(f_ex.data(), DDf.data(), 1, 1);
+        for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
+
+        halo_->execute(fz.data(), f_ex.data(), 1);
+        gradient_->apply(f_ex.data(), DDf.data(), 2, 1);
+        for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
+
+        // 7. Output vtau
+        if (vtau_out) {
+            for (int i = 0; i < Nd_d; i++)
+                vtau_out[i] = vtau_x[i] + vtau_c[i];
+        }
+
+    } else if (is_gga() && gradient_ && halo_) {
         // Compute gradients
         int FDn = gradient_->stencil().FDn();
         int nx = domain_->Nx_d(), ny = domain_->Ny_d(), nz = domain_->Nz_d();
@@ -156,7 +260,9 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
 // Vxc: [up(Nd_d) | down(Nd_d)]
 // ============================================================
 void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
-                                  double* Dxcdgrho_out) const {
+                                  double* Dxcdgrho_out,
+                                  const double* tau_in,
+                                  double* vtau_out) const {
     int xc_id, cc_id;
     get_func_ids(xc_id, cc_id);
 
@@ -173,7 +279,176 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         rho_libxc[2*i + 1] = rho[2*Nd_d + i];
     }
 
-    if (is_gga() && gradient_ && halo_) {
+    if (is_mgga() && gradient_ && halo_) {
+        // mGGA (SCAN) spin-polarized path using hand-coded functional
+        int FDn = gradient_->stencil().FDn();
+        int nx = domain_->Nx_d(), ny = domain_->Ny_d(), nz = domain_->Nz_d();
+        int nd_ex = (nx + 2*FDn) * (ny + 2*FDn) * (nz + 2*FDn);
+
+        // Compute gradients for total, up, down
+        std::vector<double> Drho_x(3 * Nd_d), Drho_y(3 * Nd_d), Drho_z(3 * Nd_d);
+        std::vector<double> rho_ex(nd_ex);
+        for (int col = 0; col < 3; col++) {
+            halo_->execute(rho + col * Nd_d, rho_ex.data(), 1);
+            gradient_->apply(rho_ex.data(), Drho_x.data() + col * Nd_d, 0, 1);
+            gradient_->apply(rho_ex.data(), Drho_y.data() + col * Nd_d, 1, 1);
+            gradient_->apply(rho_ex.data(), Drho_z.data() + col * Nd_d, 2, 1);
+        }
+
+        bool is_orth = grid_->lattice().is_orthogonal();
+        const Mat3& lapcT = grid_->lattice().lapc_T();
+
+        auto dot_metric = [&](int a, int b) -> double {
+            if (is_orth)
+                return Drho_x[a]*Drho_x[b] + Drho_y[a]*Drho_y[b] + Drho_z[a]*Drho_z[b];
+            double ax = Drho_x[a], ay = Drho_y[a], az = Drho_z[a];
+            double bx = Drho_x[b], by = Drho_y[b], bz = Drho_z[b];
+            return lapcT(0,0)*ax*bx + lapcT(1,1)*ay*by + lapcT(2,2)*az*bz
+                 + lapcT(0,1)*(ax*by + ay*bx) + lapcT(0,2)*(ax*bz + az*bx)
+                 + lapcT(1,2)*(ay*bz + az*by);
+        };
+
+        // sigma layout for SPARC: [total(Nd_d) | up(Nd_d) | dn(Nd_d)]
+        std::vector<double> sigma(3 * Nd_d);
+        for (int i = 0; i < Nd_d; i++) {
+            sigma[i] = dot_metric(i, i);             // |grad rho_total|^2
+            int iu = Nd_d + i, id = 2*Nd_d + i;
+            sigma[Nd_d + i] = dot_metric(iu, iu);    // |grad rho_up|^2
+            sigma[2*Nd_d + i] = dot_metric(id, id);  // |grad rho_dn|^2
+        }
+        // Floor sigma (matching SPARC)
+        for (int i = 0; i < 3 * Nd_d; i++) {
+            if (sigma[i] < 1e-14) sigma[i] = 1e-14;
+        }
+
+        // Evaluate SCAN via libxc (spin-polarized)
+        // libxc uses interleaved layout: rho[2*np], sigma[3*np], tau[2*np]
+        // sigma_libxc: [σ_uu, σ_ud, σ_dd] per point
+        std::vector<double> sigma_libxc(3 * Nd_d);
+        std::vector<double> tau_libxc(2 * Nd_d, 0.0);
+        std::vector<double> lapl_libxc(2 * Nd_d, 0.0);
+        for (int i = 0; i < Nd_d; i++) {
+            int iu = Nd_d + i, id = 2*Nd_d + i;
+            sigma_libxc[3*i]     = sigma[iu];  // σ_uu = |∇ρ_up|²
+            sigma_libxc[3*i + 1] = dot_metric(iu, id);  // σ_ud = ∇ρ_up · ∇ρ_dn
+            sigma_libxc[3*i + 2] = sigma[id];  // σ_dd = |∇ρ_dn|²
+            if (tau_in) {
+                tau_libxc[2*i]     = tau_in[Nd_d + i];   // τ_up
+                tau_libxc[2*i + 1] = tau_in[2*Nd_d + i]; // τ_dn
+            }
+        }
+
+        xc_func_type mgga_x, mgga_c;
+        xc_func_init(&mgga_x, XC_MGGA_X_SCAN, XC_POLARIZED);
+        xc_func_init(&mgga_c, XC_MGGA_C_SCAN, XC_POLARIZED);
+
+        std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0), vsigma_x(3*Nd_d, 0.0), vlapl_x(2*Nd_d, 0.0), vtau_x(2*Nd_d, 0.0);
+        std::vector<double> zk_c(Nd_d, 0.0), vrho_c(2*Nd_d, 0.0), vsigma_c(3*Nd_d, 0.0), vlapl_c(2*Nd_d, 0.0), vtau_c(2*Nd_d, 0.0);
+
+        xc_mgga_exc_vxc(&mgga_x, np, rho_libxc.data(), sigma_libxc.data(), lapl_libxc.data(), tau_libxc.data(),
+                         zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
+        xc_mgga_exc_vxc(&mgga_c, np, rho_libxc.data(), sigma_libxc.data(), lapl_libxc.data(), tau_libxc.data(),
+                         zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
+
+        xc_func_end(&mgga_x);
+        xc_func_end(&mgga_c);
+
+        // Combine: exc, Vxc (per-spin, de-interleave from libxc)
+        for (int i = 0; i < Nd_d; i++) {
+            exc[i] = zk_x[i] + zk_c[i];
+            Vxc[i]        = vrho_x[2*i] + vrho_c[2*i];         // up
+            Vxc[Nd_d + i] = vrho_x[2*i + 1] + vrho_c[2*i + 1]; // down
+        }
+
+        // Dxcdgrho: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
+        // v2c = 2*(vsigma_c_uu + 2*vsigma_c_ud + vsigma_c_dd) for total gradient
+        // v2x_up = 2*vsigma_x_uu, v2x_dn = 2*vsigma_x_dd
+        if (Dxcdgrho_out) {
+            for (int i = 0; i < Nd_d; i++) {
+                Dxcdgrho_out[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
+                Dxcdgrho_out[Nd_d + i] = 2.0 * vsigma_x[3*i];
+                Dxcdgrho_out[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
+            }
+        }
+
+        // vtau: [up(Nd_d) | dn(Nd_d)] (de-interleave from libxc)
+        if (vtau_out) {
+            for (int i = 0; i < Nd_d; i++) {
+                vtau_out[i]        = vtau_x[2*i] + vtau_c[2*i];         // up
+                vtau_out[Nd_d + i] = vtau_x[2*i + 1] + vtau_c[2*i + 1]; // dn
+            }
+        }
+
+        // GGA divergence correction for spin (same structure as GGA spin path)
+        // Uses Dxcdgrho layout: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
+        // Allocate temporary Dxcdgrho if not provided by caller
+        std::vector<double> dxc_tmp;
+        double* dxc = Dxcdgrho_out;
+        if (!dxc) {
+            dxc_tmp.resize(3 * Nd_d);
+            for (int i = 0; i < Nd_d; i++) {
+                dxc_tmp[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
+                dxc_tmp[Nd_d + i] = 2.0 * vsigma_x[3*i];
+                dxc_tmp[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
+            }
+            dxc = dxc_tmp.data();
+        }
+
+        std::vector<double> fx_up(Nd_d), fy_up(Nd_d), fz_up(Nd_d);
+        std::vector<double> fx_dn(Nd_d), fy_dn(Nd_d), fz_dn(Nd_d);
+
+        for (int i = 0; i < Nd_d; i++) {
+            int iu = Nd_d + i, id = 2*Nd_d + i;
+            double v2c_i = dxc[i];           // correlation (total gradient)
+            double v2x_up = dxc[Nd_d + i];   // exchange up
+            double v2x_dn = dxc[2*Nd_d + i]; // exchange dn
+
+            if (is_orth) {
+                fx_up[i] = v2x_up * Drho_x[iu] + v2c_i * Drho_x[i];
+                fy_up[i] = v2x_up * Drho_y[iu] + v2c_i * Drho_y[i];
+                fz_up[i] = v2x_up * Drho_z[iu] + v2c_i * Drho_z[i];
+                fx_dn[i] = v2x_dn * Drho_x[id] + v2c_i * Drho_x[i];
+                fy_dn[i] = v2x_dn * Drho_y[id] + v2c_i * Drho_y[i];
+                fz_dn[i] = v2x_dn * Drho_z[id] + v2c_i * Drho_z[i];
+            } else {
+                double du_x = Drho_x[iu], du_y = Drho_y[iu], du_z = Drho_z[iu];
+                double dd_x = Drho_x[id], dd_y = Drho_y[id], dd_z = Drho_z[id];
+                double dt_x = Drho_x[i], dt_y = Drho_y[i], dt_z = Drho_z[i];
+
+                auto metric_mul = [&](double gx, double gy, double gz, double v2,
+                                      double& out_x, double& out_y, double& out_z) {
+                    out_x = (lapcT(0,0)*gx + lapcT(0,1)*gy + lapcT(0,2)*gz) * v2;
+                    out_y = (lapcT(1,0)*gx + lapcT(1,1)*gy + lapcT(1,2)*gz) * v2;
+                    out_z = (lapcT(2,0)*gx + lapcT(2,1)*gy + lapcT(2,2)*gz) * v2;
+                };
+
+                double fxu_x, fxu_y, fxu_z, fxd_x, fxd_y, fxd_z, fc_x, fc_y, fc_z;
+                metric_mul(du_x, du_y, du_z, v2x_up, fxu_x, fxu_y, fxu_z);
+                metric_mul(dd_x, dd_y, dd_z, v2x_dn, fxd_x, fxd_y, fxd_z);
+                metric_mul(dt_x, dt_y, dt_z, v2c_i, fc_x, fc_y, fc_z);
+
+                fx_up[i] = fxu_x + fc_x; fy_up[i] = fxu_y + fc_y; fz_up[i] = fxu_z + fc_z;
+                fx_dn[i] = fxd_x + fc_x; fy_dn[i] = fxd_y + fc_y; fz_dn[i] = fxd_z + fc_z;
+            }
+        }
+
+        std::vector<double> f_ex(nd_ex), DDf(Nd_d);
+        auto apply_div = [&](double* fx, double* fy, double* fz, double* Vxc_s) {
+            halo_->execute(fx, f_ex.data(), 1);
+            gradient_->apply(f_ex.data(), DDf.data(), 0, 1);
+            for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
+            halo_->execute(fy, f_ex.data(), 1);
+            gradient_->apply(f_ex.data(), DDf.data(), 1, 1);
+            for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
+            halo_->execute(fz, f_ex.data(), 1);
+            gradient_->apply(f_ex.data(), DDf.data(), 2, 1);
+            for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
+        };
+
+        apply_div(fx_up.data(), fy_up.data(), fz_up.data(), Vxc);
+        apply_div(fx_dn.data(), fy_dn.data(), fz_dn.data(), Vxc + Nd_d);
+
+    } else if (is_gga() && gradient_ && halo_) {
         // Gradients for total, up, down
         int FDn = gradient_->stencil().FDn();
         int nx = domain_->Nx_d(), ny = domain_->Ny_d(), nz = domain_->Nz_d();

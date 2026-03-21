@@ -195,6 +195,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     scf_params.mixing_param = config.mixing_param;
     scf_params.smearing = config.smearing;
     scf_params.elec_temp = config.elec_temp;
+    scf_params.cheb_degree = config.cheb_degree;
 
     int Nspin_local = parallel.Nspin_local();
     int Nkpts_local = parallel.Nkpts_local();
@@ -244,6 +245,21 @@ static DFTResult run_single_point(const std::string& json_file) {
     result.Ef = scf.fermi_energy();
     result.converged = scf.converged();
 
+    // Dump all energy components for debugging
+    int dump_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &dump_rank);
+    if (dump_rank == 0) {
+        std::printf("\n=== Energy Components ===\n");
+        std::printf("  Eband   = %.15e\n", scf.energy().Eband);
+        std::printf("  Exc     = %.15e\n", scf.energy().Exc);
+        std::printf("  Ehart   = %.15e\n", scf.energy().Ehart);
+        std::printf("  Eself   = %.15e\n", scf.energy().Eself);
+        std::printf("  Ec      = %.15e\n", scf.energy().Ec);
+        std::printf("  Entropy = %.15e\n", scf.energy().Entropy);
+        std::printf("  Etotal  = %.15e\n", scf.energy().Etotal);
+        std::printf("  Eself+Ec= %.15e\n", scf.energy().Eself + scf.energy().Ec);
+    }
+
     // Forces
     if (config.print_forces) {
         std::vector<double> kpt_weights = kpoints.normalized_weights();
@@ -282,7 +298,8 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             Nspin_calc,
                                             has_nlcc ? rho_core.data() : nullptr,
                                             kpt_weights, bandcomm, kpt_bridge, spin_bridge,
-                                            &kpoints, kpt_start, band_start);
+                                            &kpoints, kpt_start, band_start,
+                                            scf.vtau());
         result.pressure = stress_calc.pressure();
     }
 
@@ -644,4 +661,146 @@ TEST(EndToEnd, PtAu_SOC) {
         // Forces should match within ~2e-2 Ha/Bohr (differences from pseudocharge cutoff)
         EXPECT_LT(max_force_err, 2e-2) << "SOC forces deviate from SPARC reference";
     }
+}
+
+// ============================================================
+// Test: Gamma-point Si4 SCAN — orthogonal deformed cell
+// SPARC reference: Si4 FCC, 26x26x26 grid, gamma-only, SCAN
+//   Etotal = -15.477507471 Ha
+//   Eband  = -1.8911990670 Ha
+//   Exc    = -4.4332977072 Ha
+//   Ef     = 0.010348992 Ha
+// ============================================================
+TEST(EndToEnd, Si4_gamma_SCAN) {
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_gamma.json";
+
+    std::ifstream f(json_file);
+    if (!f.good()) {
+        GTEST_SKIP() << "Test data not found: " << json_file;
+    }
+    f.close();
+
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    // SPARC SCAN reference for deformed Si4 (10.0 x 10.26 x 10.5)
+    double ref_Etotal = -15.478970526;
+    double ref_Eband = 0.0; // not compared
+    double ref_Exc = 0.0;
+    double ref_Ef = 0.0;
+
+    if (rank == 0) {
+        std::printf("\n=== Si4 Gamma-point SCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.12f Ha (ref: %.12f)\n", result.Etotal, ref_Etotal);
+        std::printf("  Eband  = %.12f Ha (ref: %.12f)\n", result.Eband, ref_Eband);
+        std::printf("  Exc    = %.12f Ha (ref: %.12f)\n", result.Exc, ref_Exc);
+        std::printf("  Ef     = %.12f Ha (ref: %.12f)\n", result.Ef, ref_Ef);
+        std::printf("  Etotal error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
+        std::printf("  Exc error:    %.6e Ha\n", std::abs(result.Exc - ref_Exc));
+
+        // SPARC SCAN forces (Ha/Bohr) for deformed cell 10.0 x 10.26 x 10.5
+        double ref_forces[12] = {
+            -1.1260733637E-07, -2.0475633673E-08,  2.3343149360E-02,
+             6.5716542982E-04,  6.0688497580E-05, -2.3376211266E-02,
+            -6.8131886993E-08,  2.4936846560E-08,  2.3408903487E-02,
+            -6.5698469060E-04, -6.0692958793E-05, -2.3375841580E-02
+        };
+
+        if (result.forces.size() == 12) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force_err = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                std::printf("  Atom %d: %14.8e %14.8e %14.8e\n", i+1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                std::printf("     ref: %14.8e %14.8e %14.8e\n",
+                            ref_forces[3*i], ref_forces[3*i+1], ref_forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
+                    max_force_err = std::max(max_force_err, err);
+                }
+            }
+            std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+            EXPECT_LT(max_force_err, 1e-5) << "Forces deviate from SPARC reference";
+        }
+
+        // SPARC SCAN stress (GPa) — deformed cell 10.0 x 10.26 x 10.5
+        // Voigt: xx, xy, xz, yy, yz, zz
+        double ref_stress[6] = {
+            -2.5783048441E-01, -1.3335761406E+01,  6.8329942976E-06,
+             4.6147953628E-01,  7.0657923920E-07, -1.3890775900E+00
+        };
+        if (result.stress[0] != 0.0 || result.stress[3] != 0.0) {
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    LYNX:  %10.6f %10.6f %10.6f\n", result.stress[0], result.stress[1], result.stress[2]);
+            std::printf("           %10.6f %10.6f %10.6f\n", result.stress[3], result.stress[4], result.stress[5]);
+            std::printf("    ref:   %10.6f %10.6f %10.6f\n", ref_stress[0], ref_stress[1], ref_stress[2]);
+            std::printf("           %10.6f %10.6f %10.6f\n", ref_stress[3], ref_stress[4], ref_stress[5]);
+            double max_stress_err = 0.0;
+            for (int i = 0; i < 6; ++i) {
+                double err = std::abs(result.stress[i] - ref_stress[i]);
+                max_stress_err = std::max(max_stress_err, err);
+            }
+            std::printf("    Max stress error: %.6e GPa\n", max_stress_err);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
+        << "Total energy deviates from SPARC reference";
+}
+
+// ============================================================
+// Test: K-point Si4 SCAN — orthogonal deformed cell with 2x2x2 kpts
+// SPARC reference: Si4 (10.0 x 10.26 x 10.5), 25x26x27 grid, 2x2x2 kpts
+//   Etotal = -15.663154820 Ha
+// ============================================================
+TEST(EndToEnd, Si4_kpt_SCAN) {
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_kpt.json";
+
+    std::ifstream f(json_file);
+    if (!f.good()) {
+        GTEST_SKIP() << "Test data not found: " << json_file;
+    }
+    f.close();
+
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    double ref_Etotal = -15.663154820;
+    double ref_forces[12] = {
+         1.7876563941E-08, -2.2330656558E-08,  1.2593264499E-02,
+         7.1639443493E-04, -5.3460669882E-05, -1.2377267004E-02,
+        -1.4888269285E-08,  1.3562230122E-08,  1.2161270449E-02,
+        -7.1639742322E-04,  5.3469438309E-05, -1.2377267944E-02
+    };
+
+    if (rank == 0) {
+        std::printf("\n=== Si4 K-point SCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.12f Ha (ref: %.12f)\n", result.Etotal, ref_Etotal);
+        std::printf("  Etotal error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
+
+        if (result.forces.size() == 12) {
+            double max_force_err = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                std::printf("  Atom %d: %14.8e %14.8e %14.8e\n", i+1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
+                    max_force_err = std::max(max_force_err, err);
+                }
+            }
+            std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+            EXPECT_LT(max_force_err, 1e-5) << "K-point SCAN forces deviate from SPARC";
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "K-point SCAN SCF did not converge";
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
+        << "K-point SCAN energy deviates from SPARC reference";
 }

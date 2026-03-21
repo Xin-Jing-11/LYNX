@@ -75,7 +75,9 @@ EnergyComponents Energy::compute_all(
     const MPIComm* kptcomm,
     const MPIComm* spincomm,
     int Nspin_global,
-    const MPIComm* bandcomm) {
+    const MPIComm* bandcomm,
+    const double* tau,
+    const double* vtau) {
 
     EnergyComponents E;
     E.Eself = Eself;
@@ -124,6 +126,25 @@ EnergyComponents Energy::compute_all(
         E3 += rho[i] * phi[i];
     }
     E3 *= dV;
+
+    // mGGA double-counting correction: E3_mgga = integral tau * vtau dV
+    // (Eband already includes the vtau contribution through the Hamiltonian)
+    if (tau && vtau) {
+        double E3_mgga = 0.0;
+        if (Nspin == 2) {
+            // tau layout: [up|dn|total], vtau layout: [up|dn]
+            // E3_mgga = integral (tau_up * vtau_up + tau_dn * vtau_dn) dV
+            for (int i = 0; i < 2 * Nd_d; ++i) {
+                E3_mgga += tau[i] * vtau[i];
+            }
+        } else {
+            for (int i = 0; i < Nd_d; ++i) {
+                E3_mgga += tau[i] * vtau[i];
+            }
+        }
+        E3_mgga *= dV;
+        E3 += E3_mgga;
+    }
 
     // Hartree energy = 0.5 * integral (rho + b) * phi dV
     E.Ehart = 0.0;

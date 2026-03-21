@@ -102,6 +102,8 @@ public:
     const double* exc() const { return exc_.data(); }
     const double* Veff() const { return Veff_.data(); }
     const double* Dxcdgrho() const { return Dxcdgrho_.data(); }
+    const double* vtau() const { return vtau_.data(); }
+    const double* tau() const { return tau_.data(); }
 
 private:
     const FDGrid* grid_ = nullptr;
@@ -128,6 +130,12 @@ private:
     NDArray<double> exc_;       // XC energy density
     NDArray<double> phi_;       // electrostatic potential
     NDArray<double> Dxcdgrho_;  // GGA: dExc/d(|∇ρ|²) = v2x + v2c (stored like reference)
+    NDArray<double> tau_;       // kinetic energy density (mGGA)
+    NDArray<double> vtau_;      // d(nε)/dτ potential (mGGA)
+    bool tau_valid_ = false;    // true after first compute_tau() call
+
+    // Potential mixing state: Veff mean for each spin (removed before mixing, added for Hamiltonian)
+    std::vector<double> Veff_mean_;  // per-spin Veff mean (for potential mixing)
 
     XCType xc_type_ = XCType::GGA_PBE;
     const double* Vloc_ = nullptr;
@@ -173,6 +181,11 @@ private:
     // SOC / noncollinear
     bool is_soc_ = false;
     NDArray<double> Veff_spinor_;  // [V_uu | V_dd | Re(V_ud) | Im(V_ud)], 4*Nd_d
+
+    // Compute kinetic energy density tau from wavefunctions
+    void compute_tau(const Wavefunction& wfn,
+                     const std::vector<double>& kpt_weights,
+                     int kpt_start, int band_start);
 
     // Compute effective potential: Veff = Vxc + phi + Vloc
     // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns
