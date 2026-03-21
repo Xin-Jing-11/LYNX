@@ -299,7 +299,8 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             has_nlcc ? rho_core.data() : nullptr,
                                             kpt_weights, bandcomm, kpt_bridge, spin_bridge,
                                             &kpoints, kpt_start, band_start,
-                                            scf.vtau());
+                                            scf.vtau(),
+                                            scf.tau());
         result.pressure = stress_calc.pressure();
     }
 

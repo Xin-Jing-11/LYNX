@@ -72,7 +72,8 @@ std::array<double, 6> Stress::compute(
     const KPoints* kpoints,
     int kpt_start,
     int band_start,
-    const double* vtau) {
+    const double* vtau,
+    const double* tau) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -91,6 +92,29 @@ std::array<double, 6> Stress::compute(
 
     // 1. XC stress
     compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid);
+
+    // 1a. mGGA Exc_corr correction: subtract ∫τ·vtau dV from the diagonal
+    // XC stress diagonal = (Exc - Exc_corr) / V, where Exc_corr = ∫ρ·Vxc dV + ∫τ·vtau dV.
+    // compute_xc_stress only computed ∫ρ·Vxc dV. We add the mGGA part here.
+    if (vtau && tau && (xc_type == XCType::MGGA_SCAN)) {
+        int Nd_d = domain.Nd_d();
+        double dV = grid.dV();
+        double mgga_corr = 0.0;
+        if (Nspin == 2) {
+            // tau: [up|dn|total], vtau: [up|dn]
+            for (int i = 0; i < 2 * Nd_d; ++i)
+                mgga_corr += tau[i] * vtau[i];
+        } else {
+            for (int i = 0; i < Nd_d; ++i)
+                mgga_corr += tau[i] * vtau[i];
+        }
+        mgga_corr *= dV;
+        // Subtract from diagonal (Exc_corr increases → diagonal decreases)
+        double diag_correction = -mgga_corr / cell_measure_;
+        stress_xc_[0] += diag_correction;
+        stress_xc_[3] += diag_correction;
+        stress_xc_[5] += diag_correction;
+    }
 
     // 1b. NLCC XC stress correction
     if (rho_core) {
@@ -202,9 +226,6 @@ std::array<double, 6> Stress::compute(
         // Debug: print mGGA stress before normalization
         {
             const double au2gpa = 29421.01569650548;
-            std::printf("  mGGA_stress raw (GPa): xx=%.4f xy=%.4f yy=%.4f zz=%.4f\n",
-                        stress_mgga[0]*au2gpa, stress_mgga[1]*au2gpa, stress_mgga[3]*au2gpa, stress_mgga[5]*au2gpa);
-            std::printf("  cell_measure=%.6f dV=%.6e Nd=%d\n", cell_measure_, grid.dV(), Nd_d);
         }
 
         // Allreduce over band, kpt, spin communicators
