@@ -63,7 +63,8 @@ public:
         const MPIComm& spincomm,
         const KPoints* kpoints = nullptr,
         int kpt_start = 0,
-        int band_start = 0);
+        int band_start = 0,
+        const double* vtau = nullptr);  // mGGA: d(nε)/dτ (Nd_d non-spin, 2*Nd_d spin)
 
     double pressure() const;
 

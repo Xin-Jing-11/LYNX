@@ -43,6 +43,7 @@
   },
   "output": {
     "print_forces": true,
-    "print_atoms": true
+    "print_atoms": true,
+    "calc_stress": true
   }
 }

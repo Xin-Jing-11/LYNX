@@ -71,7 +71,8 @@ std::array<double, 6> Stress::compute(
     const MPIComm& spincomm,
     const KPoints* kpoints,
     int kpt_start,
-    int band_start) {
+    int band_start,
+    const double* vtau) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -103,6 +104,115 @@ std::array<double, 6> Stress::compute(
     // 3. Nonlocal + kinetic stress
     compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, gradient, halo,
                              domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
+
+    // 4. mGGA psi stress term: σ_ij += -occfac · Σ_n g_n · ∫ vtau · ∇_i ψ · ∇_j ψ dV
+    if (vtau && (xc_type == XCType::MGGA_SCAN)) {
+        int Nd_d = domain.Nd_d();
+        int Nband_loc = wfn.Nband();
+        int Nspin_local = wfn.Nspin();
+        int Nkpts = wfn.Nkpts();
+        int nd_ex = halo.nd_ex();
+        bool is_orth = grid.lattice().is_orthogonal();
+        const Mat3& gradT = grid.lattice().grad_T();
+        double spin_fac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
+        bool is_kpt = wfn.is_complex();
+
+        std::array<double, 6> stress_mgga = {};
+
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = (Nspin == 2) ? s : 0;  // spin index for vtau
+            const double* vtau_s = vtau + s_glob * Nd_d;
+
+            for (int k = 0; k < Nkpts; ++k) {
+                const auto& occ = wfn.occupations(s, k);
+                double wk = kpt_weights[kpt_start + k];
+
+                for (int n = 0; n < Nband_loc; ++n) {
+                    double fn = occ(band_start + n);
+                    if (fn < 1e-16) continue;
+                    double g_nk = spin_fac * wk * fn;
+
+                    // Compute ∇ψ in 3 directions
+                    if (is_kpt) {
+                        const Complex* col = wfn.psi_kpt(s, k).col(n);
+                        std::vector<Complex> psi_ex(nd_ex);
+                        std::vector<Complex> dpsi[3];
+                        for (int d = 0; d < 3; d++) dpsi[d].resize(Nd_d);
+
+                        Vec3 kpt = kpoints->kpts_cart()[kpt_start + k];
+                        Vec3 cell_lengths = grid.lattice().lengths();
+                        halo.execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
+                        for (int d = 0; d < 3; d++)
+                            gradient.apply(psi_ex.data(), dpsi[d].data(), d, 1);
+
+                        // Accumulate stress: σ_ij += -g_nk * ∫ vtau * Re(conj(∇_i ψ) * ∇_j ψ) dV
+                        // Voigt: [xx=0, xy=1, xz=2, yy=3, yz=4, zz=5]
+                        int voigt[3][3] = {{0,1,2},{1,3,4},{2,4,5}};
+                        for (int a = 0; a < 3; a++) {
+                            for (int b = a; b < 3; b++) {
+                                double sum = 0;
+                                if (is_orth) {
+                                    for (int i = 0; i < Nd_d; i++)
+                                        sum += vtau_s[i] * std::real(std::conj(dpsi[a][i]) * dpsi[b][i]);
+                                } else {
+                                    // Non-orth: need to transform gradients to Cartesian
+                                    for (int i = 0; i < Nd_d; i++) {
+                                        Complex ga = gradT(a,0)*dpsi[0][i] + gradT(a,1)*dpsi[1][i] + gradT(a,2)*dpsi[2][i];
+                                        Complex gb = gradT(b,0)*dpsi[0][i] + gradT(b,1)*dpsi[1][i] + gradT(b,2)*dpsi[2][i];
+                                        sum += vtau_s[i] * std::real(std::conj(ga) * gb);
+                                    }
+                                }
+                                sum *= grid.dV();
+                                stress_mgga[voigt[a][b]] += -g_nk * sum;
+                            }
+                        }
+                    } else {
+                        const double* col = wfn.psi(s, k).col(n);
+                        std::vector<double> psi_ex(nd_ex);
+                        std::vector<double> dpsi[3];
+                        for (int d = 0; d < 3; d++) dpsi[d].resize(Nd_d);
+
+                        halo.execute(col, psi_ex.data(), 1);
+                        for (int d = 0; d < 3; d++)
+                            gradient.apply(psi_ex.data(), dpsi[d].data(), d, 1);
+
+                        int voigt[3][3] = {{0,1,2},{1,3,4},{2,4,5}};
+                        for (int a = 0; a < 3; a++) {
+                            for (int b = a; b < 3; b++) {
+                                double sum = 0;
+                                if (is_orth) {
+                                    for (int i = 0; i < Nd_d; i++)
+                                        sum += vtau_s[i] * dpsi[a][i] * dpsi[b][i];
+                                } else {
+                                    for (int i = 0; i < Nd_d; i++) {
+                                        double ga = gradT(a,0)*dpsi[0][i] + gradT(a,1)*dpsi[1][i] + gradT(a,2)*dpsi[2][i];
+                                        double gb = gradT(b,0)*dpsi[0][i] + gradT(b,1)*dpsi[1][i] + gradT(b,2)*dpsi[2][i];
+                                        sum += vtau_s[i] * ga * gb;
+                                    }
+                                }
+                                sum *= grid.dV();
+                                stress_mgga[voigt[a][b]] += -g_nk * sum;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Allreduce over band, kpt, spin communicators
+        if (!bandcomm.is_null() && bandcomm.size() > 1)
+            bandcomm.allreduce_sum(stress_mgga.data(), 6);
+        if (!kptcomm.is_null() && kptcomm.size() > 1)
+            kptcomm.allreduce_sum(stress_mgga.data(), 6);
+        if (!spincomm.is_null() && spincomm.size() > 1)
+            spincomm.allreduce_sum(stress_mgga.data(), 6);
+
+        // Normalize by cell_measure and add to stress_xc
+        for (int i = 0; i < 6; i++) {
+            stress_mgga[i] /= cell_measure_;
+            stress_xc_[i] += stress_mgga[i];
+        }
+    }
 
     // Assemble total
     for (int i = 0; i < 6; ++i) {

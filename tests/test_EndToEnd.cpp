@@ -298,7 +298,8 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             Nspin_calc,
                                             has_nlcc ? rho_core.data() : nullptr,
                                             kpt_weights, bandcomm, kpt_bridge, spin_bridge,
-                                            &kpoints, kpt_start, band_start);
+                                            &kpoints, kpt_start, band_start,
+                                            scf.vtau());
         result.pressure = stress_calc.pressure();
     }
 
@@ -765,6 +766,50 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
         std::printf("  Ef     = %.12f Ha (ref: %.12f)\n", result.Ef, ref_Ef);
         std::printf("  Etotal error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
         std::printf("  Exc error:    %.6e Ha\n", std::abs(result.Exc - ref_Exc));
+
+        // SPARC SCAN forces (Ha/Bohr)
+        double ref_forces[12] = {
+             2.6435344395E-08,  2.2516542827E-08,  2.4706176996E-02,
+             1.0394849611E-08,  8.4588722872E-09, -2.4706015999E-02,
+            -1.9843107252E-08, -2.1586706130E-08,  2.4705865151E-02,
+            -1.6987086754E-08, -9.3887089838E-09, -2.4706026147E-02
+        };
+
+        if (result.forces.size() == 12) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force_err = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                std::printf("  Atom %d: %14.8e %14.8e %14.8e\n", i+1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                std::printf("     ref: %14.8e %14.8e %14.8e\n",
+                            ref_forces[3*i], ref_forces[3*i+1], ref_forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
+                    max_force_err = std::max(max_force_err, err);
+                }
+            }
+            std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+            EXPECT_LT(max_force_err, 1e-5) << "Forces deviate from SPARC reference";
+        }
+
+        // SPARC SCAN stress (GPa) — Voigt: xx, xy, xz, yy, yz, zz
+        double ref_stress[6] = {
+            4.7905353781E-01, -1.2897177147E+01, -2.9863451038E-07,
+            4.7905345008E-01,  3.7058481746E-08, -2.2824294710E+00
+        };
+        if (result.stress[0] != 0.0 || result.stress[3] != 0.0) {
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    LYNX:  %10.6f %10.6f %10.6f\n", result.stress[0], result.stress[1], result.stress[2]);
+            std::printf("           %10.6f %10.6f %10.6f\n", result.stress[3], result.stress[4], result.stress[5]);
+            std::printf("    ref:   %10.6f %10.6f %10.6f\n", ref_stress[0], ref_stress[1], ref_stress[2]);
+            std::printf("           %10.6f %10.6f %10.6f\n", ref_stress[3], ref_stress[4], ref_stress[5]);
+            double max_stress_err = 0.0;
+            for (int i = 0; i < 6; ++i) {
+                double err = std::abs(result.stress[i] - ref_stress[i]);
+                max_stress_err = std::max(max_stress_err, err);
+            }
+            std::printf("    Max stress error: %.6e GPa\n", max_stress_err);
+        }
     }
 
     EXPECT_TRUE(result.converged) << "SCF did not converge";
