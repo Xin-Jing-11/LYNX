@@ -1,10 +1,10 @@
 {
   "lattice": {
-    "vectors": [[10.0, 0, 0], [0, 10.26, 0], [0, 0, 10.5]],
+    "vectors": [[10.26, 0, 0], [0, 10.26, 0], [0, 0, 10.26]],
     "cell_type": "orthogonal"
   },
   "grid": {
-    "Nx": 25, "Ny": 26, "Nz": 27,
+    "Nx": 26, "Ny": 26, "Nz": 26,
     "fd_order": 12,
     "boundary_conditions": ["periodic", "periodic", "periodic"]
   },
