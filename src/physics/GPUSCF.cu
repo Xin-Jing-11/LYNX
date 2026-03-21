@@ -1082,6 +1082,47 @@ void GPUSCFRunner::hamiltonian_apply_cb(
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
     }
+
+    // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * grad(psi))
+    if (s->d_vtau_active_) {
+        auto& ctx = gpu::GPUContext::instance();
+        auto& sp = ctx.scratch_pool;
+        size_t sp_cp = sp.checkpoint();
+        int Nd = s->Nd_;
+        int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
+        int bs = 256;
+        int gs = gpu::ceildiv(Nd, bs);
+
+        double* d_dpsi   = sp.alloc<double>(Nd);  // gradient component
+        double* d_vtdpsi = sp.alloc<double>(Nd);  // vtau * gradient component
+        double* d_div    = sp.alloc<double>(Nd);  // divergence accumulator
+
+        for (int n = 0; n < ncol; n++) {
+            const double* d_psi_n = d_psi + (size_t)n * Nd;
+            double* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
+
+            CUDA_CHECK(cudaMemset(d_div, 0, Nd * sizeof(double)));
+
+            // Halo exchange psi column
+            gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+
+            // For each direction: gradient -> multiply by vtau -> halo -> gradient -> accumulate divergence
+            for (int dir = 0; dir < 3; dir++) {
+                gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                vtau_multiply_kernel<<<gs, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd);
+                gpu::halo_exchange_gpu(d_vtdpsi, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                // Accumulate: div += d2(vtau * dpsi)/ddir^2
+                double one = 1.0;
+                cublasDaxpy(ctx.cublas, Nd, &one, d_dpsi, 1, d_div, 1);
+            }
+
+            // Hpsi -= 0.5 * div
+            mgga_ham_sub_kernel<<<gs, bs>>>(d_Hpsi_n, d_div, Nd);
+        }
+
+        sp.restore(sp_cp);
+    }
 }
 
 // ============================================================
@@ -1115,6 +1156,48 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
             s->Nd_, ncol, s->dV_,
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+    }
+
+    // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * grad(psi))
+    if (s->d_vtau_active_) {
+        auto& ctx = gpu::GPUContext::instance();
+        auto& sp = ctx.scratch_pool;
+        size_t sp_cp = sp.checkpoint();
+        int Nd = s->Nd_;
+        int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
+        int bs = 256;
+        int gs = gpu::ceildiv(Nd, bs);
+
+        cuDoubleComplex* d_dpsi_z   = sp.alloc<cuDoubleComplex>(Nd);
+        cuDoubleComplex* d_vtdpsi_z = sp.alloc<cuDoubleComplex>(Nd);
+        cuDoubleComplex* d_div_z    = sp.alloc<cuDoubleComplex>(Nd);
+
+        for (int n = 0; n < ncol; n++) {
+            const cuDoubleComplex* d_psi_n = d_psi + (size_t)n * Nd;
+            cuDoubleComplex* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
+
+            CUDA_CHECK(cudaMemset(d_div_z, 0, Nd * sizeof(cuDoubleComplex)));
+
+            // Halo exchange psi column (complex with Bloch phases)
+            gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                     true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+
+            for (int dir = 0; dir < 3; dir++) {
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
+                gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                // Accumulate: div += d2(vtau * dpsi)/ddir^2
+                cuDoubleComplex one = {1.0, 0.0};
+                cublasZaxpy(ctx.cublas, Nd, &one, d_dpsi_z, 1, d_div_z, 1);
+            }
+
+            // Hpsi -= 0.5 * div
+            mgga_ham_sub_z_kernel<<<gs, bs>>>(d_Hpsi_n, d_div_z, Nd);
+        }
+
+        sp.restore(sp_cp);
     }
 }
 
