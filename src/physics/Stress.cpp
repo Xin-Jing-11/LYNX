@@ -303,7 +303,8 @@ void Stress::compute_xc_stress(
 
     // GGA gradient correction
     bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol || xc_type == XCType::GGA_RPBE);
-    if (is_gga && Dxcdgrho) {
+    bool has_gradient = is_gga || (xc_type == XCType::MGGA_SCAN);
+    if (has_gradient && Dxcdgrho) {
         int FDn = gradient.stencil().FDn();
         int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
         int Nd_ex = (nx+2*FDn) * (ny+2*FDn) * (nz+2*FDn);
@@ -369,6 +370,12 @@ void Stress::compute_xc_stress(
 
         for (int i = 0; i < 6; ++i) {
             stress_xc_[i] -= stress_gga[i];
+        }
+        // Debug: print gradient correction (in GPa after /V)
+        {
+            double g = 29421.01569650548;
+            double V = cell_measure_;
+                        (stress_xc_[0]+stress_gga[0])/V*g, stress_gga[0]/V*g, stress_gga[1]/V*g);
         }
     }
 
