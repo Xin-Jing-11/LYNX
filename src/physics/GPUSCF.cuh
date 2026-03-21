@@ -195,6 +195,10 @@ private:
     const KPoints* kpoints_ = nullptr;
     double* d_Y_s1_ = nullptr;  // separate d_Y for spin-down (when Nspin=2)
 
+    // Per-k-point complex psi on GPU (stays on device; no CPU round-trip)
+    // Layout: d_psi_z_kpt_[s * Nkpts + k], each is (Nd, Nband) cuDoubleComplex
+    std::vector<void*> d_psi_z_kpt_;
+
     // K-point Bloch phase state (set per k-point in inner loop)
     double kxLx_ = 0, kyLy_ = 0, kzLz_ = 0;
     double* d_bloch_fac_ = nullptr;  // [n_influence * 2] cos/sin per influence atom

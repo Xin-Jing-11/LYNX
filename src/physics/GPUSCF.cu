@@ -2113,6 +2113,16 @@ double GPUSCFRunner::run(
             (size_t)gpu_vnl_.total_phys_nproj * Nband * sizeof(cuDoubleComplex), 0));
     }
 
+    // Allocate per-k-point psi buffers on GPU (psi stays on device; no CPU round-trip)
+    if (is_kpt_) {
+        int total_kpt_bufs = Nspin_local_ * Nkpts;
+        d_psi_z_kpt_.resize(total_kpt_bufs, nullptr);
+        size_t psi_kpt_bytes = (size_t)Nd_ * Nband * sizeof(cuDoubleComplex);
+        for (int i = 0; i < total_kpt_bufs; i++) {
+            CUDA_CHECK(cudaMallocAsync(&d_psi_z_kpt_[i], psi_kpt_bytes, 0));
+        }
+    }
+
     // Allocate d_Y_s1_ if spin-polarized (non-SOC)
     if (Nspin >= 2 && !has_soc_ && !d_Y_s1_) {
         CUDA_CHECK(cudaMallocAsync(&d_Y_s1_, (size_t)Nd_ * Nband * y_elem_size, 0));
@@ -2695,7 +2705,7 @@ double GPUSCFRunner::run(
                 }
 
                 if (is_kpt_) {
-                    // Complex k-point path
+                    // Complex k-point path — psi stays on GPU in per-k buffers
                     for (int k = 0; k < Nkpts; k++) {
                         int k_glob = kpt_start_ + k;
                         Vec3 kpt = kpoints_->kpts_cart()[k_glob];
@@ -2706,19 +2716,19 @@ double GPUSCFRunner::run(
                         kzLz_ = kpt.z * cell_lengths.z;
                         setup_bloch_factors(nloc_influence, crystal, kpt);
 
-                        // Upload complex psi from CPU if first pass of first iter
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+
+                        // Randomize and upload only on very first pass
                         if (scf_iter == 0 && pass == 0) {
                             wfn.randomize_kpt(s, k, 42 + s * Nkpts + k);
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            auto* psi_c = wfn.psi_kpt(s, k).data();
-                            // cuDoubleComplex layout matches std::complex<double>
-                            std::memcpy(h_psi_z.data(), psi_c, 2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                            size_t psi_bytes = 2 * (size_t)Nd_ * Nband * sizeof(double);
+                            CUDA_CHECK(cudaMemcpy(d_psi_sk, wfn.psi_kpt(s, k).data(),
+                                                   psi_bytes, cudaMemcpyHostToDevice));
                         }
 
                         gpu::eigensolver_solve_z_gpu(
-                            d_psi_z, d_eigvals_arr[s_glob], d_Veff_s,
+                            d_psi_sk, d_eigvals_arr[s_glob], d_Veff_s,
                             reinterpret_cast<cuDoubleComplex*>(d_Y_arr[s_glob]),
                             d_Xold_z, d_Xnew_z,
                             d_Hpsi_z, d_x_ex_z,
@@ -2728,22 +2738,12 @@ double GPUSCFRunner::run(
                             cheb_degree, dV_,
                             hamiltonian_apply_z_cb);
 
-                        // Download eigenvalues + complex psi back to CPU wfn
+                        // Download eigenvalues only (tiny; needed for occupations on CPU)
                         CUDA_CHECK(cudaDeviceSynchronize());
-                        {
-                            // Store eigenvalues per (s, k)
-                            CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals_arr[s_glob],
-                                                   Nband * sizeof(double), cudaMemcpyDeviceToHost));
-                            for (int n = 0; n < Nband; n++)
-                                wfn.eigenvalues(s, k)(n) = h_eigvals[n];
-                        }
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            CUDA_CHECK(cudaMemcpy(h_psi_z.data(), d_psi_z,
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost));
-                            std::memcpy(wfn.psi_kpt(s, k).data(), h_psi_z.data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                        }
+                        CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals_arr[s_glob],
+                                               Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                        for (int n = 0; n < Nband; n++)
+                            wfn.eigenvalues(s, k)(n) = h_eigvals[n];
                     }
                 } else {
                     // Real gamma-point path
@@ -2887,14 +2887,14 @@ double GPUSCFRunner::run(
                 if (is_kpt_) {
                     for (int k = 0; k < Nkpts; k++) {
                         double wk = kpt_weights[k];
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
-                        }
-                        gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+                        // Per-k-point occupations for spin-polarized
+                        for (int n = 0; n < Nband; n++)
+                            h_occ[n] = wfn.occupations(s, k)(n);
+                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                                               Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
                                                    d_rho_spin_target, Nd_, Nband, occfac * wk);
                     }
                 } else {
@@ -2912,14 +2912,14 @@ double GPUSCFRunner::run(
                 if (is_kpt_) {
                     for (int k = 0; k < Nkpts; k++) {
                         double wk = kpt_weights[k];
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
-                        }
-                        gpu::compute_density_z_gpu(d_psi_z, d_occ_arr[s_glob],
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
+                        // Per-k-point occupations (different k-points can differ near Ef)
+                        for (int n = 0; n < Nband; n++)
+                            h_occ[n] = wfn.occupations(s, k)(n);
+                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                                               Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
                                                    d_rho_new_total, Nd_, Nband, occfac * wk);
                     }
                 } else {
@@ -2960,26 +2960,22 @@ double GPUSCFRunner::run(
                         double kyLy = kpt.y * cell_lengths.y;
                         double kzLz = kpt.z * cell_lengths.z;
 
-                        // Upload complex psi (already in wfn from eigensolver download)
-                        {
-                            std::vector<double> h_psi_z(2 * Nd_ * Nband);
-                            std::memcpy(h_psi_z.data(), wfn.psi_kpt(s, k).data(),
-                                        2 * Nd_ * Nband * sizeof(double));
-                            CUDA_CHECK(cudaMemcpy(d_psi_z, h_psi_z.data(),
-                                2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
-                        }
+                        // Psi stays on GPU in per-k buffer
+                        cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                            d_psi_z_kpt_[s * Nkpts + k]);
 
                         for (int n = 0; n < Nband; n++) {
                             double occ_n = wfn.occupations(s, k)(n);
                             if (occ_n < 1e-16) continue;
                             double weight = occ_n * wk;
 
-                            const cuDoubleComplex* d_psi_n = d_psi_z + (size_t)n * Nd_;
-                            gpu::halo_exchange_z_gpu(d_psi_n,
-                                reinterpret_cast<cuDoubleComplex*>(ctx.buf.aar_x_ex),
+                            const cuDoubleComplex* d_psi_n = d_psi_sk + (size_t)n * Nd_;
+                            // Use x_ex_z (allocated for Nd_ex*Ns complex entries),
+                            // NOT aar_x_ex (only Nd_ex doubles — half the needed size)
+                            cuDoubleComplex* d_xex_z = static_cast<cuDoubleComplex*>(ctx.buf.x_ex_z);
+                            gpu::halo_exchange_z_gpu(d_psi_n, d_xex_z,
                                 nx_, ny_, nz_, FDn_, 1, true, true, true,
                                 kxLx, kyLy, kzLz);
-                            cuDoubleComplex* d_xex_z = reinterpret_cast<cuDoubleComplex*>(ctx.buf.aar_x_ex);
                             gpu::gradient_z_gpu(d_xex_z, d_dpsi_x_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
                             gpu::gradient_z_gpu(d_xex_z, d_dpsi_y_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
                             gpu::gradient_z_gpu(d_xex_z, d_dpsi_z_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
@@ -3445,7 +3441,18 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
                 std::memcpy(wfn.psi(s, 0).col(j), h_psi.data() + j * Nd_, Nd_ * sizeof(double));
         }
     }
-    // For k-point, complex psi is already downloaded into wfn during SCF loop
+    // Download per-k-point complex psi from GPU to CPU wfn (for forces/stress)
+    if (is_kpt_ && !d_psi_z_kpt_.empty()) {
+        int Nkpts = (int)d_psi_z_kpt_.size() / std::max(Nspin_local_, 1);
+        size_t psi_bytes = 2 * (size_t)Nd_ * Nband * sizeof(double);
+        for (int s = 0; s < Nspin_local_; s++) {
+            for (int k = 0; k < Nkpts; k++) {
+                CUDA_CHECK(cudaMemcpy(wfn.psi_kpt(s, k).data(),
+                                       d_psi_z_kpt_[s * Nkpts + k],
+                                       psi_bytes, cudaMemcpyDeviceToHost));
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -3941,6 +3948,8 @@ void GPUSCFRunner::cleanup() {
     if (d_mix_fkm1_) { cudaFreeAsync(d_mix_fkm1_, 0); d_mix_fkm1_ = nullptr; }
     if (d_bloch_fac_) { cudaFreeAsync(d_bloch_fac_, 0); d_bloch_fac_ = nullptr; }
     if (d_alpha_z_) { cudaFreeAsync(d_alpha_z_, 0); d_alpha_z_ = nullptr; }
+    for (auto& p : d_psi_z_kpt_) { if (p) cudaFreeAsync(p, 0); }
+    d_psi_z_kpt_.clear();
     if (d_tau_) { cudaFreeAsync(d_tau_, 0); d_tau_ = nullptr; }
     if (d_vtau_) { cudaFreeAsync(d_vtau_, 0); d_vtau_ = nullptr; }
     d_vtau_active_ = nullptr;
