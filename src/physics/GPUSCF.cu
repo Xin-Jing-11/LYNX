@@ -1360,8 +1360,8 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
     int grid_sz = gpu::ceildiv(Nd, bs);
     int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
 
-    if (is_gga_) {
-        // GGA path (PBE)
+    if (is_mgga_ || is_gga_) {
+        // GGA / mGGA path (shared gradient + sigma pipeline)
         double* d_Drho_x = ctx.buf.grad_rho;
         double* d_Drho_y = ctx.buf.grad_rho + Nd;
         double* d_Drho_z = ctx.buf.grad_rho + 2 * Nd;
@@ -1387,8 +1387,13 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         // sigma = |nabla rho|^2
         sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
-        // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
-        gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        if (is_mgga_) {
+            // SCAN mGGA kernel: (rho_xc, sigma, tau) -> (exc, Vxc, v2xc, vtau)
+            gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
+        } else {
+            // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
+            gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        }
 
         // Divergence correction: Vxc += -div(v2xc * nabla rho)
         // Scale gradients by v2xc (in place)
@@ -1441,8 +1446,8 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
     double* d_rho_up = d_rho;
     double* d_rho_dn = d_rho + Nd;
 
-    if (is_gga_) {
-        // Spin GGA path
+    if (is_mgga_ || is_gga_) {
+        // Spin GGA / mGGA path
         // Need workspace for rho_xc[3*Nd], sigma[3*Nd], Drho_x/y/z[3*Nd], v2xc[3*Nd]
         auto& sp = ctx.scratch_pool;
         size_t sp_cp = sp.checkpoint();
@@ -1478,8 +1483,21 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         int grid3 = gpu::ceildiv(3 * Nd, bs);
         sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
 
-        // Fused spin PBE kernel: (rho_xc[3*Nd], sigma[3*Nd]) -> (exc, Vxc[2*Nd], v2xc[3*Nd])
-        gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        if (is_mgga_) {
+            // SCAN spin mGGA kernel
+            // sigma layout: [total|up|dn], rho_xc: [total|up|dn]
+            // d_tau_: [up(Nd)|dn(Nd)], d_vtau_: [up(Nd)|dn(Nd)]
+            gpu::mgga_scan_spin_gpu(
+                d_rho_xc + Nd, d_rho_xc + 2 * Nd,          // rho_up, rho_dn
+                d_sigma + Nd, d_sigma + 2 * Nd, d_sigma,    // sigma_uu, sigma_dd, sigma_tot
+                d_tau_, d_tau_ + Nd,                         // tau_up, tau_dn
+                d_exc, d_Vxc, d_Vxc + Nd,                   // exc, vxc_up, vxc_dn
+                d_v2xc, d_v2xc + Nd, d_v2xc + 2 * Nd,      // v2xc_c, v2xc_x_up, v2xc_x_dn
+                d_vtau_, d_vtau_ + Nd, Nd);                  // vtau_up, vtau_dn
+        } else {
+            // Fused spin PBE kernel: (rho_xc[3*Nd], sigma[3*Nd]) -> (exc, Vxc[2*Nd], v2xc[3*Nd])
+            gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+        }
 
         // Divergence correction for 3 columns
         // Scale: Drho_dir[col] *= v2xc[col]
