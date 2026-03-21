@@ -1,0 +1,128 @@
+{
+  "lattice": {
+    "vectors": [
+      [
+        9.085874550185203,
+        0.0,
+        0.0
+      ],
+      [
+        -4.542937265643974,
+        7.868598168774805,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        9.944620469186143
+      ]
+    ],
+    "cell_type": "nonorthogonal"
+  },
+  "grid": {
+    "Nx": 38,
+    "Ny": 38,
+    "Nz": 41,
+    "fd_order": 12,
+    "boundary_conditions": [
+      "periodic",
+      "periodic",
+      "periodic"
+    ]
+  },
+  "atoms": [
+    {
+      "element": "Be",
+      "pseudo_file": "Be.pot",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.47162328,
+          0.0,
+          0.33333333
+        ],
+        [
+          -0.0,
+          0.47162328,
+          0.66666667
+        ],
+        [
+          0.52837672,
+          0.52837672,
+          0.0
+        ]
+      ]
+    },
+    {
+      "element": "F",
+      "pseudo_file": "F.pot",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.41645016,
+          0.26426141,
+          0.21083189
+        ],
+        [
+          0.73573859,
+          0.15218875,
+          0.54416522
+        ],
+        [
+          0.84781125,
+          0.58354984,
+          0.87749856
+        ],
+        [
+          0.15218875,
+          0.73573859,
+          0.45583478
+        ],
+        [
+          0.58354984,
+          0.84781125,
+          0.12250144
+        ],
+        [
+          0.26426141,
+          0.41645016,
+          0.78916811
+        ]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "LDA_PZ",
+    "spin": "collinear",
+    "temperature": 1160.45,
+    "smearing": "gaussian",
+    "Nstates": 37
+  },
+  "kpoints": {
+    "grid": [
+      4,
+      4,
+      3
+    ],
+    "shift": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "scf": {
+    "max_iter": 250,
+    "tolerance": 0.000332,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3,
+    "cheb_degree": 31,
+    "rho_trigger": 4
+  },
+  "output": {
+    "print_forces": true,
+    "calc_stress": true,
+    "print_atoms": true
+  }
+}

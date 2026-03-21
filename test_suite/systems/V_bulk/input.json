@@ -1,0 +1,86 @@
+{
+  "lattice": {
+    "vectors": [
+      [
+        9.237099222001161,
+        0.0,
+        -3.265807758725287
+      ],
+      [
+        -2.309274805500288,
+        3.9997812977334357,
+        -1.632903879362647
+      ],
+      [
+        0.0,
+        0.0,
+        4.898711619190676
+      ]
+    ],
+    "cell_type": "nonorthogonal"
+  },
+  "grid": {
+    "Nx": 41,
+    "Ny": 20,
+    "Nz": 20,
+    "fd_order": 12,
+    "boundary_conditions": [
+      "periodic",
+      "periodic",
+      "periodic"
+    ]
+  },
+  "atoms": [
+    {
+      "element": "V",
+      "pseudo_file": "V.pot",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.5,
+          0.0,
+          -0.0
+        ]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "LDA_PZ",
+    "spin": "collinear",
+    "temperature": 1160.45,
+    "smearing": "gaussian",
+    "Nstates": 20
+  },
+  "kpoints": {
+    "grid": [
+      3,
+      6,
+      6
+    ],
+    "shift": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "scf": {
+    "max_iter": 250,
+    "tolerance": 0.000137,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3,
+    "cheb_degree": 30,
+    "rho_trigger": 4
+  },
+  "output": {
+    "print_forces": true,
+    "calc_stress": true,
+    "print_atoms": true
+  }
+}

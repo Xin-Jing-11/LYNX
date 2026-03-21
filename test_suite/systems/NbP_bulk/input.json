@@ -1,0 +1,103 @@
+{
+  "lattice": {
+    "vectors": [
+      [
+        6.1058597488679895,
+        0.0,
+        -1.7172399186120435
+      ],
+      [
+        -0.48296441135037405,
+        6.08672889856321,
+        -1.7172399186120462
+      ],
+      [
+        -0.003944368650679921,
+        -0.004269722797759215,
+        11.69966651323334
+      ]
+    ],
+    "cell_type": "nonorthogonal"
+  },
+  "grid": {
+    "Nx": 26,
+    "Ny": 26,
+    "Nz": 49,
+    "fd_order": 12,
+    "boundary_conditions": [
+      "periodic",
+      "periodic",
+      "periodic"
+    ]
+  },
+  "atoms": [
+    {
+      "element": "Nb",
+      "pseudo_file": "Nb.pot",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.74992295,
+          0.24992295,
+          0.4998459
+        ],
+        [
+          0.99992295,
+          0.99992295,
+          0.9998459
+        ]
+      ]
+    },
+    {
+      "element": "P",
+      "pseudo_file": "P.pot",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.16744705,
+          0.66744705,
+          0.3348941
+        ],
+        [
+          0.41744705,
+          0.41744705,
+          0.8348941
+        ]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "LDA_PZ",
+    "spin": "collinear",
+    "temperature": 1160.45,
+    "smearing": "gaussian",
+    "Nstates": 26
+  },
+  "kpoints": {
+    "grid": [
+      5,
+      5,
+      3
+    ],
+    "shift": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "scf": {
+    "max_iter": 250,
+    "tolerance": 0.000209,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3,
+    "cheb_degree": 30,
+    "rho_trigger": 4
+  },
+  "output": {
+    "print_forces": true,
+    "calc_stress": true,
+    "print_atoms": true
+  }
+}
