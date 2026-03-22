@@ -1030,3 +1030,213 @@ TEST(EndToEnd, Fe2_spin_SCAN_kpt) {
         }
     }
 }
+
+// ============================================================
+// Test: Si4 PBE0 gamma — hybrid functional, ortho cell, 4 atoms
+// Reference: SPARC PBE0 (settings matched to SCAN Si4 benchmark)
+//   Settings:
+//     Lattice: ortho 10.0×10.26×10.5 Bohr
+//     Grid: 25×26×27, FD_ORDER=12
+//     K-points: Gamma only
+//     XC: PBE0 (exx_frac=0.25, spherical divergence)
+//     Temperature: 315.775131 K Fermi-Dirac
+//     Mixing: density, Kerker preconditioner, beta=0.3, history=7
+//     Pseudopotential: Si-4-2.4_LDA.psp8
+//   NOTE: Gamma-only PBE0 may have G=0 divergence for periodic systems
+// ============================================================
+TEST(EndToEnd, Si4_PBE0_gamma) {
+    std::string json_file = "tests/data/Si4_PBE0_gamma.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== Si4 PBE0 Gamma Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+        // SCF iteration count not tracked in DFTResult
+
+        if (result.forces.size() >= 12) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                            i + 1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    max_force = std::max(max_force, std::abs(result.forces[3*i+d]));
+                }
+            }
+            std::printf("  Max force component: %.6e Ha/Bohr\n", max_force);
+        }
+
+        if (result.stress.size() >= 6) {
+            const double au_to_gpa = 29421.01569650548;
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+}
+
+// ============================================================
+// Test: Si4 PBE0 with k-points — hybrid functional, ortho cell
+// Reference: SPARC PBE0
+//   Settings: same as Si4_PBE0_gamma but with 2×2×2 k-points (0.5 shift)
+// ============================================================
+TEST(EndToEnd, Si4_PBE0_kpt) {
+    std::string json_file = "tests/data/Si4_PBE0_kpt.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== Si4 PBE0 k-point Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+        // SCF iteration count not tracked in DFTResult
+
+        if (result.forces.size() >= 12) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                            i + 1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    max_force = std::max(max_force, std::abs(result.forces[3*i+d]));
+                }
+            }
+            std::printf("  Max force component: %.6e Ha/Bohr\n", max_force);
+        }
+
+        if (result.stress.size() >= 6) {
+            const double au_to_gpa = 29421.01569650548;
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+}
+
+// ============================================================
+// Test: Fe2 spin PBE0 gamma — hybrid functional, non-ortho cell, spin-polarized
+// Reference: SPARC PBE0
+//   Settings:
+//     Lattice: non-ortho sheared BCC [[2.840052,0.284,0],[0.284,2.840052,0],[0,0,2.840052]]
+//     Grid: 29×29×29, FD_ORDER=12
+//     K-points: Gamma only
+//     Spin: collinear, initial [1.0, 1.0]
+//     XC: PBE0 (exx_frac=0.25)
+//     Temperature: 315.775131 K Fermi-Dirac
+//     Pseudopotential: Fe_LDA.psp8
+// ============================================================
+TEST(EndToEnd, Fe2_spin_PBE0_gamma) {
+    std::string json_file = "tests/data/Fe2_spin_PBE0_gamma.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== Fe2 spin PBE0 Gamma Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+        // SCF iteration count not tracked in DFTResult
+
+        if (result.forces.size() >= 6) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force = 0.0;
+            for (int i = 0; i < 2; ++i) {
+                std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                            i + 1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    max_force = std::max(max_force, std::abs(result.forces[3*i+d]));
+                }
+            }
+            std::printf("  Max force component: %.6e Ha/Bohr\n", max_force);
+        }
+
+        if (result.stress.size() >= 6) {
+            const double au_to_gpa = 29421.01569650548;
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+}
+
+// ============================================================
+// Test: Fe2 spin PBE0 with k-points — hybrid functional, cubic cell, spin-polarized
+// Reference: SPARC PBE0
+//   Settings:
+//     Lattice: cubic 2.840052 Bohr
+//     Grid: 29×29×29, FD_ORDER=12
+//     K-points: 3×2×2 with (0.0, 0.5, 0.5) shift
+//     Spin: collinear, initial [1.0, 1.0]
+//     XC: PBE0 (exx_frac=0.25)
+//     Temperature: 315.775131 K Fermi-Dirac
+//     Pseudopotential: Fe_LDA.psp8
+// ============================================================
+TEST(EndToEnd, Fe2_spin_PBE0_kpt) {
+    std::string json_file = "tests/data/Fe2_spin_PBE0_kpt.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== Fe2 spin PBE0 k-point Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+        // SCF iteration count not tracked in DFTResult
+
+        if (result.forces.size() >= 6) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force = 0.0;
+            for (int i = 0; i < 2; ++i) {
+                std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                            i + 1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    max_force = std::max(max_force, std::abs(result.forces[3*i+d]));
+                }
+            }
+            std::printf("  Max force component: %.6e Ha/Bohr\n", max_force);
+        }
+
+        if (result.stress.size() >= 6) {
+            const double au_to_gpa = 29421.01569650548;
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+}
