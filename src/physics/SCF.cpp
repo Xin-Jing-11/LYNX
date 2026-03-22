@@ -1177,12 +1177,20 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
                    xc_type == XCType::GGA_RPBE);
 
     // Allocate work arrays (needed for download_results)
-    int dxc_ncol = is_gga ? ((Nspin == 2) ? 3 : 1) : 0;
+    bool has_gradient = is_gga || (xc_type == XCType::MGGA_SCAN);
+    int dxc_ncol = has_gradient ? ((Nspin == 2) ? 3 : 1) : 0;
     Veff_ = NDArray<double>(Nd_d * Nspin);
     Vxc_ = NDArray<double>(Nd_d * Nspin);
     exc_ = NDArray<double>(Nd_d);
     phi_ = NDArray<double>(Nd_d);
     if (dxc_ncol > 0) Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
+    if (xc_type == XCType::MGGA_SCAN) {
+        int tau_size = (Nspin == 2) ? 3 * Nd_d : Nd_d;
+        int vtau_size = (Nspin == 2) ? 2 * Nd_d : Nd_d;
+        tau_ = NDArray<double>(tau_size);
+        vtau_ = NDArray<double>(vtau_size);
+        xc_type_ = xc_type;
+    }
 
     // Initialize density: use atomic superposition for better GPU SCF convergence
     if (density_.Nd_d() == 0) {
@@ -1236,8 +1244,28 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         phi_.data(), Vxc_.data(), exc_.data(), Veff_.data(),
         dxc_ncol > 0 ? Dxcdgrho_.data() : nullptr,
         density_.rho_total().data(), wfn);
+    // Download mGGA tau/vtau if applicable
+    if (xc_type == XCType::MGGA_SCAN && tau_.size() > 0 && vtau_.size() > 0) {
+        if (Nspin == 2) {
+            // GPU layout: [up(Nd)|dn(Nd)], CPU layout: [up(Nd)|dn(Nd)|total(Nd)]
+            // Download up/dn from GPU into first 2*Nd slots, compute total at end
+            int gpu_tau_size = 2 * Nd_d;
+            int gpu_vtau_size = 2 * Nd_d;
+            gpu_runner_->download_tau_vtau(tau_.data(), vtau_.data(),
+                                            gpu_tau_size, gpu_vtau_size);
+            // Compute total tau = up + dn (store in 3rd slot)
+            for (int i = 0; i < Nd_d; i++)
+                tau_(2 * Nd_d + i) = tau_(i) + tau_(Nd_d + i);
+        } else {
+            gpu_runner_->download_tau_vtau(tau_.data(), vtau_.data(),
+                                            (int)tau_.size(), (int)vtau_.size());
+        }
+    }
     // Keep spin densities in sync
-    if (Nspin == 1) {
+    if (Nspin == 2) {
+        // Download spin-resolved densities from GPU for stress computation
+        gpu_runner_->download_spin_densities(density_.rho(0).data(), density_.rho(1).data(), Nd_d);
+    } else {
         std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
     }
 

@@ -109,6 +109,12 @@ public:
         double* stress_soc,   // [6] Voigt stress
         double* energy_soc);  // scalar SOC energy
 
+    // Download mGGA tau and vtau from GPU to CPU arrays
+    void download_tau_vtau(double* tau, double* vtau, int tau_size, int vtau_size);
+
+    // Download spin-resolved densities from GPU
+    void download_spin_densities(double* rho_up, double* rho_dn, int size);
+
     const EnergyComponents& energy() const { return energy_; }
     bool converged() const { return converged_; }
     double fermi_energy() const { return Ef_; }
@@ -253,7 +259,8 @@ private:
     void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, int Nd);
     void gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_Vxc, int Nd);
     int gpu_poisson_solve(double* d_rho, double* d_phi, double* d_rhs, int Nd, double tol);
-    void gpu_pulay_mix(double* d_x, const double* d_g, int Nd, int m_depth, double beta_mix);
+    void gpu_pulay_mix(double* d_x, const double* d_g, int Nd, int m_depth, double beta_mix,
+                       int Nd_kerker = 0, double beta_mag = 0.0);
 
     void setup_bloch_factors(const std::vector<AtomNlocInfluence>& nloc_influence,
                              const Crystal& crystal, const Vec3& kpt_cart);
