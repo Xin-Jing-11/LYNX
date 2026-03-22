@@ -286,13 +286,6 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
             Pf[i] = amix * f_wavg[i];
     }
 
-    // Debug: print mixing variables (matching SPARC format)
-    if (iter_ < 3) {
-                    iter_, f_k_[0], f_k_[1], f_k_[2], f_k_[3], f_k_[4]);
-                    x_k[0], x_k[1], x_k[2], x_k[3], x_k[4]);
-                    x_wavg[0], x_wavg[1], x_wavg[2], x_wavg[3], x_wavg[4]);
-                    Pf[0], Pf[1], Pf[2], Pf[3], Pf[4]);
-    }
 
     // x_{k+1} = x_wavg + Pf (amix is already in Pf)
     // Save x_km1 = x_k before overwriting
@@ -300,10 +293,6 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
 
     for (int i = 0; i < N; ++i) {
         x_k[i] = x_wavg[i] + Pf[i];
-    }
-
-    if (iter_ < 3) {
-                    x_k[0], x_k[1], x_k[2], x_k[3], x_k[4]);
     }
 
     iter_++;

@@ -101,7 +101,7 @@ std::array<double, 6> Stress::compute(
         double dV = grid.dV();
         double mgga_corr = 0.0;
         if (Nspin == 2) {
-            // tau: [up|dn|total], vtau: [up|dn]
+            // tau layout: [up|dn|total], vtau layout: [up|dn]
             for (int i = 0; i < 2 * Nd_d; ++i)
                 mgga_corr += tau[i] * vtau[i];
         } else {
@@ -221,11 +221,6 @@ std::array<double, 6> Stress::compute(
                     }
                 }
             }
-        }
-
-        // Debug: print mGGA stress before normalization
-        {
-            const double au2gpa = 29421.01569650548;
         }
 
         // Allreduce over band, kpt, spin communicators
@@ -370,12 +365,6 @@ void Stress::compute_xc_stress(
 
         for (int i = 0; i < 6; ++i) {
             stress_xc_[i] -= stress_gga[i];
-        }
-        // Debug: print gradient correction (in GPa after /V)
-        {
-            double g = 29421.01569650548;
-            double V = cell_measure_;
-                        (stress_xc_[0]+stress_gga[0])/V*g, stress_gga[0]/V*g, stress_gga[1]/V*g);
         }
     }
 
