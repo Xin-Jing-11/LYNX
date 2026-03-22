@@ -9,6 +9,10 @@
 
 namespace lynx {
 
+static bool is_mgga_type(XCType t) {
+    return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
+}
+
 void SCF::setup(const FDGrid& grid,
                  const Domain& domain,
                  const FDStencil& stencil,
@@ -113,10 +117,10 @@ void SCF::compute_tau(const Wavefunction& wfn,
     // Zero tau
     std::memset(tau_.data(), 0, tau_.size() * sizeof(double));
 
-    // NOTE: Do NOT apply spin_fac to tau. Unlike density which is ρ = spin_fac * Σ f_n |ψ|²,
-    // tau is τ = Σ f_n |∇ψ|² (no spin factor). SPARC uses g_nk = occ[n] for tau (no 2x).
-    // The factor of 2 in density accounts for spin degeneracy (2 electrons per orbital),
-    // but tau is the kinetic energy density which doesn't have this doubling.
+    // NOTE: Unlike density which uses spin_fac (2 for non-spin, 1 for spin),
+    // tau uses g_nk = occ[n] (no spin_fac) in the accumulation loop.
+    // A separate factor of 0.5 is applied to spin-polarized tau AFTER accumulation
+    // (see below) to get the physical KED: τ_σ = (1/2) Σ f_nσ |∇ψ_nσ|².
 
     // Gradient operator and halo exchange setup
     int FDn = gradient_->stencil().FDn();
@@ -231,16 +235,21 @@ void SCF::compute_tau(const Wavefunction& wfn,
     }
 
     // NOTE: No dV division needed. LYNX wavefunctions satisfy <ψ_m|ψ_n> = Σ_i ψ*_m(i) ψ_n(i) dV = δ_mn.
-    // Density is computed as ρ[i] = Σ_n g_nk |ψ_n(i)|² (no 1/dV) and integrates as Σ ρ*dV = Ne.
-    // Tau follows the same convention: τ[i] = Σ_n g_nk |∇ψ_n(i)|² (no 1/dV).
-    // (SPARC divides BOTH ρ and τ by dV; LYNX divides neither.)
+    // Density is computed as ρ[i] = spin_fac * Σ_n g_nk |ψ_n(i)|² (no 1/dV).
+    // Tau follows a DIFFERENT convention from density: τ_σ = (1/2) Σ_n f_n |∇ψ_n|²
+    // For non-spin: τ = Σ_n f_n |∇ψ_n|² (the 1/2 and spin-degeneracy factor of 2 cancel)
+    // For spin-polarized: τ_σ = (1/2) Σ_n f_nσ |∇ψ_nσ|² — need explicit 0.5 factor
+    // This ensures τ_total = τ_up + τ_dn = Σ_n f_n |∇ψ_n|² = τ_nonspin
+    // Reference: SPARC mGGAtauTransferTauVxc.c line 186: vscal *= 0.5 for spin
 
-    // For spin-polarized: compute total = up + dn in the third slot
+    // For spin-polarized: apply 0.5 factor then compute total = up + dn
     if (Nspin_global_ == 2) {
         double* tau_up = tau_.data();
         double* tau_dn = tau_.data() + Nd_d;
         double* tau_tot = tau_.data() + 2 * Nd_d;
         for (int i = 0; i < Nd_d; ++i) {
+            tau_up[i] *= 0.5;
+            tau_dn[i] *= 0.5;
             tau_tot[i] = tau_up[i] + tau_dn[i];
         }
     }
@@ -352,9 +361,9 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
     }
 
     // 4. Set vtau on Hamiltonian for mGGA (only after tau has been computed)
-    if (xc_type_ == XCType::MGGA_SCAN && tau_valid_) {
+    if (is_mgga_type(xc_type_) && tau_valid_) {
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data());
-    } else if (xc_type_ == XCType::MGGA_SCAN) {
+    } else if (is_mgga_type(xc_type_)) {
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(nullptr);
     }
 }
@@ -561,7 +570,7 @@ double SCF::run(Wavefunction& wfn,
     if (is_soc_) {
         Veff_spinor_ = NDArray<double>(4 * Nd_d);
     }
-    if (xc_type_ == XCType::MGGA_SCAN) {
+    if (is_mgga_type(xc_type_)) {
         int tau_size = (Nspin_global_ == 2) ? 3 * Nd_d : Nd_d;
         int vtau_size = (Nspin_global_ == 2) ? 2 * Nd_d : Nd_d;
         tau_ = NDArray<double>(tau_size);
@@ -641,37 +650,6 @@ double SCF::run(Wavefunction& wfn,
         }
     }
 
-    // Debug: dump initial state for comparison with reference
-    if (rank_world == 0) {
-        const double* rho0 = density_.rho_total().data();
-        double rho_sum = 0;
-        for (int i = 0; i < Nd_d; ++i) rho_sum += rho0[i];
-        std::printf("DUMP_INIT_RHO sum=%.15e sum*dV=%.15e rho[0]=%.15e rho[6143]=%.15e\n",
-                    rho_sum, rho_sum * grid_->dV(), rho0[0], Nd_d > 6143 ? rho0[6143] : 0.0);
-        std::printf("DUMP_PSEUDOCHARGE sum=%.15e b[0]=%.15e b[6143]=%.15e\n",
-                    0.0, rho_b[0], Nd_d > 6143 ? rho_b[6143] : 0.0); // sum computed later
-        std::printf("DUMP_INIT_PHI min=%.15e max=%.15e phi[0]=%.15e\n",
-                    *std::min_element(phi_.data(), phi_.data() + Nd_d),
-                    *std::max_element(phi_.data(), phi_.data() + Nd_d),
-                    phi_.data()[0]);
-        double vxc_sum = 0, veff_sum = 0;
-        for (int i = 0; i < Nd_d; ++i) { vxc_sum += Vxc_.data()[i]; veff_sum += Veff_.data()[i]; }
-        std::printf("DUMP_INIT_VXC sum=%.15e Vxc[0]=%.15e\n", vxc_sum, Vxc_.data()[0]);
-        std::printf("DUMP_INIT_VEFF sum=%.15e Veff[0]=%.15e\n", veff_sum, Veff_.data()[0]);
-        for (int i = 0; i < 10 && i < Nd_d; ++i) {
-            std::printf("DUMP_VEFF[%d]=%.15e\n", i, Veff_.data()[i]);
-        }
-        for (int i = 0; i < 10 && i < Nd_d; ++i) {
-            std::printf("DUMP_PHI[%d]=%.15e\n", i, phi_.data()[i]);
-        }
-        for (int i = 0; i < 10 && i < Nd_d; ++i) {
-            std::printf("DUMP_RHO[%d]=%.15e\n", i, rho0[i]);
-        }
-        for (int i = 0; i < 10 && i < Nd_d; ++i) {
-            std::printf("DUMP_B[%d]=%.15e\n", i, rho_b[i]);
-        }
-    }
-
     // Lanczos to estimate spectrum
     if (is_soc_) {
         Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
@@ -745,15 +723,6 @@ double SCF::run(Wavefunction& wfn,
         }
     }
 
-    // Debug: dump initial wavefunctions
-    if (rank_world == 0 && !is_kpt_) {
-        const double* psi0 = wfn.psi(0, 0).data();
-        std::printf("DUMP_PSI_INIT[0..4]= %.15e %.15e %.15e %.15e %.15e\n",
-                    psi0[0], psi0[1], psi0[2], psi0[3], psi0[4]);
-        std::printf("DUMP_PSI_INIT seed=%u Nd_d=%d Nband_loc=%d\n",
-                    rand_seed, Nd_d, wfn.Nband());
-    }
-
     double E_prev = 0.0;
     converged_ = false;
     if (Natom <= 0) Natom = std::max(1, Nelectron / 4);
@@ -799,7 +768,7 @@ double SCF::run(Wavefunction& wfn,
                     int s_glob = spin_start_ + s;
                     double* Veff_s = Veff_.data() + s_glob * Nd_d;
                     // Set per-spin vtau for mGGA
-                    if (xc_type_ == XCType::MGGA_SCAN && Nspin_global_ == 2) {
+                    if (is_mgga_type(xc_type_) && Nspin_global_ == 2) {
                         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(vtau_.data() + s_glob * Nd_d);
                     }
                     for (int k = 0; k < Nkpts; ++k) {
@@ -850,24 +819,10 @@ double SCF::run(Wavefunction& wfn,
             Ef_ = Occupation::compute(wfn, Nelectron, beta, params_.smearing,
                                       kpt_weights, *kptcomm_, *spincomm_, kpt_start_);
 
-            // Debug: dump eigenvalues for first 3 iterations
-            if (rank_world == 0 && scf_iter < 3) {
-                std::printf("DUMP_SCF_ITER=%d PASS=%d\n", scf_iter, chefsi_pass);
-                std::printf("DUMP_EIGVALS");
-                for (int n = 0; n < Nband && n < 30; ++n)
-                    std::printf(" %.10e", wfn.eigenvalues(0, 0)(n));
-                std::printf("\n");
-                std::printf("DUMP_EFERMI=%.15e\n", Ef_);
-                std::printf("DUMP_OCC");
-                for (int n = 0; n < Nband && n < 30; ++n)
-                    std::printf(" %.10e", wfn.occupations(0, 0)(n));
-                std::printf("\n");
-            }
-
         }
 
         // Compute tau for mGGA after CheFSI solve
-        if (xc_type_ == XCType::MGGA_SCAN) {
+        if (is_mgga_type(xc_type_)) {
             compute_tau(wfn, kpt_weights, kpt_start_, band_start_);
             tau_valid_ = true;
         }
@@ -882,17 +837,6 @@ double SCF::run(Wavefunction& wfn,
             rho_new.allocate(Nd_d, Nspin);
             rho_new.compute(wfn, kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
                             Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
-        }
-
-        // Debug: dump new density for first 3 iterations
-        if (rank_world == 0 && scf_iter < 3) {
-            double rho_out_sum = 0;
-            for (int i = 0; i < Nd_d; ++i) rho_out_sum += rho_new.rho_total().data()[i];
-            std::printf("DUMP_RHO_OUT sum=%.15e sum*dV=%.15e\n",
-                        rho_out_sum, rho_out_sum * grid_->dV());
-            for (int i = 0; i < 10 && i < Nd_d; ++i)
-                std::printf("DUMP_RHO_OUT[%d]=%.15e\n", i, rho_new.rho_total().data()[i]);
-            std::printf("DUMP_EBAND=%.15e\n", Energy::band_energy(wfn, kpt_weights, Nspin, kpt_start_));
         }
 
         // 3. For potential mixing: compute Veff_out from rho_out, energy with Escc correction
@@ -921,8 +865,8 @@ double SCF::run(Wavefunction& wfn,
                                            kpt_weights, Nd_d, grid_->dV(),
                                            rho_core, Ef_, kpt_start_,
                                            kptcomm_, spincomm_, Nspin, nullptr,
-                                           (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
-                                           (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
+                                           is_mgga_type(xc_type_) ? tau_.data() : nullptr,
+                                           is_mgga_type(xc_type_) ? vtau_.data() : nullptr);
 
             // Self-consistency correction: Escc = ∫ ρ_out · (Veff_out - Veff_in) dV
             // This corrects for the fact that Eband was computed with Veff_in
@@ -954,8 +898,8 @@ double SCF::run(Wavefunction& wfn,
                                            kpt_weights, Nd_d, grid_->dV(),
                                            rho_core, Ef_, kpt_start_,
                                            kptcomm_, spincomm_, Nspin, nullptr,
-                                           (xc_type_ == XCType::MGGA_SCAN) ? tau_.data() : nullptr,
-                                           (xc_type_ == XCType::MGGA_SCAN) ? vtau_.data() : nullptr);
+                                           is_mgga_type(xc_type_) ? tau_.data() : nullptr,
+                                           is_mgga_type(xc_type_) ? vtau_.data() : nullptr);
         }
 
         // 5. Evaluate SCF error
