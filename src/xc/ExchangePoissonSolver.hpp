@@ -1,0 +1,95 @@
+#pragma once
+
+#include "core/types.hpp"
+#include "core/FDGrid.hpp"
+#include "core/Lattice.hpp"
+#include "core/KPoints.hpp"
+
+#include <vector>
+#include <complex>
+
+namespace lynx {
+
+// FFT-based Poisson solver for exact exchange.
+//
+// Solves: -Lap(sol) = rhs in Fourier space, with singularity removal
+// appropriate for the exchange integral (spherical cutoff or auxiliary function).
+//
+// Since LYNX has NO domain decomposition, every call operates on the full grid.
+// No MPI communication is needed within the solver.
+class ExchangePoissonSolver {
+public:
+    ExchangePoissonSolver() = default;
+
+    // Setup the solver and precompute FFT Poisson constants.
+    // For gamma-point: Nkpts_shift=1, no phase factors.
+    // For k-points: computes unique (k-q) shifts and phase factors.
+    // Kx_hf, Ky_hf, Kz_hf: HF k-point grid dimensions (= Monkhorst-Pack grid)
+    void setup(const FDGrid& grid, const Lattice& lattice,
+               const EXXParams& params, const KPoints* kpoints,
+               int Kx_hf = 1, int Ky_hf = 1, int Kz_hf = 1);
+
+    // Solve batch of Poisson equations (gamma-point, real).
+    // rhs: [Nd * ncol] input (destroyed)
+    // sol: [Nd * ncol] output
+    void solve_batch(double* rhs, int ncol, double* sol);
+
+    // Solve batch of Poisson equations (k-point, complex).
+    // Applies phase factors exp(±i*(k-q)*r) internally.
+    // rhs: [Nd * ncol] complex input (NOT destroyed — internal copy made)
+    // sol: [Nd * ncol] complex output
+    void solve_batch_kpt(const Complex* rhs, int ncol, Complex* sol,
+                         int kpt_k, int kpt_q);
+
+    int Nkpts_shift() const { return Nkpts_shift_; }
+    const std::vector<int>& Kptshift_map() const { return Kptshift_map_; }
+
+private:
+    int Nx_ = 0, Ny_ = 0, Nz_ = 0;
+    int Nd_ = 0;       // Nx*Ny*Nz
+    int Ndc_ = 0;      // Nz*Ny*(Nx/2+1) for real FFT output
+    bool is_gamma_ = true;
+
+    // Precomputed Poisson constants in Fourier space
+    // For gamma: [Ndc * Nkpts_shift] (real FFT output size per shift)
+    // For k-point: [Nd * Nkpts_shift]
+    std::vector<double> pois_const_;
+
+    // K-point shift infrastructure
+    int Nkpts_shift_ = 1;
+    int Nkpts_sym_ = 0;
+    int Nkpts_hf_ = 0;
+    std::vector<double> k1_shift_, k2_shift_, k3_shift_;
+    std::vector<int> Kptshift_map_;  // [Nkpts_sym * Nkpts_hf]
+
+    // Phase factors for k-point shifts
+    std::vector<Complex> neg_phase_;  // [Nd * (Nkpts_shift-1)]
+    std::vector<Complex> pos_phase_;  // [Nd * (Nkpts_shift-1)]
+
+    // Auxiliary function constant for G=0 (HSE)
+    double const_aux_ = 0.0;
+
+    // Grid parameters
+    double dx_ = 0, dy_ = 0, dz_ = 0;
+    double L1_ = 0, L2_ = 0, L3_ = 0;
+    Mat3 lapcT_;
+    double Jacbdet_ = 1.0;
+
+    // EXX params
+    int exx_div_flag_ = 0;
+    double hyb_range_fock_ = -1.0;
+
+    // Internal methods
+    int Kx_hf_ = 1, Ky_hf_ = 1, Kz_hf_ = 1;
+
+    void compute_auxiliary_constant();
+    double singularity_removal_const(double G2) const;
+    void compute_pois_fft_const();
+    void find_k_shift(const KPoints* kpoints);
+    void kshift_phasefactor();
+
+    // Apply phase factor to complex array
+    void apply_phase_factor(Complex* data, int ncol, bool positive, int kpt_k, int kpt_q) const;
+};
+
+} // namespace lynx

@@ -22,6 +22,8 @@ add_library(lynx_core
     electronic/ElectronDensity.cpp
     electronic/Occupation.cpp
     xc/XCFunctional.cpp
+    xc/ExchangePoissonSolver.cpp
+    xc/ExactExchange.cpp
     solvers/LinearSolver.cpp
     solvers/PoissonSolver.cpp
     solvers/Mixer.cpp
@@ -55,6 +57,7 @@ endif()
 target_link_libraries(lynx_core PUBLIC xc)
 target_include_directories(lynx_core SYSTEM PUBLIC ${LIBXC_INCLUDE_DIRS})
 
+
 add_executable(lynx main.cpp)
 target_link_libraries(lynx PRIVATE lynx_core)
 
@@ -81,3 +84,6 @@ endif()
 
 add_executable(lynx_hpsi_compare ../tests/test_HamiltonianCompare.cpp)
 target_link_libraries(lynx_hpsi_compare PRIVATE lynx_core)
+
+add_executable(lynx_exx_unit ../tests/test_exx_unit.cpp)
+target_link_libraries(lynx_exx_unit PRIVATE lynx_core)

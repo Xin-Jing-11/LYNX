@@ -44,12 +44,32 @@ public:
     // Check if this is a Gamma-only calculation (single k-point at origin)
     bool is_gamma_only() const;
 
+    // --- HF k-point grid for exact exchange ---
+    // Setup the full unreduced HF k-point grid and mapping to sym-reduced set.
+    // Called after generate(). Nkpts_hf = Nkpts_full (no downsampling).
+    void setup_hf_kpoints();
+
+    // Number of full (unreduced) HF k-points
+    int Nkpts_hf() const { return Nkpts_hf_; }
+    // HF k-points in Cartesian reciprocal space
+    const std::vector<Vec3>& kpts_hf_cart() const { return kpts_hf_cart_; }
+    // Maps HF k-point index -> sym-reduced k-point index (for psi/occ lookup)
+    const std::vector<int>& kpthf_ind() const { return kpthf_ind_; }
+    // +1 if k_hf matches k_sym directly, 0 if k_hf = -k_sym (need conj)
+    const std::vector<int>& kpthf_pn() const { return kpthf_pn_; }
+
 private:
     int Nkpts_sym_ = 0;
     int Nkpts_full_ = 0;
     std::vector<Vec3> kpts_cart_;
     std::vector<Vec3> kpts_red_;
     std::vector<double> weights_;
+
+    // HF k-point grid
+    int Nkpts_hf_ = 0;
+    std::vector<Vec3> kpts_hf_cart_;
+    std::vector<int> kpthf_ind_;   // [Nkpts_hf] -> index in sym-reduced set
+    std::vector<int> kpthf_pn_;    // [Nkpts_hf] -> 1 if direct, 0 if time-reversed
 };
 
 } // namespace lynx

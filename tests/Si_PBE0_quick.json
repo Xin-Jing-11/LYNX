@@ -1,0 +1,21 @@
+{
+    "lattice": {
+        "vectors": [
+            [7.254915574973976, 7.254915574973976, 0.0],
+            [0.0, 7.254915574973976, 7.254915574973976],
+            [7.254915574973976, 0.0, 7.254915574973976]
+        ],
+        "cell_type": "nonorthogonal"
+    },
+    "grid": { "Nx": 30, "Ny": 30, "Nz": 30, "fd_order": 12, "boundary_conditions": ["P","P","P"] },
+    "atoms": [{
+        "element": "Si",
+        "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/tests/xc/exx_tests/Si2_kpt_PBE0/Si_ONCV_PBE-1.2.psp8",
+        "coordinates": [[0.0,0.0,0.0],[0.25,0.25,0.25]],
+        "fractional": true
+    }],
+    "electronic": { "xc": "PBE0", "Nstates": 12, "smearing": "fermi-dirac", "temperature": 315.773 },
+    "exx": { "tol_fock": 2e-7, "maxit_fock": 20, "minit_fock": 2 },
+    "scf": { "max_iter": 50, "tolerance": 1e-6, "rho_trigger": 4, "mixing_parameter": 0.1 },
+    "output": { "print_forces": true }
+}

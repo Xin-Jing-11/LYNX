@@ -8,7 +8,14 @@
 if(DEFINED ENV{MKLROOT})
     set(MKLROOT "$ENV{MKLROOT}")
 else()
-    set(MKLROOT "/opt/intel/mkl")
+    # Try common oneAPI paths
+    if(EXISTS "/opt/intel/oneapi/mkl/latest")
+        set(MKLROOT "/opt/intel/oneapi/mkl/latest")
+    elseif(EXISTS "/opt/intel/mkl")
+        set(MKLROOT "/opt/intel/mkl")
+    else()
+        set(MKLROOT "/opt/intel/oneapi/mkl/latest")
+    endif()
 endif()
 
 find_path(MKL_INCLUDE_DIR mkl.h

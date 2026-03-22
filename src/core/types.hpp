@@ -17,7 +17,28 @@ enum class MixingVariable { Density = 0, Potential = 1 };
 enum class MixingPrecond { None = 0, Kerker = 1 };
 enum class PoissonSolverType { AAR = 0, CG = 1 };
 enum class SmearingType { GaussianSmearing = 0, FermiDirac = 1 };
-enum class XCType { LDA_PZ, LDA_PW, GGA_PBE, GGA_PBEsol, GGA_RPBE, MGGA_SCAN, MGGA_RSCAN, MGGA_R2SCAN };
+enum class XCType { LDA_PZ, LDA_PW, GGA_PBE, GGA_PBEsol, GGA_RPBE, HYB_PBE0, HYB_HSE };
+
+// Exact exchange parameters for hybrid functionals
+struct EXXParams {
+    double exx_frac = 0.25;           // fraction of exact exchange
+    double hyb_range_fock = -1.0;     // screening omega (-1=PBE0 unscreened, 0.11=HSE06)
+    int exx_div_flag = 0;             // 0=spherical cutoff, 1=auxiliary function
+    int maxit_fock = 20;              // max outer Fock iterations
+    int minit_fock = 2;               // min outer Fock iterations before convergence check
+    double tol_fock = 1e-5;           // Fock loop convergence tolerance (per atom)
+};
+
+inline bool is_hybrid(XCType xc) {
+    return xc == XCType::HYB_PBE0 || xc == XCType::HYB_HSE;
+}
+
+// Get the base GGA functional type for hybrid functionals (for XC evaluation via libxc)
+inline XCType hybrid_base_xc(XCType xc) {
+    if (xc == XCType::HYB_PBE0 || xc == XCType::HYB_HSE)
+        return XCType::GGA_PBE;
+    return xc;
+}
 
 // 3x3 matrix — row-major, trivially copyable (CUDA-friendly)
 struct Mat3 {
