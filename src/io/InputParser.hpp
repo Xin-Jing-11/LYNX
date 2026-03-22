@@ -38,6 +38,9 @@ struct SystemConfig {
     XCType xc = XCType::GGA_PBE;
     int Nelectron = 0;
 
+    // Exact exchange (hybrid functionals)
+    EXXParams exx_params;
+
     // K-points
     int Kx = 1, Ky = 1, Kz = 1;
     Vec3 kpt_shift = {0, 0, 0};

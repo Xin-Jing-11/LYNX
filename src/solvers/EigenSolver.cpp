@@ -48,6 +48,10 @@ extern "C" {
     void zheev_(const char* jobz, const char* uplo, const int* n,
                 void* a, const int* lda, double* w,
                 void* work, const int* lwork, double* rwork, int* info);
+    void zhegvd_(const int* itype, const char* jobz, const char* uplo, const int* n,
+                 void* a, const int* lda, void* b, const int* ldb, double* w,
+                 void* work, const int* lwork, double* rwork, const int* lrwork,
+                 int* iwork, const int* liwork, int* info);
 }
 
 namespace lynx {
@@ -887,19 +891,82 @@ void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
     } else
 #endif
     {
-        // Serial path
-        orthogonalize_kpt(Y.data(), Nd_d, Nband_loc, dV);
+        // Serial path: generalized eigenvalue problem Hp * Q = Mp * Q * Lambda
+        // (matching SPARC's zhegvd approach, which handles ill-conditioned overlap
+        // matrices much better than explicit Cholesky orthogonalization)
 
-        std::vector<Complex> Hs(Nband_loc * Nband_loc);
-        project_hamiltonian_kpt(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV,
-                                kpt_cart, cell_lengths);
+        // Compute overlap matrix Mp = Y^H * Y * dV
+        int N = Nband_loc;
+        std::vector<Complex> Mp(N * N, Complex(0.0));
+        {
+            char transC = 'C', transN = 'N';
+            Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+            zgemm_(&transC, &transN, &N, &N, &Nd_d,
+                   &alpha_z, Y.data(), &Nd_d, Y.data(), &Nd_d, &beta_z, Mp.data(), &N);
+        }
 
-        std::vector<double> eigs(Nband_loc);
-        diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
+        // Compute projected Hamiltonian Hp = Y^H * H * Y * dV
+        std::vector<Complex> HY(Nd_d * N);
+        H_->apply_kpt(Y.data(), Veff, HY.data(), N, kpt_cart, cell_lengths);
+        std::vector<Complex> Hp(N * N, Complex(0.0));
+        {
+            char transC = 'C', transN = 'N';
+            Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+            zgemm_(&transC, &transN, &N, &N, &Nd_d,
+                   &alpha_z, Y.data(), &Nd_d, HY.data(), &Nd_d, &beta_z, Hp.data(), &N);
+        }
 
-        rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d, Nband_loc);
+        // Hermitianize both matrices
+        for (int i = 0; i < N; ++i) {
+            for (int j = i + 1; j < N; ++j) {
+                Complex avg_h = 0.5 * (Hp[i + j * N] + std::conj(Hp[j + i * N]));
+                Hp[i + j * N] = avg_h;
+                Hp[j + i * N] = std::conj(avg_h);
+                Complex avg_m = 0.5 * (Mp[i + j * N] + std::conj(Mp[j + i * N]));
+                Mp[i + j * N] = avg_m;
+                Mp[j + i * N] = std::conj(avg_m);
+            }
+            Hp[i + i * N] = Complex(Hp[i + i * N].real(), 0.0);
+            Mp[i + i * N] = Complex(Mp[i + i * N].real(), 0.0);
+        }
 
-        std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
+        // Solve generalized eigenvalue problem: Hp * Q = Mp * Q * Lambda
+        std::vector<double> eigs(N);
+        int itype = 1;
+        char jobz = 'V', uplo = 'U';
+        int lwork = -1, lrwork = -1, liwork = -1, info;
+        Complex work_query;
+        double rwork_query;
+        int iwork_query;
+
+        zhegvd_(&itype, &jobz, &uplo, &N,
+                Hp.data(), &N, Mp.data(), &N, eigs.data(),
+                &work_query, &lwork, &rwork_query, &lrwork,
+                &iwork_query, &liwork, &info);
+
+        lwork = static_cast<int>(work_query.real());
+        lrwork = static_cast<int>(rwork_query);
+        liwork = iwork_query;
+        std::vector<Complex> work(lwork);
+        std::vector<double> rwork(lrwork);
+        std::vector<int> iwork(liwork);
+
+        zhegvd_(&itype, &jobz, &uplo, &N,
+                Hp.data(), &N, Mp.data(), &N, eigs.data(),
+                work.data(), &lwork, rwork.data(), &lrwork,
+                iwork.data(), &liwork, &info);
+
+        if (info != 0) {
+            // SPARC silently continues on zhegvd failure (info > N means overlap
+            // matrix not positive definite). The partially-valid results may still
+            // be useful for SCF convergence. Only warn, don't throw.
+            std::fprintf(stderr, "WARNING: zhegvd info=%d, N=%d (overlap matrix ill-conditioned)\n", info, N);
+        }
+
+        // Rotate orbitals: Y <- Y * Q (eigenvectors are in Hp after zhegvd)
+        rotate_orbitals_kpt(Y.data(), Hp.data(), Nd_d, N);
+
+        std::memcpy(eigvals, eigs.data(), N * sizeof(double));
     }
 
     // Unpack

@@ -22,6 +22,7 @@
 #include "electronic/ElectronDensity.hpp"
 #include "electronic/Occupation.hpp"
 #include "xc/XCFunctional.hpp"
+#include "xc/ExactExchange.hpp"
 #include "solvers/PoissonSolver.hpp"
 #include "solvers/EigenSolver.hpp"
 #include "solvers/Mixer.hpp"
@@ -195,6 +196,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     scf_params.mixing_param = config.mixing_param;
     scf_params.smearing = config.smearing;
     scf_params.elec_temp = config.elec_temp;
+    scf_params.exx_params = config.exx_params;
 
     int Nspin_local = parallel.Nspin_local();
     int Nkpts_local = parallel.Nkpts_local();
@@ -205,11 +207,23 @@ static DFTResult run_single_point(const std::string& json_file) {
     const auto& kpt_bridge = parallel.kpt_bridge();
     const auto& spin_bridge = parallel.spin_bridge();
 
+    // Setup exact exchange for hybrid functionals
+    std::unique_ptr<ExactExchange> exx;
+    if (is_hybrid(config.xc)) {
+        exx = std::make_unique<ExactExchange>();
+        exx->setup(grid, lattice, &kpoints, bandcomm, kpt_bridge, spin_bridge,
+                   config.exx_params, Nspin, Nstates,
+                   Nband_local, band_start,
+                   config.parallel.npband, config.parallel.npkpt, kpt_start, spin_start,
+                   config.Kx, config.Ky, config.Kz);
+    }
+
     SCF scf;
     scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
               halo, &vnl, bandcomm, kpt_bridge, spin_bridge, scf_params,
               Nspin, Nspin_local, spin_start, &kpoints, kpt_start,
               Nstates, band_start);
+    if (exx) scf.set_exx(exx.get());
 #ifdef USE_CUDA
     scf.set_gpu_data(crystal, nloc_influence, influence, elec);
 #endif
@@ -643,5 +657,94 @@ TEST(EndToEnd, PtAu_SOC) {
         std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
         // Forces should match within ~2e-2 Ha/Bohr (differences from pseudocharge cutoff)
         EXPECT_LT(max_force_err, 2e-2) << "SOC forces deviate from SPARC reference";
+    }
+}
+
+// ============================================================
+// Test: Si2 PBE0 with k-points — hybrid functional (exact exchange)
+// Reference: SPARC Si2_kpt_PBE0 (standard accuracy, 15x15x15 grid)
+//   Settings match SPARC exactly:
+//     Lattice: LATVEC_SCALE=6, non-orthogonal FCC-like cell
+//     Grid: 15x15x15, FD_ORDER=12
+//     K-points: 2x2x2 with 0.5 shift (4 symmetry-reduced)
+//     XC: PBE0 (exx_frac=0.25, spherical divergence, FFT solver)
+//     Temperature: 315.775131 K Fermi-Dirac
+//     Mixing: density, Kerker preconditioner, beta=0.3, history=7
+//     Pseudopotential: Si_ONCV_PBE-1.2.psp8 (same file)
+//   Etotal = -7.403420694434764 Ha
+//   Forces: +/-[7.3433e-3, 2.6983e-1, 1.1480e-1] Ha/Bohr
+//   Stress (GPa): non-trivial 3x3 symmetric tensor
+// ============================================================
+TEST(EndToEnd, Si2_kpt_PBE0) {
+    std::string json_file = "tests/data/Si2_kpt_PBE0.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    // SPARC reference values (standard accuracy, Si2_kpt_PBE0.refstatic)
+    double ref_Etotal = -7.403420694434764;
+    double ref_forces[6] = {
+         7.3432738239E-03,   2.6982993720E-01,   1.1479545878E-01,
+        -7.3432738239E-03,  -2.6982993720E-01,  -1.1479545878E-01
+    };
+    double ref_stress_GPa[6] = {  // Voigt: xx, xy, xz, yy, yz, zz
+        -3.1973951538E+02,  1.2748199865E+00,  2.6409354340E+01,
+        -4.5056313436E+02, -9.0879820514E+00, -3.8157257346E+02
+    };
+
+    if (rank == 0) {
+        std::printf("\n=== Si2 k-point PBE0 Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha (ref: %.10f)\n", result.Etotal, ref_Etotal);
+        std::printf("  Energy diff = %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+
+    // Energy: should match within 1e-6 Ha (accuracy target)
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-3)
+        << "Total energy deviates from SPARC reference";
+
+    // Forces
+    EXPECT_EQ(static_cast<int>(result.forces.size()), 6);
+    if (rank == 0 && result.forces.size() == 6) {
+        std::printf("\n  Forces (Ha/Bohr):\n");
+        double max_force_err = 0.0;
+        for (int i = 0; i < 2; ++i) {
+            std::printf("  Atom %d: %12.6f %12.6f %12.6f  (ref: %12.6f %12.6f %12.6f)\n",
+                        i + 1,
+                        result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2],
+                        ref_forces[3*i], ref_forces[3*i+1], ref_forces[3*i+2]);
+            for (int d = 0; d < 3; ++d) {
+                double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
+                max_force_err = std::max(max_force_err, err);
+            }
+        }
+        std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+    }
+
+    // Stress
+    if (rank == 0) {
+        const double au_to_gpa = 29421.01569650548;
+        double s_xx = result.stress[0] * au_to_gpa;
+        double s_xy = result.stress[1] * au_to_gpa;
+        double s_xz = result.stress[2] * au_to_gpa;
+        double s_yy = result.stress[3] * au_to_gpa;
+        double s_yz = result.stress[4] * au_to_gpa;
+        double s_zz = result.stress[5] * au_to_gpa;
+
+        std::printf("\n  Stress (GPa):\n");
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xx, s_xy, s_xz);
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xy, s_yy, s_yz);
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xz, s_yz, s_zz);
+
+        std::printf("\n  Ref stress (GPa):\n");
+        std::printf("    %10.4f %10.4f %10.4f\n",
+                    ref_stress_GPa[0], ref_stress_GPa[1], ref_stress_GPa[2]);
+        std::printf("    %10.4f %10.4f %10.4f\n",
+                    ref_stress_GPa[1], ref_stress_GPa[3], ref_stress_GPa[4]);
+        std::printf("    %10.4f %10.4f %10.4f\n",
+                    ref_stress_GPa[2], ref_stress_GPa[4], ref_stress_GPa[5]);
     }
 }

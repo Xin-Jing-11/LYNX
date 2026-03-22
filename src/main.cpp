@@ -27,6 +27,7 @@
 #include "parallel/Parallelization.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "core/KPoints.hpp"
+#include "xc/ExactExchange.hpp"
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
@@ -293,6 +294,27 @@ int main(int argc, char** argv) {
         lynx::Hamiltonian hamiltonian;
         hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
+        // ===== Setup exact exchange (hybrid functionals) =====
+        std::unique_ptr<lynx::ExactExchange> exx;
+        if (lynx::is_hybrid(config.xc)) {
+            exx = std::make_unique<lynx::ExactExchange>();
+            const auto& scf_bandcomm_ref = (config.parallel.npband > 1) ? kptcomm : bandcomm;
+            int Nstates_exx = config.Nstates;
+            if (Nstates_exx <= 0) {
+                if (is_soc) Nstates_exx = Nelectron + 20;
+                else Nstates_exx = Nelectron / 2 + 10;
+            }
+            exx->setup(grid, lattice, &kpoints, scf_bandcomm_ref, kpt_bridge, spin_bridge,
+                       config.exx_params, Nspin, Nstates_exx,
+                       Nband_local, band_start,
+                       config.parallel.npband, config.parallel.npkpt, kpt_start, spin_start,
+                       config.Kx, config.Ky, config.Kz);
+            if (rank == 0)
+                std::printf("Hybrid functional: %s with exx_frac=%.4f\n",
+                            config.xc == lynx::XCType::HYB_PBE0 ? "PBE0" : "HSE06",
+                            config.exx_params.exx_frac);
+        }
+
         // ===== Setup SCF =====
         int Nstates = config.Nstates;
         if (Nstates <= 0) {
@@ -316,6 +338,7 @@ int main(int argc, char** argv) {
         scf_params.elec_temp = config.elec_temp;
         scf_params.cheb_degree = config.cheb_degree;
         scf_params.rho_trigger = config.rho_trigger;
+        scf_params.exx_params = config.exx_params;
 
         lynx::SCF scf;
         // For band parallelism (npband > 1):
@@ -330,6 +353,11 @@ int main(int argc, char** argv) {
                   halo, &vnl, scf_bandcomm, kpt_bridge, spin_bridge, scf_params,
                   Nspin, Nspin_local, spin_start, &kpoints, kpt_start,
                   Nstates, band_start);
+        // Set exact exchange on SCF if hybrid
+        if (exx) {
+            scf.set_exx(exx.get());
+        }
+
 #ifdef USE_CUDA
         scf.set_gpu_data(crystal, nloc_influence, influence, elec);
 #endif
@@ -452,6 +480,8 @@ int main(int argc, char** argv) {
             const auto& E = scf.energy();
             std::printf("  Eband   = %18.10f Ha\n", E.Eband);
             std::printf("  Exc     = %18.10f Ha\n", E.Exc);
+            if (lynx::is_hybrid(config.xc))
+                std::printf("  Eexx    = %18.10f Ha\n", E.Eexx);
             std::printf("  Ehart   = %18.10f Ha\n", E.Ehart);
             std::printf("  Eself   = %18.10f Ha\n", E.Eself);
             std::printf("  Ec      = %18.10f Ha\n", E.Ec);

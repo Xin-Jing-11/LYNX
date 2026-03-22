@@ -13,6 +13,8 @@ namespace lynx {
 
 using Complex = std::complex<double>;
 
+class ExactExchange;  // forward declaration
+
 // Hamiltonian operator: H*psi = -0.5*Lap*psi + Veff*psi + Vnl*psi
 //
 // Takes raw pointers for hot-path compatibility (CUDA-ready).
@@ -60,6 +62,11 @@ public:
                           int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
                           double c = 0.0) const;
 
+    // Exact exchange integration
+    void set_exx(const ExactExchange* exx) { exx_ = exx; }
+    const ExactExchange* get_exx() const { return exx_; }
+    void set_exx_context(int spin, int kpt) { exx_spin_ = spin; exx_kpt_ = kpt; }
+
     const FDStencil& stencil() const { return *stencil_; }
     const Domain& domain() const { return *domain_; }
 
@@ -70,6 +77,9 @@ private:
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;      // Gamma-point nonlocal
     const NonlocalProjector* vnl_kpt_ = nullptr;   // k-point nonlocal (complex Chi)
+    const ExactExchange* exx_ = nullptr;           // Exact exchange operator (may be null)
+    int exx_spin_ = 0;                             // Current spin for EXX
+    int exx_kpt_ = 0;                              // Current k-point for EXX
 
     // Templated stencil application (shared between real and complex)
     template<typename T>

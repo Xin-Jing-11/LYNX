@@ -1,4 +1,5 @@
 #include "operators/Hamiltonian.hpp"
+#include "xc/ExactExchange.hpp"
 #include <vector>
 #include <cstring>
 #include <cmath>
@@ -27,6 +28,11 @@ void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
     if (vnl_ && vnl_->is_setup()) {
         vnl_->apply(psi, y, ncol, grid_->dV());
     }
+    // Apply exact exchange if available
+    if (exx_ && exx_->is_setup()) {
+        int Nd_d = domain_->Nd_d();
+        exx_->apply_Vx(psi, Nd_d, ncol, Nd_d, y, Nd_d, exx_spin_);
+    }
 }
 
 void Hamiltonian::apply_local(const double* psi, const double* Veff, double* y,
@@ -52,6 +58,11 @@ void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
     apply_local_kpt(psi, Veff, y, ncol, kpt_cart, cell_lengths, c);
     if (vnl_kpt_ && vnl_kpt_->is_setup()) {
         vnl_kpt_->apply_kpt(psi, y, ncol, grid_->dV());
+    }
+    // Apply exact exchange if available
+    if (exx_ && exx_->is_setup()) {
+        int Nd_d = domain_->Nd_d();
+        exx_->apply_Vx_kpt(psi, Nd_d, ncol, Nd_d, y, Nd_d, exx_spin_, exx_kpt_);
     }
 }
 

@@ -19,6 +19,7 @@ struct EnergyComponents {
     double Ehart = 0.0;      // Hartree (electrostatic) energy
     double Eself = 0.0;      // Self energy of pseudocharges
     double Ec = 0.0;         // Correction energy (overlap of b)
+    double Eexx = 0.0;       // Exact exchange energy
     double Entropy = 0.0;    // Electronic entropy contribution (-T*S)
     double Etotal = 0.0;     // Total free energy
     double Eatom = 0.0;      // Energy per atom
