@@ -48,7 +48,7 @@ public:
         return type_ == XCType::GGA_PBE || type_ == XCType::GGA_PBEsol || type_ == XCType::GGA_RPBE;
     }
     bool is_mgga() const {
-        return type_ == XCType::MGGA_SCAN;
+        return type_ == XCType::MGGA_SCAN || type_ == XCType::MGGA_RSCAN || type_ == XCType::MGGA_R2SCAN;
     }
 
 private:
