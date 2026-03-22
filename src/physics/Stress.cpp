@@ -13,6 +13,10 @@
 
 namespace lynx {
 
+static bool is_mgga_type(XCType t) {
+    return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
+}
+
 // Transform gradient from non-Cartesian to Cartesian: ∇_cart = LatUVec^{-1} * ∇_nc
 // (matching reference LYNX nonCart2Cart_grad, which uses gradT^T)
 static inline void nonCart2Cart_grad(const Mat3& uvec_inv, double& x, double& y, double& z) {
@@ -72,7 +76,8 @@ std::array<double, 6> Stress::compute(
     const KPoints* kpoints,
     int kpt_start,
     int band_start,
-    const double* vtau) {
+    const double* vtau,
+    const double* tau) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -90,7 +95,7 @@ std::array<double, 6> Stress::compute(
     if (grid.bcz() == BCType::Periodic) cell_measure_ *= L.z;
 
     // 1. XC stress
-    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid);
+    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid, vtau, tau);
 
     // 1b. NLCC XC stress correction
     if (rho_core) {
@@ -106,14 +111,14 @@ std::array<double, 6> Stress::compute(
                              domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
 
     // 4. mGGA psi stress term: σ_ij += -occfac · Σ_n g_n · ∫ vtau · ∇_i ψ · ∇_j ψ dV
-    if (vtau && (xc_type == XCType::MGGA_SCAN)) {
+    if (vtau && is_mgga_type(xc_type)) {
         int Nd_d = domain.Nd_d();
         int Nband_loc = wfn.Nband();
         int Nspin_local = wfn.Nspin();
         int Nkpts = wfn.Nkpts();
         int nd_ex = halo.nd_ex();
         bool is_orth = grid.lattice().is_orthogonal();
-        const Mat3& gradT = grid.lattice().grad_T();
+        const Mat3& uvec_inv_mgga = grid.lattice().lat_uvec_inv();
         double spin_fac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
         bool is_kpt = wfn.is_complex();
 
@@ -157,8 +162,8 @@ std::array<double, 6> Stress::compute(
                                 } else {
                                     // Non-orth: need to transform gradients to Cartesian
                                     for (int i = 0; i < Nd_d; i++) {
-                                        Complex ga = gradT(a,0)*dpsi[0][i] + gradT(a,1)*dpsi[1][i] + gradT(a,2)*dpsi[2][i];
-                                        Complex gb = gradT(b,0)*dpsi[0][i] + gradT(b,1)*dpsi[1][i] + gradT(b,2)*dpsi[2][i];
+                                        Complex ga = uvec_inv_mgga(a,0)*dpsi[0][i] + uvec_inv_mgga(a,1)*dpsi[1][i] + uvec_inv_mgga(a,2)*dpsi[2][i];
+                                        Complex gb = uvec_inv_mgga(b,0)*dpsi[0][i] + uvec_inv_mgga(b,1)*dpsi[1][i] + uvec_inv_mgga(b,2)*dpsi[2][i];
                                         sum += vtau_s[i] * std::real(std::conj(ga) * gb);
                                     }
                                 }
@@ -185,8 +190,8 @@ std::array<double, 6> Stress::compute(
                                         sum += vtau_s[i] * dpsi[a][i] * dpsi[b][i];
                                 } else {
                                     for (int i = 0; i < Nd_d; i++) {
-                                        double ga = gradT(a,0)*dpsi[0][i] + gradT(a,1)*dpsi[1][i] + gradT(a,2)*dpsi[2][i];
-                                        double gb = gradT(b,0)*dpsi[0][i] + gradT(b,1)*dpsi[1][i] + gradT(b,2)*dpsi[2][i];
+                                        double ga = uvec_inv_mgga(a,0)*dpsi[0][i] + uvec_inv_mgga(a,1)*dpsi[1][i] + uvec_inv_mgga(a,2)*dpsi[2][i];
+                                        double gb = uvec_inv_mgga(b,0)*dpsi[0][i] + uvec_inv_mgga(b,1)*dpsi[1][i] + uvec_inv_mgga(b,2)*dpsi[2][i];
                                         sum += vtau_s[i] * ga * gb;
                                     }
                                 }
@@ -243,13 +248,15 @@ void Stress::compute_xc_stress(
     const Gradient& gradient,
     const HaloExchange& halo,
     const Domain& domain,
-    const FDGrid& grid) {
+    const FDGrid& grid,
+    const double* vtau,
+    const double* tau) {
 
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
     bool is_orth = grid.lattice().is_orthogonal();
 
-    // Compute Exc_corr = ∫ ρ·Vxc dV
+    // Compute Exc_corr = ∫ ρ·Vxc dV  (+ ∫ τ·vtau dV for mGGA)
     // For spin-polarized: ∫ (rho_up·Vxc_up + rho_dn·Vxc_dn) dV
     double Exc_corr = 0.0;
     if (Nspin == 2 && rho_up && rho_dn) {
@@ -263,14 +270,32 @@ void Stress::compute_xc_stress(
     }
     Exc_corr *= dV;
 
+    // mGGA: add ∫ τ·vtau dV to Exc_corr (matching SPARC energy.c)
+    if (is_mgga_type(xc_type) && vtau && tau) {
+        double Emgga = 0.0;
+        if (Nspin == 2) {
+            // tau layout: [up | down | total], vtau layout: [up | down]
+            // Exc_corr += ∫ (tau_up · vtau_up + tau_dn · vtau_dn) dV
+            for (int i = 0; i < 2 * Nd_d; ++i) {
+                Emgga += tau[i] * vtau[i];
+            }
+        } else {
+            for (int i = 0; i < Nd_d; ++i) {
+                Emgga += tau[i] * vtau[i];
+            }
+        }
+        Exc_corr += Emgga * dV;
+    }
+
     // Diagonal: Exc - Exc_corr
     double diag_val = Exc - Exc_corr;
     stress_xc_[0] = stress_xc_[3] = stress_xc_[5] = diag_val;
     stress_xc_[1] = stress_xc_[2] = stress_xc_[4] = 0.0;
 
-    // GGA gradient correction
+    // GGA/mGGA gradient correction: -∫ Dxcdgrho · ∂ρ/∂x_α · ∂ρ/∂x_β dV
     bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol || xc_type == XCType::GGA_RPBE);
-    if (is_gga && Dxcdgrho) {
+    bool needs_grad_stress = is_gga || is_mgga_type(xc_type);
+    if (needs_grad_stress && Dxcdgrho) {
         int FDn = gradient.stencil().FDn();
         int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
         int Nd_ex = (nx+2*FDn) * (ny+2*FDn) * (nz+2*FDn);
@@ -343,6 +368,7 @@ void Stress::compute_xc_stress(
     for (int i = 0; i < 6; ++i) {
         stress_xc_[i] /= cell_measure_;
     }
+
 }
 
 // ---------------------------------------------------------------------------
