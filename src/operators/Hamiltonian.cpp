@@ -1,5 +1,4 @@
 #include "operators/Hamiltonian.hpp"
-#include "xc/ExactExchange.hpp"
 #include <vector>
 #include <cstring>
 #include <cmath>
@@ -28,11 +27,7 @@ void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
     if (vnl_ && vnl_->is_setup()) {
         vnl_->apply(psi, y, ncol, grid_->dV());
     }
-    // Apply exact exchange if available
-    if (exx_ && exx_->is_setup()) {
-        int Nd_d = domain_->Nd_d();
-        exx_->apply_Vx(psi, Nd_d, ncol, Nd_d, y, Nd_d, exx_spin_);
-    }
+    if (vtau_) apply_mgga(psi, y, ncol);
 }
 
 void Hamiltonian::apply_local(const double* psi, const double* Veff, double* y,
@@ -59,11 +54,7 @@ void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
     if (vnl_kpt_ && vnl_kpt_->is_setup()) {
         vnl_kpt_->apply_kpt(psi, y, ncol, grid_->dV());
     }
-    // Apply exact exchange if available
-    if (exx_ && exx_->is_setup()) {
-        int Nd_d = domain_->Nd_d();
-        exx_->apply_Vx_kpt(psi, Nd_d, ncol, Nd_d, y, Nd_d, exx_spin_, exx_kpt_);
-    }
+    if (vtau_) apply_mgga_kpt(psi, y, ncol, kpt_cart, cell_lengths);
 }
 
 void Hamiltonian::apply_local_kpt(const Complex* psi, const double* Veff, Complex* y,
@@ -223,6 +214,119 @@ void Hamiltonian::lap_plus_diag_orth(const double* x_ex, const double* Veff,
 void Hamiltonian::lap_plus_diag_nonorth(const double* x_ex, const double* Veff,
                                          double* y, int ncol, double c) const {
     lap_plus_diag_nonorth_impl(x_ex, Veff, y, ncol, c);
+}
+
+// ---------------------------------------------------------------------------
+// mGGA term: H_mGGA ψ = -0.5 ∇·(vtau · ∇ψ)
+// ---------------------------------------------------------------------------
+
+void Hamiltonian::apply_mgga(const double* psi, double* y, int ncol) const {
+    int Nd_d = domain_->Nd_d();
+    int nd_ex = halo_->nd_ex();
+    bool is_orth = domain_->global_grid().lattice().is_orthogonal();
+    const Mat3& lapcT = domain_->global_grid().lattice().lapc_T();
+    Gradient grad(*stencil_, *domain_);
+
+    std::vector<double> psi_ex(nd_ex);
+    std::vector<double> dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+    std::vector<double> f_ex(nd_ex), div_comp(Nd_d);
+
+    for (int n = 0; n < ncol; ++n) {
+        const double* col = psi + n * Nd_d;
+
+        // 1. Halo exchange and compute gradient of psi
+        halo_->execute(col, psi_ex.data(), 1);
+        grad.apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+        grad.apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+        grad.apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+        // 2. Apply metric tensor for non-orthogonal cells, then multiply by vtau
+        std::vector<double> fx(Nd_d), fy(Nd_d), fz(Nd_d);
+        if (is_orth) {
+            for (int i = 0; i < Nd_d; ++i) {
+                fx[i] = vtau_[i] * dpsi_x[i];
+                fy[i] = vtau_[i] * dpsi_y[i];
+                fz[i] = vtau_[i] * dpsi_z[i];
+            }
+        } else {
+            for (int i = 0; i < Nd_d; ++i) {
+                double dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+                fx[i] = vtau_[i] * (lapcT(0,0)*dx + lapcT(0,1)*dy + lapcT(0,2)*dz);
+                fy[i] = vtau_[i] * (lapcT(1,0)*dx + lapcT(1,1)*dy + lapcT(1,2)*dz);
+                fz[i] = vtau_[i] * (lapcT(2,0)*dx + lapcT(2,1)*dy + lapcT(2,2)*dz);
+            }
+        }
+
+        // 3. Compute divergence: div = d(fx)/dx + d(fy)/dy + d(fz)/dz
+        double* yn = y + n * Nd_d;
+
+        halo_->execute(fx.data(), f_ex.data(), 1);
+        grad.apply(f_ex.data(), div_comp.data(), 0, 1);
+        for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
+
+        halo_->execute(fy.data(), f_ex.data(), 1);
+        grad.apply(f_ex.data(), div_comp.data(), 1, 1);
+        for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
+
+        halo_->execute(fz.data(), f_ex.data(), 1);
+        grad.apply(f_ex.data(), div_comp.data(), 2, 1);
+        for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
+    }
+}
+
+void Hamiltonian::apply_mgga_kpt(const Complex* psi, Complex* y, int ncol,
+                                   const Vec3& kpt_cart, const Vec3& cell_lengths) const {
+    int Nd_d = domain_->Nd_d();
+    int nd_ex = halo_->nd_ex();
+    bool is_orth = domain_->global_grid().lattice().is_orthogonal();
+    const Mat3& lapcT = domain_->global_grid().lattice().lapc_T();
+    Gradient grad(*stencil_, *domain_);
+
+    std::vector<Complex> psi_ex(nd_ex);
+    std::vector<Complex> dpsi_x(Nd_d), dpsi_y(Nd_d), dpsi_z(Nd_d);
+    std::vector<Complex> f_ex(nd_ex), div_comp(Nd_d);
+
+    for (int n = 0; n < ncol; ++n) {
+        const Complex* col = psi + n * Nd_d;
+
+        // 1. Halo exchange and compute gradient of psi
+        halo_->execute_kpt(col, psi_ex.data(), 1, kpt_cart, cell_lengths);
+        grad.apply(psi_ex.data(), dpsi_x.data(), 0, 1);
+        grad.apply(psi_ex.data(), dpsi_y.data(), 1, 1);
+        grad.apply(psi_ex.data(), dpsi_z.data(), 2, 1);
+
+        // 2. Apply metric tensor for non-orthogonal cells, then multiply by vtau
+        std::vector<Complex> fx(Nd_d), fy(Nd_d), fz(Nd_d);
+        if (is_orth) {
+            for (int i = 0; i < Nd_d; ++i) {
+                fx[i] = vtau_[i] * dpsi_x[i];
+                fy[i] = vtau_[i] * dpsi_y[i];
+                fz[i] = vtau_[i] * dpsi_z[i];
+            }
+        } else {
+            for (int i = 0; i < Nd_d; ++i) {
+                Complex dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+                fx[i] = vtau_[i] * (lapcT(0,0)*dx + lapcT(0,1)*dy + lapcT(0,2)*dz);
+                fy[i] = vtau_[i] * (lapcT(1,0)*dx + lapcT(1,1)*dy + lapcT(1,2)*dz);
+                fz[i] = vtau_[i] * (lapcT(2,0)*dx + lapcT(2,1)*dy + lapcT(2,2)*dz);
+            }
+        }
+
+        // 3. Compute divergence: div = d(fx)/dx + d(fy)/dy + d(fz)/dz
+        Complex* yn = y + n * Nd_d;
+
+        halo_->execute_kpt(fx.data(), f_ex.data(), 1, kpt_cart, cell_lengths);
+        grad.apply(f_ex.data(), div_comp.data(), 0, 1);
+        for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
+
+        halo_->execute_kpt(fy.data(), f_ex.data(), 1, kpt_cart, cell_lengths);
+        grad.apply(f_ex.data(), div_comp.data(), 1, 1);
+        for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
+
+        halo_->execute_kpt(fz.data(), f_ex.data(), 1, kpt_cart, cell_lengths);
+        grad.apply(f_ex.data(), div_comp.data(), 2, 1);
+        for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
+    }
 }
 
 // ---------------------------------------------------------------------------

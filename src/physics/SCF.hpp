@@ -48,7 +48,6 @@ struct SCFParams {
     int nchefsi = 1;             // CheFSI passes per subsequent SCF iteration
     double poisson_tol = -1.0;   // Default: computed as tol * 0.01
     bool print_eigen = false;
-    EXXParams exx_params;        // Exact exchange parameters (for hybrid functionals)
 };
 
 class SCF {
@@ -64,7 +63,7 @@ public:
                const FDStencil& stencil,
                const Laplacian& laplacian,
                const Gradient& gradient,
-               Hamiltonian& hamiltonian,
+               const Hamiltonian& hamiltonian,
                const HaloExchange& halo,
                const NonlocalProjector* vnl,
                const MPIComm& bandcomm,
@@ -112,7 +111,7 @@ private:
     const FDStencil* stencil_ = nullptr;
     const Laplacian* laplacian_ = nullptr;
     const Gradient* gradient_ = nullptr;
-    Hamiltonian* hamiltonian_ = nullptr;  // mutable for set_exx_context
+    const Hamiltonian* hamiltonian_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;
     const MPIComm* bandcomm_ = nullptr;
@@ -141,10 +140,6 @@ private:
     XCType xc_type_ = XCType::GGA_PBE;
     const double* Vloc_ = nullptr;
     const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
-
-    // Exact exchange support
-    class ExactExchange* exx_ = nullptr;  // non-owning pointer, set by main.cpp
-    bool in_fock_loop_ = false;           // true during outer Fock iterations
 
 #ifdef USE_CUDA
     std::unique_ptr<GPUSCFRunner> gpu_runner_;
@@ -208,9 +203,6 @@ public:
     // For spin: rho_init is total density (Nd_d), mag_init is magnetization (Nd_d, may be null)
     void set_initial_density(const double* rho_init, int Nd_d,
                              const double* mag_init = nullptr);
-
-    // Set exact exchange operator for hybrid functionals
-    void set_exx(ExactExchange* exx) { exx_ = exx; }
 };
 
 } // namespace lynx

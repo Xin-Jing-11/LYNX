@@ -17,9 +17,7 @@ public:
 
     void setup(XCType type, const Domain& domain, const FDGrid& grid,
                const Gradient* gradient = nullptr,
-               const HaloExchange* halo = nullptr,
-               double hyb_range_fock = -1.0,
-               double exx_frac = 0.25);
+               const HaloExchange* halo = nullptr);
 
     // Evaluate XC energy density and potential (non-spin-polarized).
     // rho: (Nd_d,) electron density
@@ -47,8 +45,7 @@ public:
 
     XCType type() const { return type_; }
     bool is_gga() const {
-        return type_ == XCType::GGA_PBE || type_ == XCType::GGA_PBEsol || type_ == XCType::GGA_RPBE
-            || type_ == XCType::HYB_PBE0 || type_ == XCType::HYB_HSE;
+        return type_ == XCType::GGA_PBE || type_ == XCType::GGA_PBEsol || type_ == XCType::GGA_RPBE;
     }
     bool is_mgga() const {
         return type_ == XCType::MGGA_SCAN || type_ == XCType::MGGA_RSCAN || type_ == XCType::MGGA_R2SCAN;
@@ -60,8 +57,6 @@ private:
     const FDGrid* grid_ = nullptr;
     const Gradient* gradient_ = nullptr;
     const HaloExchange* halo_ = nullptr;
-    double hyb_range_fock_ = -1.0;
-    double exx_frac_ = 0.25;
 
     // Get libxc functional IDs for current XC type
     void get_func_ids(int& xc_id, int& cc_id) const;

@@ -43,8 +43,9 @@ XCType parse_xc(const std::string& s) {
     if (s == "GGA_PBE") return XCType::GGA_PBE;
     if (s == "GGA_PBEsol") return XCType::GGA_PBEsol;
     if (s == "GGA_RPBE") return XCType::GGA_RPBE;
-    if (s == "PBE0" || s == "HYB_PBE0") return XCType::HYB_PBE0;
-    if (s == "HSE06" || s == "HSE" || s == "HYB_HSE") return XCType::HYB_HSE;
+    if (s == "SCAN") return XCType::MGGA_SCAN;
+    if (s == "RSCAN") return XCType::MGGA_RSCAN;
+    if (s == "R2SCAN") return XCType::MGGA_R2SCAN;
     throw std::runtime_error("Unknown XC functional: " + s);
 }
 
@@ -143,28 +144,6 @@ SystemConfig InputParser::parse(const std::string& json_file) {
             config.Nelectron = elec["Nelectron"].get<int>();
     }
 
-    // Set hybrid functional defaults
-    if (config.xc == XCType::HYB_PBE0) {
-        config.exx_params.exx_frac = 0.25;
-        config.exx_params.hyb_range_fock = -1.0;  // unscreened
-        config.exx_params.exx_div_flag = 0;        // spherical cutoff
-    } else if (config.xc == XCType::HYB_HSE) {
-        config.exx_params.exx_frac = 0.25;
-        config.exx_params.hyb_range_fock = 0.11;   // HSE06 screening
-        config.exx_params.exx_div_flag = 1;         // auxiliary function
-    }
-
-    // Exact exchange parameters (override defaults)
-    if (j.contains("exx")) {
-        auto& exx = j["exx"];
-        if (exx.contains("exx_frac")) config.exx_params.exx_frac = exx["exx_frac"].get<double>();
-        if (exx.contains("hyb_range_fock")) config.exx_params.hyb_range_fock = exx["hyb_range_fock"].get<double>();
-        if (exx.contains("exx_div_flag")) config.exx_params.exx_div_flag = exx["exx_div_flag"].get<int>();
-        if (exx.contains("maxit_fock")) config.exx_params.maxit_fock = exx["maxit_fock"].get<int>();
-        if (exx.contains("minit_fock")) config.exx_params.minit_fock = exx["minit_fock"].get<int>();
-        if (exx.contains("tol_fock")) config.exx_params.tol_fock = exx["tol_fock"].get<double>();
-    }
-
     // K-points
     if (j.contains("kpoints")) {
         auto& kp = j["kpoints"];
@@ -261,7 +240,6 @@ void InputParser::resolve_pseudopotentials(SystemConfig& config,
     // Determine which PSP table to use based on XC and spin type
     bool is_soc = (config.spin_type == SpinType::NonCollinear);
     bool is_lda = (config.xc == XCType::LDA_PZ || config.xc == XCType::LDA_PW);
-    // Hybrid functionals use PBE pseudopotentials
 
     std::string table_dir;
     if (is_lda) {

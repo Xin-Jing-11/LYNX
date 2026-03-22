@@ -34,11 +34,9 @@
 | # | Issue | Status | Notes |
 |---|-------|--------|-------|
 | H1 | EXX force/stress not implemented | OPEN | Port from SPARC exactExchangeStress.c (~982 lines) + exactExchangePressure.c (~635 lines) |
-| H2 | K-point EXX not validated | FIXED | PBE0 Etotal matches SPARC to 0.017 mHa. Root cause: NDArray ld padding mismatch in 6 wfn copy sites |
+| H2 | K-point EXX not validated | OPEN | Kptshift_map partially implemented, needs E2E test |
 | H3 | No GPU exact exchange kernels | OPEN | CPU-only BLAS, no CUDA kernels |
 | H4 | Fock loop convergence not validated | OPEN | tol_fock=1e-5, untested stability |
-| H5 | EXX normalization bugs (4 total) | FIXED | Spurious Nd*Xi, 1/dV in apply_Vx, missing sqrt(dV) in energy, wrong kpt weights |
-| H6 | NDArray ld padding mismatch in EXX wfn copies | FIXED | Nd_d=3375 padded to ld=3376, corrupted all bands after first. Fixed 6 copy sites. |
 
 ## Cross-cutting
 

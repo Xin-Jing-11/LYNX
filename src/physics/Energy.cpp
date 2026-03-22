@@ -180,13 +180,6 @@ EnergyComponents Energy::compute_all(
     // Veff = Vxc + phi + ... so we need to subtract double counting
     E.Etotal = E.Eband - E2 + E.Exc - E3 + E.Ehart + E.Eself + E.Ec + E.Entropy;
 
-    {
-        int rank; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        if (rank == 0)
-            std::printf("LYNX_CMP Etot=%.15e Eband=%.15e E1=%.15e E2=%.15e E3=%.15e Exc=%.15e Eself=%.15e Ec=%.15e Entropy=%.15e\n",
-                E.Etotal, E.Eband, E.Ehart, E2, E3, E.Exc, E.Eself, E.Ec, E.Entropy);
-    }
-
     return E;
 }
 
