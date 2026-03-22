@@ -72,7 +72,8 @@ std::array<double, 6> Stress::compute(
     const KPoints* kpoints,
     int kpt_start,
     int band_start,
-    const double* vtau) {
+    const double* vtau,
+    const double* tau) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -91,6 +92,29 @@ std::array<double, 6> Stress::compute(
 
     // 1. XC stress
     compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid);
+
+    // 1a. mGGA Exc_corr correction: subtract ∫τ·vtau dV from the diagonal
+    // XC stress diagonal = (Exc - Exc_corr) / V, where Exc_corr = ∫ρ·Vxc dV + ∫τ·vtau dV.
+    // compute_xc_stress only computed ∫ρ·Vxc dV. We add the mGGA part here.
+    if (vtau && tau && (xc_type == XCType::MGGA_SCAN)) {
+        int Nd_d = domain.Nd_d();
+        double dV = grid.dV();
+        double mgga_corr = 0.0;
+        if (Nspin == 2) {
+            // tau layout: [up|dn|total], vtau layout: [up|dn]
+            for (int i = 0; i < 2 * Nd_d; ++i)
+                mgga_corr += tau[i] * vtau[i];
+        } else {
+            for (int i = 0; i < Nd_d; ++i)
+                mgga_corr += tau[i] * vtau[i];
+        }
+        mgga_corr *= dV;
+        // Subtract from diagonal (Exc_corr increases → diagonal decreases)
+        double diag_correction = -mgga_corr / cell_measure_;
+        stress_xc_[0] += diag_correction;
+        stress_xc_[3] += diag_correction;
+        stress_xc_[5] += diag_correction;
+    }
 
     // 1b. NLCC XC stress correction
     if (rho_core) {
@@ -114,7 +138,7 @@ std::array<double, 6> Stress::compute(
         int nd_ex = halo.nd_ex();
         bool is_orth = grid.lattice().is_orthogonal();
         const Mat3& gradT = grid.lattice().grad_T();
-        double spin_fac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
+        double occfac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
         bool is_kpt = wfn.is_complex();
 
         std::array<double, 6> stress_mgga = {};
@@ -130,7 +154,7 @@ std::array<double, 6> Stress::compute(
                 for (int n = 0; n < Nband_loc; ++n) {
                     double fn = occ(band_start + n);
                     if (fn < 1e-16) continue;
-                    double g_nk = spin_fac * wk * fn;
+                    double g_nk = wk * fn;  // no occfac here, applied at end
 
                     // Compute ∇ψ in 3 directions
                     if (is_kpt) {
@@ -163,7 +187,7 @@ std::array<double, 6> Stress::compute(
                                     }
                                 }
                                 sum *= grid.dV();
-                                stress_mgga[voigt[a][b]] += -g_nk * sum;
+                                stress_mgga[voigt[a][b]] += g_nk * sum;
                             }
                         }
                     } else {
@@ -191,7 +215,7 @@ std::array<double, 6> Stress::compute(
                                     }
                                 }
                                 sum *= grid.dV();
-                                stress_mgga[voigt[a][b]] += -g_nk * sum;
+                                stress_mgga[voigt[a][b]] += g_nk * sum;
                             }
                         }
                     }
@@ -206,6 +230,10 @@ std::array<double, 6> Stress::compute(
             kptcomm.allreduce_sum(stress_mgga.data(), 6);
         if (!spincomm.is_null() && spincomm.size() > 1)
             spincomm.allreduce_sum(stress_mgga.data(), 6);
+
+        // Multiply by -occfac (matching SPARC mGGAstress.c)
+        for (int i = 0; i < 6; i++)
+            stress_mgga[i] *= -occfac;
 
         // Normalize by cell_measure and add to stress_xc
         for (int i = 0; i < 6; i++) {
@@ -270,7 +298,8 @@ void Stress::compute_xc_stress(
 
     // GGA gradient correction
     bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol || xc_type == XCType::GGA_RPBE);
-    if (is_gga && Dxcdgrho) {
+    bool has_gradient = is_gga || (xc_type == XCType::MGGA_SCAN);
+    if (has_gradient && Dxcdgrho) {
         int FDn = gradient.stencil().FDn();
         int nx = domain.Nx_d(), ny = domain.Ny_d(), nz = domain.Nz_d();
         int Nd_ex = (nx+2*FDn) * (ny+2*FDn) * (nz+2*FDn);

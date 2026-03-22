@@ -64,7 +64,8 @@ public:
         const KPoints* kpoints = nullptr,
         int kpt_start = 0,
         int band_start = 0,
-        const double* vtau = nullptr);  // mGGA: d(nε)/dτ (Nd_d non-spin, 2*Nd_d spin)
+        const double* vtau = nullptr,   // mGGA: d(nε)/dτ (Nd_d non-spin, 2*Nd_d spin)
+        const double* tau = nullptr);   // mGGA: kinetic energy density
 
     double pressure() const;
 
