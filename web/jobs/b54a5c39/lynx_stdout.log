@@ -1,0 +1,42 @@
+====================================================
+              LYNX C++ (Phase 1)
+====================================================
+
+Lattice vectors (Bohr):
+      7.630000     0.000000     0.000000
+      0.000000     7.630000     0.000000
+      0.000000     0.000000     7.630000
+
+Lattice lengths: 7.630000  7.630000  7.630000 Bohr
+Cell volume:     444.194947 Bohr^3
+Cell type:       Orthogonal
+
+Grid: 15 x 15 x 15 = 3375
+Mesh spacing: dx=0.508667  dy=0.508667  dz=0.508667 Bohr
+FD order: 12
+
+Atom types: 3, Total atoms: 5
+  Ba: 1 atoms
+  Ti: 1 atoms
+  O: 3 atoms
+
+Nstates: 29
+K-points: 1 x 1 x 1
+SCF tolerance: 1.0e-06
+Max SCF iterations: 100
+====================================================
+K-points: 1x1x1 grid, 1 full -> 1 symmetry-reduced (gamma-only)
+  k[ 0]:   0.0000   0.0000   0.0000  wt=1.000
+
+Parallelization: 1 procs, domain [0:14]x[0:14]x[0:14] = 3375 pts
+  npspin=1, npkpt=1, npband=1
+  This rank: spin_start=0 Nspin_local=1 kpt_start=0 Nkpts_local=1 band_start=0 Nband_local=29
+Error on rank 0: Cannot open pseudopotential file: Ba.psp8
+--------------------------------------------------------------------------
+MPI_ABORT was invoked on rank 0 in communicator MPI_COMM_WORLD
+with errorcode 1.
+
+NOTE: invoking MPI_ABORT causes Open MPI to kill all MPI processes.
+You may or may not see output from other processes, depending on
+exactly when Open MPI kills them.
+--------------------------------------------------------------------------

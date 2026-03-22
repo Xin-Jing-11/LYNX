@@ -1,0 +1,115 @@
+{
+  "lattice": {
+    "vectors": [
+      [
+        7.63,
+        0,
+        0
+      ],
+      [
+        0,
+        7.63,
+        0
+      ],
+      [
+        0,
+        0,
+        7.63
+      ]
+    ],
+    "cell_type": "orthogonal"
+  },
+  "grid": {
+    "Nx": 30,
+    "Ny": 30,
+    "Nz": 30,
+    "fd_order": 12,
+    "boundary_conditions": [
+      "periodic",
+      "periodic",
+      "periodic"
+    ]
+  },
+  "atoms": [
+    {
+      "element": "Ba",
+      "pseudo_file": "Ba.psp8",
+      "fractional": true,
+      "coordinates": [
+        [
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "element": "Ti",
+      "pseudo_file": "Ti.psp8",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.5,
+          0.5,
+          0.5
+        ]
+      ]
+    },
+    {
+      "element": "O",
+      "pseudo_file": "O.psp8",
+      "fractional": true,
+      "coordinates": [
+        [
+          0.5,
+          0.5,
+          0
+        ],
+        [
+          0.5,
+          0,
+          0.5
+        ],
+        [
+          0,
+          0.5,
+          0.5
+        ]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "spin": "none",
+    "temperature": 300,
+    "smearing": "gaussian",
+    "Nstates": 30
+  },
+  "kpoints": {
+    "grid": [
+      4,
+      4,
+      4
+    ],
+    "shift": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-06,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": true
+  },
+  "parallel": {
+    "nprocs": 1
+  }
+}

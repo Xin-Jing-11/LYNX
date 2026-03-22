@@ -1,0 +1,6 @@
+{"iter": 1, "energy": 0.5426316115, "residual": 1.0, "fermi": 0.09808}
+{"iter": 2, "energy": -0.32434856, "residual": 0.9025, "fermi": -0.0014}
+{"iter": 3, "energy": -0.2990420913, "residual": 0.6601, "fermi": -0.02002}
+{"iter": 4, "energy": -0.2761581884, "residual": 0.5561, "fermi": -0.02598}
+{"iter": 5, "energy": -0.2420563402, "residual": 0.2696, "fermi": -0.02868}
+{"iter": 6, "energy": -0.2385253364, "residual": 0.1303, "fermi": -0.03092}

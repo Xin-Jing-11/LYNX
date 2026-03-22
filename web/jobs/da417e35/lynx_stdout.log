@@ -1,0 +1,67 @@
+====================================================
+              LYNX C++ (Phase 1)
+====================================================
+
+Lattice vectors (Bohr):
+     20.000000     0.000000     0.000000
+      0.000000    20.000000     0.000000
+      0.000000     0.000000    20.000000
+
+Lattice lengths: 20.000000  20.000000  20.000000 Bohr
+Cell volume:     8000.000000 Bohr^3
+Cell type:       Orthogonal
+
+Grid: 30 x 30 x 30 = 27000
+Mesh spacing: dx=0.689655  dy=0.689655  dz=0.689655 Bohr
+FD order: 12
+
+Atom types: 2, Total atoms: 3
+  O: 1 atoms
+  H: 2 atoms
+
+Nstates: 8
+K-points: 1 x 1 x 1
+SCF tolerance: 1.0e-06
+Max SCF iterations: 100
+====================================================
+K-points: 1x1x1 grid, 1 full -> 1 symmetry-reduced (gamma-only)
+  k[ 0]:   0.0000   0.0000   0.0000  wt=1.000
+
+Parallelization: 1 procs, domain [0:29]x[0:29]x[0:29] = 27000 pts
+  npspin=1, npkpt=1, npband=1
+  This rank: spin_start=0 Nspin_local=1 kpt_start=0 Nkpts_local=1 band_start=0 Nband_local=8
+Atoms: 3 total, 8 electrons, 2 types
+Atom influence computed (rc_max = 11.5072 Bohr, 0 entries)
+Computing pseudocharge...
+  pschg: type=0, 0 images, Znucl=6.0
+  pschg: type=1, 0 images, Znucl=1.0
+  pschg loop done in 0.0 ms
+Pseudocharge: int(b) = 0.000000 (expected: -8.0)
+Eself = 0.000000, Ec = 0.000000, Esc = 0.000000 Ha
+DEBUG_PSCHG: b_2norm=0.0000000000 b_min=0.0000000000 b_max=0.0000000000
+Nonlocal projectors: 0 total
+Atomic density: max=0.0000, int*dV=0.000000 (expected 8)
+DEBUG_RHO0: sum=0.0000000000 norm2=0.0000000000 rho[0]=0.0000000000e+00 rho[100]=0.0000000000e+00 rho[1000]=0.0000000000e+00
+NLCC: core charge integral = 0.000000
+
+===== Starting SCF =====
+GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=1, kpt=0)
+GPUSCF init: Vxc_sum=-1.047785e+00 phi_sum=0.000000e+00 Veff_sum=-1.047785e+00 exc_sum=-7.843251e-01
+GPUSCF init: Veff[0]=-3.827310114008135e-05 Veff[100]=-3.827874979876012e-05 Veff[1000]=-3.825377839896756e-05
+Lanczos: eigmin=-6.234432e-02, eigmax=2.239192e+01, lambda_cutoff=1.116479e+01
+Chebyshev degree: 14 (h_eff=0.689655)
+
+--- GPU SCF Loop (Nspin=1, Nkpts=1, gamma) ---
+SCF iter   1: Etot =       0.3369200333 Ha, SCF error =  1.000e+00
+GPUMemoryPool: OOM — requested 1512000 bytes, used 1512448 / 2416747
+--------------------------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code. Per user-direction, the job has been aborted.
+--------------------------------------------------------------------------
+--------------------------------------------------------------------------
+mpirun detected that one or more processes exited with non-zero status, thus causing
+the job to be terminated. The first process to do so was:
+
+  Process name: [[18071,1],0]
+  Exit code:    1
+--------------------------------------------------------------------------

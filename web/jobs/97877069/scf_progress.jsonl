@@ -1,0 +1,11 @@
+{"iter": 1, "energy": 22.3598548392, "residual": 1.0, "fermi": 1.01138}
+{"iter": 2, "energy": 7.0171549618, "residual": 0.04483, "fermi": 0.50961}
+{"iter": 3, "energy": 7.019518636, "residual": 0.01916, "fermi": 0.51004}
+{"iter": 4, "energy": 7.0198648509, "residual": 0.008428, "fermi": 0.51008}
+{"iter": 5, "energy": 7.0199229264, "residual": 0.001885, "fermi": 0.51008}
+{"iter": 6, "energy": 7.0199255058, "residual": 0.000656, "fermi": 0.51008}
+{"iter": 7, "energy": 7.0199255178, "residual": 0.0002016, "fermi": 0.51008}
+{"iter": 8, "energy": 7.0199255385, "residual": 5.106e-05, "fermi": 0.51008}
+{"iter": 9, "energy": 7.0199255422, "residual": 9.707e-06, "fermi": 0.51008}
+{"iter": 10, "energy": 7.0199255425, "residual": 2.12e-06, "fermi": 0.51008}
+{"iter": 11, "energy": 7.0199255425, "residual": 4.085e-07, "fermi": 0.51008}

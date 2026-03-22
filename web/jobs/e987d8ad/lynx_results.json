@@ -1,0 +1,128 @@
+{
+  "system": {
+    "lattice_vectors": [
+      [
+        20,
+        0,
+        0
+      ],
+      [
+        0,
+        20,
+        0
+      ],
+      [
+        0,
+        0,
+        20
+      ]
+    ],
+    "cell_type": "orthogonal",
+    "grid": {
+      "Nx": 30,
+      "Ny": 30,
+      "Nz": 30
+    },
+    "atoms": [
+      {
+        "element": "O",
+        "Z": 8,
+        "position_frac": [
+          10,
+          10,
+          10.188
+        ],
+        "position_cart": [
+          200.0,
+          200.0,
+          203.76000000000002
+        ]
+      },
+      {
+        "element": "H",
+        "Z": 1,
+        "position_frac": [
+          10,
+          11.454,
+          8.782
+        ],
+        "position_cart": [
+          200.0,
+          229.08,
+          175.64
+        ]
+      },
+      {
+        "element": "H",
+        "Z": 1,
+        "position_frac": [
+          10,
+          8.546,
+          8.782
+        ],
+        "position_cart": [
+          200.0,
+          170.92,
+          175.64
+        ]
+      }
+    ],
+    "n_atoms": 3
+  },
+  "scf": {
+    "converged": false,
+    "n_iterations": 6,
+    "final_residual": 0.1303,
+    "history": [
+      {
+        "iter": 1,
+        "energy": 0.5426316115,
+        "residual": 1.0,
+        "fermi": 0.09808
+      },
+      {
+        "iter": 2,
+        "energy": -0.32434856,
+        "residual": 0.9025,
+        "fermi": -0.0014
+      },
+      {
+        "iter": 3,
+        "energy": -0.2990420913,
+        "residual": 0.6601,
+        "fermi": -0.02002
+      },
+      {
+        "iter": 4,
+        "energy": -0.2761581884,
+        "residual": 0.5561,
+        "fermi": -0.02598
+      },
+      {
+        "iter": 5,
+        "energy": -0.2420563402,
+        "residual": 0.2696,
+        "fermi": -0.02868
+      },
+      {
+        "iter": 6,
+        "energy": -0.2385253364,
+        "residual": 0.1303,
+        "fermi": -0.03092
+      }
+    ]
+  },
+  "energy": {},
+  "fermi_energy": -0.03092,
+  "forces": [],
+  "density_format": {
+    "dtype": "float64",
+    "shape": [
+      30,
+      30,
+      30
+    ],
+    "order": "column_major",
+    "units": "electrons/Bohr^3"
+  }
+}

@@ -231,6 +231,14 @@ static DFTResult run_single_point(const std::string& json_file) {
     std::vector<double> rho_core(Nd_d, 0.0);
     bool has_nlcc = elec.compute_core_density(crystal, influence, domain, grid,
                                                rho_core.data());
+    if (has_nlcc) {
+        double rho_core_sum = 0.0;
+        for (int i = 0; i < Nd_d; i++) rho_core_sum += rho_core[i];
+        std::printf("NLCC: has_nlcc=true, rho_core_sum=%.6e, rho_core_sum*dV=%.6e\n",
+                    rho_core_sum, rho_core_sum * grid.dV());
+    } else {
+        std::printf("NLCC: has_nlcc=false\n");
+    }
 
     scf.run(wfn, Nelectron, Natom,
             elec.pseudocharge().data(), Vloc.data(),
@@ -299,8 +307,7 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             has_nlcc ? rho_core.data() : nullptr,
                                             kpt_weights, bandcomm, kpt_bridge, spin_bridge,
                                             &kpoints, kpt_start, band_start,
-                                            scf.vtau(),
-                                            scf.tau());
+                                            scf.vtau(), scf.tau());
         result.pressure = stress_calc.pressure();
     }
 
@@ -673,7 +680,7 @@ TEST(EndToEnd, PtAu_SOC) {
 //   Ef     = 0.010348992 Ha
 // ============================================================
 TEST(EndToEnd, Si4_gamma_SCAN) {
-    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan-gpu/tests/data/Si4_scan_gamma.json";
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_gamma.json";
 
     std::ifstream f(json_file);
     if (!f.good()) {
@@ -733,21 +740,22 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
             -2.5783048441E-01, -1.3335761406E+01,  6.8329942976E-06,
              4.6147953628E-01,  7.0657923920E-07, -1.3890775900E+00
         };
-        if (result.stress[0] != 0.0 || result.stress[3] != 0.0) {
+        {
             const double au_to_gpa = 29421.01569650548;
-            double s[6];
-            for (int i = 0; i < 6; i++) s[i] = result.stress[i] * au_to_gpa;
             std::printf("\n  Stress (GPa):\n");
-            std::printf("    LYNX:  %10.6f %10.6f %10.6f\n", s[0], s[1], s[2]);
-            std::printf("           %10.6f %10.6f %10.6f\n", s[3], s[4], s[5]);
-            std::printf("    ref:   %10.6f %10.6f %10.6f\n", ref_stress[0], ref_stress[1], ref_stress[2]);
-            std::printf("           %10.6f %10.6f %10.6f\n", ref_stress[3], ref_stress[4], ref_stress[5]);
+            std::printf("    LYNX:  %12.4f %12.4f %12.4f\n",
+                        result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+            std::printf("           %12.4f %12.4f %12.4f\n",
+                        result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+            std::printf("    ref:   %12.4f %12.4f %12.4f\n", ref_stress[0], ref_stress[1], ref_stress[2]);
+            std::printf("           %12.4f %12.4f %12.4f\n", ref_stress[3], ref_stress[4], ref_stress[5]);
             double max_stress_err = 0.0;
             for (int i = 0; i < 6; ++i) {
-                double err = std::abs(s[i] - ref_stress[i]);
+                double err = std::abs(result.stress[i] * au_to_gpa - ref_stress[i]);
                 max_stress_err = std::max(max_stress_err, err);
             }
             std::printf("    Max stress error: %.6e GPa\n", max_stress_err);
+            EXPECT_LT(max_stress_err, 0.01) << "SCAN stress deviates from SPARC";
         }
     }
 
@@ -762,7 +770,7 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
 //   Etotal = -15.663154820 Ha
 // ============================================================
 TEST(EndToEnd, Si4_kpt_SCAN) {
-    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan-gpu/tests/data/Si4_scan_kpt.json";
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Si4_scan_kpt.json";
 
     std::ifstream f(json_file);
     if (!f.good()) {
@@ -804,29 +812,21 @@ TEST(EndToEnd, Si4_kpt_SCAN) {
         }
     }
 
-    // K-point stress check
-    if (rank == 0 && (result.stress[0] != 0.0 || result.stress[3] != 0.0)) {
-        const double au2gpa = 29421.01569650548;
-        double ref_stress[6] = {5.1163, -1.5343, 0.0, 3.8276, 0.0, 3.0637};
-        double s[6];
-        for (int i = 0; i < 6; i++) s[i] = result.stress[i] * au2gpa;
-        std::printf("\n  K-point Stress (GPa):\n");
-        std::printf("    LYNX: %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f\n",
-                    s[0], s[1], s[2], s[3], s[4], s[5]);
-        std::printf("    ref:  %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f\n",
-                    ref_stress[0], ref_stress[1], ref_stress[2], ref_stress[3], ref_stress[4], ref_stress[5]);
-        double max_err = 0;
-        for (int i = 0; i < 6; i++) max_err = std::max(max_err, std::abs(s[i] - ref_stress[i]));
-        std::printf("    Max stress error: %.6e GPa\n", max_err);
-    }
-
     EXPECT_TRUE(result.converged) << "K-point SCAN SCF did not converge";
     EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
         << "K-point SCAN energy deviates from SPARC reference";
 }
 
-TEST(EndToEnd, Si4_spin_SCAN_gamma) {
-    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan-gpu/tests/data/Fe2_spin_scan_kpt.json";
+// ============================================================
+// Test: Spin-polarized Fe2 SCAN — non-orthogonal cell, gamma-only
+// SPARC reference: Fe2 BCC-like, 29x29x29 grid, gamma-only, SCAN, spin
+//   Lattice: a=2.840052, sheared (10% off-diagonal xy)
+//   Etotal = -228.3157354078 Ha
+//   Settings: MESH_SPACING 0.10, FD_ORDER 12, SMEARING 0.001 Ha (FD),
+//   mixing=potential, kerker, beta=0.3, history=7, TOL_SCF=1e-6
+// ============================================================
+TEST(EndToEnd, Fe2_spin_SCAN_gamma) {
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Fe2_spin_scan_gamma.json";
 
     std::ifstream f(json_file);
     if (!f.good()) {
@@ -839,63 +839,90 @@ TEST(EndToEnd, Si4_spin_SCAN_gamma) {
     int rank = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    // Non-magnetic Si4 with spin=collinear should match the non-spin SPARC SCAN reference
-    double ref_Etotal = -15.478970526;
-
-    // Same forces as non-spin Si4 gamma SCAN
-    double ref_forces[12] = {
-        -1.1260733637E-07, -2.0475633673E-08,  2.3343149360E-02,
-         6.5716542982E-04,  6.0688497580E-05, -2.3376211266E-02,
-        -6.8131886993E-08,  2.4936846560E-08,  2.3408903487E-02,
-        -6.5698469060E-04, -6.0692958793E-05, -2.3375841580E-02
-    };
-
-    // Same stress as non-spin Si4 gamma SCAN
-    double ref_stress[6] = {-0.257830, -13.335761, 0.000007, 0.461480, 0.000001, -1.389078};
+    // SPARC SCAN spin-polarized reference for Fe2 non-orthogonal cell (standard accuracy, 29x29x29)
+    double ref_Etotal = -228.31573541;
 
     if (rank == 0) {
-        std::printf("\n=== Si4 Spin-polarized SCAN Gamma Results ===\n");
+        std::printf("\n=== Fe2 Spin-polarized Gamma-point SCAN Results ===\n");
         std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
         std::printf("  Etotal = %.12f Ha (ref: %.12f)\n", result.Etotal, ref_Etotal);
         std::printf("  Etotal error: %.6e Ha\n", std::abs(result.Etotal - ref_Etotal));
 
-        if (result.forces.size() == 12) {
-            double max_force_err = 0.0;
-            std::printf("\n  Forces (Ha/Bohr):\n");
-            for (int i = 0; i < 4; ++i) {
-                std::printf("  Atom %d: %14.8e %14.8e %14.8e\n", i+1,
-                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
-                std::printf("     ref: %14.8e %14.8e %14.8e\n",
-                            ref_forces[3*i], ref_forces[3*i+1], ref_forces[3*i+2]);
-                for (int d = 0; d < 3; ++d) {
-                    double err = std::abs(result.forces[3*i+d] - ref_forces[3*i+d]);
-                    max_force_err = std::max(max_force_err, err);
-                }
-            }
-            std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
-            EXPECT_LT(max_force_err, 1e-5) << "Spin SCAN forces deviate from SPARC";
-        }
-    }
+        // SPARC SCAN forces (Ha/Bohr) for spin Fe2 (standard accuracy, 29x29x29)
+        double ref_forces[6] = {
+             8.0738563656E-01,  3.7396715485E-01, -3.5795139938E-01,
+            -8.0738563656E-01, -3.7396715485E-01,  3.5795139938E-01
+        };
 
-    // Stress check
-    if (rank == 0 && (result.stress[0] != 0.0 || result.stress[3] != 0.0)) {
-        const double au2gpa = 29421.01569650548;
-        double s[6];
-        for (int i = 0; i < 6; i++) s[i] = result.stress[i] * au2gpa;
-        std::printf("\n  Spin SCAN Stress (GPa):\n");
-        std::printf("    LYNX: %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f\n",
-                    s[0], s[1], s[2], s[3], s[4], s[5]);
-        std::printf("    ref:  %10.4f %10.4f %10.4f %10.4f %10.4f %10.4f\n",
-                    ref_stress[0], ref_stress[1], ref_stress[2],
-                    ref_stress[3], ref_stress[4], ref_stress[5]);
-        double max_err = 0;
-        for (int i = 0; i < 6; i++) max_err = std::max(max_err, std::abs(s[i] - ref_stress[i]));
-        std::printf("    Max stress error: %.6e GPa\n", max_err);
-        EXPECT_LT(max_err, 0.01) << "Spin SCAN stress deviates from SPARC";
+        std::printf("  Forces (Ha/Bohr):\n");
+        double max_force_err = 0.0;
+        for (int a = 0; a < 2; a++) {
+            std::printf("  Atom %d:", a+1);
+            for (int d = 0; d < 3; d++) {
+                double lynx_f = result.forces[a * 3 + d];
+                double sparc_f = ref_forces[a * 3 + d];
+                double err = std::abs(lynx_f - sparc_f);
+                max_force_err = std::max(max_force_err, err);
+                std::printf(" %.10e", lynx_f);
+            }
+            std::printf("\n     ref:");
+            for (int d = 0; d < 3; d++)
+                std::printf(" %.10e", ref_forces[a * 3 + d]);
+            std::printf("\n");
+        }
+        std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
+        EXPECT_LT(max_force_err, 1e-5) << "Spin SCAN forces deviate from SPARC";
+
+        // SPARC SCAN stress (GPa) — non-orthogonal Fe2 cell (standard accuracy, 29x29x29)
+        // Voigt: xx, xy, xz, yy, yz, zz
+        double ref_stress[6] = {
+            -2.1918868539E+04,  1.3932415515E+03, -5.1023320408E+01,
+            -2.1975903821E+04, -1.2676393200E+02, -2.2380766240E+04
+        };
+
+        const double au_to_gpa = 29421.01569650548;
+        std::printf("  Stress (GPa):\n");
+        std::printf("    LYNX:  ");
+        double max_stress_err = 0.0;
+        for (int i = 0; i < 6; i++) {
+            double s_gpa = result.stress[i] * au_to_gpa;
+            std::printf(" %12.3f", s_gpa);
+            double err = std::abs(s_gpa - ref_stress[i]);
+            max_stress_err = std::max(max_stress_err, err);
+        }
+        std::printf("\n    ref:   ");
+        for (int i = 0; i < 6; i++)
+            std::printf(" %12.3f", ref_stress[i]);
+        std::printf("\n    Max stress error: %.6e GPa\n", max_stress_err);
+        EXPECT_LT(max_stress_err, 0.1) << "Spin SCAN stress deviates from SPARC";
     }
 
     EXPECT_TRUE(result.converged) << "Spin SCAN SCF did not converge";
-    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-6)
-        << "Spin SCAN energy deviates from non-spin SPARC reference";
+    EXPECT_NEAR(result.Etotal, ref_Etotal, 1e-4)
+        << "Spin SCAN energy deviates from SPARC reference";
 }
 
+TEST(EndToEnd, Fe2_nospin_SCAN_gamma) {
+    std::string json_file = "/home/xx/Desktop/LYNX/.worktrees/scan/tests/data/Fe2_nospin_scan_gamma.json";
+
+    std::ifstream f(json_file);
+    if (!f.good()) {
+        GTEST_SKIP() << "Test data not found: " << json_file;
+    }
+    f.close();
+
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== Fe2 Non-spin Gamma-point SCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.12f Ha\n", result.Etotal);
+        // Compare with spin result: should be similar since spin converges to mag=0
+        std::printf("  (Spin reference: -228.31573541 Ha)\n");
+        std::printf("  (Spin LYNX:      -227.81411838 Ha)\n");
+    }
+    EXPECT_TRUE(result.converged);
+}

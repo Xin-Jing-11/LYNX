@@ -270,22 +270,29 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
     }
 
     // Apply preconditioner to f_wavg -> Pf
-    // Reference: Kerker only on column 0 (total density), no preconditioner on magnetization
+    // For potential mixing: Kerker on ALL columns (each spin channel independently)
+    // For density mixing: Kerker on column 0 (total density), none on magnetization
     std::vector<double> Pf(N);
     if (precond_type_ == MixingPrecond::Kerker && laplacian_ && halo_) {
-        // Column 0: Kerker preconditioner
-        apply_kerker(f_wavg.data(), amix, Pf.data());
-        // Columns 1+: no preconditioner (MixingPrecondMag default = none)
-        for (int c = 1; c < ncol; ++c) {
-            for (int i = 0; i < Nd_d_; ++i)
-                Pf[c * Nd_d_ + i] = amix * f_wavg[c * Nd_d_ + i];
+        if (var_ == MixingVariable::Potential) {
+            // Potential mixing: apply Kerker to each spin channel independently
+            for (int c = 0; c < ncol; ++c) {
+                apply_kerker(f_wavg.data() + c * Nd_d_, amix, Pf.data() + c * Nd_d_);
+            }
+        } else {
+            // Density mixing: Kerker on column 0 (total density) only
+            apply_kerker(f_wavg.data(), amix, Pf.data());
+            // Columns 1+: no preconditioner (MixingPrecondMag default = none)
+            for (int c = 1; c < ncol; ++c) {
+                for (int i = 0; i < Nd_d_; ++i)
+                    Pf[c * Nd_d_ + i] = amix * f_wavg[c * Nd_d_ + i];
+            }
         }
     } else {
         // No preconditioner: Pf = amix * f_wavg
         for (int i = 0; i < N; ++i)
             Pf[i] = amix * f_wavg[i];
     }
-
 
     // x_{k+1} = x_wavg + Pf (amix is already in Pf)
     // Save x_km1 = x_k before overwriting

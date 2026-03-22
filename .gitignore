@@ -13,6 +13,8 @@ dist/
 python/lynx/_core*.so
 .pytest_cache/
 
+CLAUDE.md
+
 # Backup files
 *.bak
 .worktrees/

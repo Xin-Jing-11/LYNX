@@ -65,7 +65,7 @@ public:
         int kpt_start = 0,
         int band_start = 0,
         const double* vtau = nullptr,   // mGGA: d(nε)/dτ (Nd_d non-spin, 2*Nd_d spin)
-        const double* tau = nullptr);   // mGGA: kinetic energy density
+        const double* tau = nullptr);   // mGGA: kinetic energy density (Nd_d non-spin, 3*Nd_d spin)
 
     double pressure() const;
 
@@ -103,7 +103,9 @@ private:
         const Gradient& gradient,
         const HaloExchange& halo,
         const Domain& domain,
-        const FDGrid& grid);
+        const FDGrid& grid,
+        const double* vtau = nullptr,
+        const double* tau = nullptr);
 
     // Electrostatic stress: uses ∇φ, ∇bJ, ∇VJ, etc. (matching reference)
     void compute_electrostatic(

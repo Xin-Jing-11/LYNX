@@ -82,6 +82,7 @@ void Pseudopotential::load_psp8(const std::string& filename) {
 
     // Line 7 (if extension_switch >= 2): nproj_soc per l channel
     // This line exists in FR pseudopotentials and must be consumed before channel data
+    // Note: extension_switch=1 just means an extra comment line was present (no SOC data)
     std::vector<int> nprojso;
     if (extension_switch >= 2) {
         std::getline(ifs, line); fix_fortran_exp(line);

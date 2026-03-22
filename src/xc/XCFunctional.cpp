@@ -28,8 +28,10 @@ void XCFunctional::get_func_ids(int& xc_id, int& cc_id) const {
         case XCType::GGA_PBE:    xc_id = XC_GGA_X_PBE; cc_id = XC_GGA_C_PBE; break;
         case XCType::GGA_PBEsol: xc_id = XC_GGA_X_PBE_SOL; cc_id = XC_GGA_C_PBE_SOL; break;
         case XCType::GGA_RPBE:   xc_id = XC_GGA_X_RPBE; cc_id = XC_GGA_C_PBE; break;
-        case XCType::MGGA_SCAN:  xc_id = XC_MGGA_X_SCAN; cc_id = XC_MGGA_C_SCAN; break;
-        default:                 xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW;     break;
+        case XCType::MGGA_SCAN:   xc_id = XC_MGGA_X_SCAN;   cc_id = XC_MGGA_C_SCAN;   break;
+        case XCType::MGGA_RSCAN:  xc_id = XC_MGGA_X_RSCAN;  cc_id = XC_MGGA_C_RSCAN;  break;
+        case XCType::MGGA_R2SCAN: xc_id = XC_MGGA_X_R2SCAN; cc_id = XC_MGGA_C_R2SCAN; break;
+        default:                  xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW;              break;
     }
 }
 
@@ -85,10 +87,10 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
             if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
 
-        // 3. Evaluate SCAN via libxc
+        // 3. Evaluate mGGA via libxc (SCAN/rSCAN/r2SCAN)
         xc_func_type mgga_x, mgga_c;
-        xc_func_init(&mgga_x, XC_MGGA_X_SCAN, XC_UNPOLARIZED);
-        xc_func_init(&mgga_c, XC_MGGA_C_SCAN, XC_UNPOLARIZED);
+        xc_func_init(&mgga_x, xc_id, XC_UNPOLARIZED);
+        xc_func_init(&mgga_c, cc_id, XC_UNPOLARIZED);
 
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0), vsigma_x(Nd_d, 0.0), vlapl_x(Nd_d, 0.0), vtau_x(Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(Nd_d, 0.0), vsigma_c(Nd_d, 0.0), vlapl_c(Nd_d, 0.0), vtau_c(Nd_d, 0.0);
@@ -333,14 +335,15 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             sigma_libxc[3*i + 1] = dot_metric(iu, id);  // σ_ud = ∇ρ_up · ∇ρ_dn
             sigma_libxc[3*i + 2] = sigma[id];  // σ_dd = |∇ρ_dn|²
             if (tau_in) {
-                tau_libxc[2*i]     = tau_in[Nd_d + i];   // τ_up
-                tau_libxc[2*i + 1] = tau_in[2*Nd_d + i]; // τ_dn
+                // tau layout: [up(0:Nd_d) | dn(Nd_d:2*Nd_d) | total(2*Nd_d:3*Nd_d)]
+                tau_libxc[2*i]     = tau_in[i];          // τ_up
+                tau_libxc[2*i + 1] = tau_in[Nd_d + i];  // τ_dn
             }
         }
 
         xc_func_type mgga_x, mgga_c;
-        xc_func_init(&mgga_x, XC_MGGA_X_SCAN, XC_POLARIZED);
-        xc_func_init(&mgga_c, XC_MGGA_C_SCAN, XC_POLARIZED);
+        xc_func_init(&mgga_x, xc_id, XC_POLARIZED);
+        xc_func_init(&mgga_c, cc_id, XC_POLARIZED);
 
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0), vsigma_x(3*Nd_d, 0.0), vlapl_x(2*Nd_d, 0.0), vtau_x(2*Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(2*Nd_d, 0.0), vsigma_c(3*Nd_d, 0.0), vlapl_c(2*Nd_d, 0.0), vtau_c(2*Nd_d, 0.0);
@@ -361,11 +364,15 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         }
 
         // Dxcdgrho: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
-        // v2c = 2*(vsigma_c_uu + 2*vsigma_c_ud + vsigma_c_dd) for total gradient
-        // v2x_up = 2*vsigma_x_uu, v2x_dn = 2*vsigma_x_dd
+        // Used in stress: stress -= ∫ v2 * ∂ρ/∂x_α * ∂ρ/∂x_β dV
+        // SPARC convention: v2c = 2*(∂(nεc)/∂σ_total), v2x_σ = 2*(∂(nεx)/∂σ_σσ)
+        // For correlation: σ_total = σ_uu + 2σ_ud + σ_dd
+        //   libxc: vsigma_c_uu = ∂(nεc)/∂σ_total, so v2c = 2*vsigma_c_uu
+        // For exchange: acts on individual spin channels
+        //   libxc: vsigma_x_uu = ∂(nεx)/∂σ_uu, so v2x_up = 2*vsigma_x_uu
         if (Dxcdgrho_out) {
             for (int i = 0; i < Nd_d; i++) {
-                Dxcdgrho_out[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
+                Dxcdgrho_out[i] = 2.0 * vsigma_c[3*i];
                 Dxcdgrho_out[Nd_d + i] = 2.0 * vsigma_x[3*i];
                 Dxcdgrho_out[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
             }
@@ -379,56 +386,37 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             }
         }
 
-        // GGA divergence correction for spin (same structure as GGA spin path)
-        // Uses Dxcdgrho layout: [v2c(Nd_d) | v2x_up(Nd_d) | v2x_dn(Nd_d)]
-        // Allocate temporary Dxcdgrho if not provided by caller
-        std::vector<double> dxc_tmp;
-        double* dxc = Dxcdgrho_out;
-        if (!dxc) {
-            dxc_tmp.resize(3 * Nd_d);
-            for (int i = 0; i < Nd_d; i++) {
-                dxc_tmp[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
-                dxc_tmp[Nd_d + i] = 2.0 * vsigma_x[3*i];
-                dxc_tmp[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
-            }
-            dxc = dxc_tmp.data();
-        }
-
+        // GGA divergence correction for spin — same chain-rule formula as GGA path:
+        // ∂(ρε)/∂∇ρ_↑ = 2*vsigma_↑↑*∇ρ_↑ + vsigma_↑↓*∇ρ_↓
+        // ∂(ρε)/∂∇ρ_↓ = vsigma_↑↓*∇ρ_↑ + 2*vsigma_↓↓*∇ρ_↓
         std::vector<double> fx_up(Nd_d), fy_up(Nd_d), fz_up(Nd_d);
         std::vector<double> fx_dn(Nd_d), fy_dn(Nd_d), fz_dn(Nd_d);
 
         for (int i = 0; i < Nd_d; i++) {
+            double vs_uu = vsigma_x[3*i]   + vsigma_c[3*i];
+            double vs_ud = vsigma_x[3*i+1] + vsigma_c[3*i+1];
+            double vs_dd = vsigma_x[3*i+2] + vsigma_c[3*i+2];
+
             int iu = Nd_d + i, id = 2*Nd_d + i;
-            double v2c_i = dxc[i];           // correlation (total gradient)
-            double v2x_up = dxc[Nd_d + i];   // exchange up
-            double v2x_dn = dxc[2*Nd_d + i]; // exchange dn
+
+            double fu_x = 2.0*vs_uu * Drho_x[iu] + vs_ud * Drho_x[id];
+            double fu_y = 2.0*vs_uu * Drho_y[iu] + vs_ud * Drho_y[id];
+            double fu_z = 2.0*vs_uu * Drho_z[iu] + vs_ud * Drho_z[id];
+
+            double fd_x = vs_ud * Drho_x[iu] + 2.0*vs_dd * Drho_x[id];
+            double fd_y = vs_ud * Drho_y[iu] + 2.0*vs_dd * Drho_y[id];
+            double fd_z = vs_ud * Drho_z[iu] + 2.0*vs_dd * Drho_z[id];
 
             if (is_orth) {
-                fx_up[i] = v2x_up * Drho_x[iu] + v2c_i * Drho_x[i];
-                fy_up[i] = v2x_up * Drho_y[iu] + v2c_i * Drho_y[i];
-                fz_up[i] = v2x_up * Drho_z[iu] + v2c_i * Drho_z[i];
-                fx_dn[i] = v2x_dn * Drho_x[id] + v2c_i * Drho_x[i];
-                fy_dn[i] = v2x_dn * Drho_y[id] + v2c_i * Drho_y[i];
-                fz_dn[i] = v2x_dn * Drho_z[id] + v2c_i * Drho_z[i];
+                fx_up[i] = fu_x; fy_up[i] = fu_y; fz_up[i] = fu_z;
+                fx_dn[i] = fd_x; fy_dn[i] = fd_y; fz_dn[i] = fd_z;
             } else {
-                double du_x = Drho_x[iu], du_y = Drho_y[iu], du_z = Drho_z[iu];
-                double dd_x = Drho_x[id], dd_y = Drho_y[id], dd_z = Drho_z[id];
-                double dt_x = Drho_x[i], dt_y = Drho_y[i], dt_z = Drho_z[i];
-
-                auto metric_mul = [&](double gx, double gy, double gz, double v2,
-                                      double& out_x, double& out_y, double& out_z) {
-                    out_x = (lapcT(0,0)*gx + lapcT(0,1)*gy + lapcT(0,2)*gz) * v2;
-                    out_y = (lapcT(1,0)*gx + lapcT(1,1)*gy + lapcT(1,2)*gz) * v2;
-                    out_z = (lapcT(2,0)*gx + lapcT(2,1)*gy + lapcT(2,2)*gz) * v2;
-                };
-
-                double fxu_x, fxu_y, fxu_z, fxd_x, fxd_y, fxd_z, fc_x, fc_y, fc_z;
-                metric_mul(du_x, du_y, du_z, v2x_up, fxu_x, fxu_y, fxu_z);
-                metric_mul(dd_x, dd_y, dd_z, v2x_dn, fxd_x, fxd_y, fxd_z);
-                metric_mul(dt_x, dt_y, dt_z, v2c_i, fc_x, fc_y, fc_z);
-
-                fx_up[i] = fxu_x + fc_x; fy_up[i] = fxu_y + fc_y; fz_up[i] = fxu_z + fc_z;
-                fx_dn[i] = fxd_x + fc_x; fy_dn[i] = fxd_y + fc_y; fz_dn[i] = fxd_z + fc_z;
+                fx_up[i] = lapcT(0,0)*fu_x + lapcT(0,1)*fu_y + lapcT(0,2)*fu_z;
+                fy_up[i] = lapcT(1,0)*fu_x + lapcT(1,1)*fu_y + lapcT(1,2)*fu_z;
+                fz_up[i] = lapcT(2,0)*fu_x + lapcT(2,1)*fu_y + lapcT(2,2)*fu_z;
+                fx_dn[i] = lapcT(0,0)*fd_x + lapcT(0,1)*fd_y + lapcT(0,2)*fd_z;
+                fy_dn[i] = lapcT(1,0)*fd_x + lapcT(1,1)*fd_y + lapcT(1,2)*fd_z;
+                fz_dn[i] = lapcT(2,0)*fd_x + lapcT(2,1)*fd_y + lapcT(2,2)*fd_z;
             }
         }
 

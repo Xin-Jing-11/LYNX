@@ -1,0 +1,215 @@
+====================================================
+              LYNX C++ (Phase 1)
+====================================================
+
+Lattice vectors (Bohr):
+      7.630000     0.000000     0.000000
+      0.000000     7.630000     0.000000
+      0.000000     0.000000     7.630000
+
+Lattice lengths: 7.630000  7.630000  7.630000 Bohr
+Cell volume:     444.194947 Bohr^3
+Cell type:       Orthogonal
+
+Grid: 15 x 15 x 15 = 3375
+Mesh spacing: dx=0.508667  dy=0.508667  dz=0.508667 Bohr
+FD order: 12
+
+Atom types: 3, Total atoms: 5
+  Ba: 1 atoms
+  Ti: 1 atoms
+  O: 3 atoms
+
+Nstates: 29
+K-points: 2 x 2 x 2
+SCF tolerance: 1.0e-06
+Max SCF iterations: 100
+====================================================
+K-points: 2x2x2 grid, 8 full -> 4 symmetry-reduced (complex)
+  k[ 0]:   0.2500   0.2500   0.2500  wt=2.000
+  k[ 1]:   0.2500   0.2500  -0.2500  wt=2.000
+  k[ 2]:   0.2500  -0.2500   0.2500  wt=2.000
+  k[ 3]:   0.2500  -0.2500  -0.2500  wt=2.000
+
+Parallelization: 1 procs, domain [0:14]x[0:14]x[0:14] = 3375 pts
+  npspin=1, npkpt=1, npband=1
+  This rank: spin_start=0 Nspin_local=1 kpt_start=0 Nkpts_local=4 band_start=0 Nband_local=29
+Atoms: 5 total, 40 electrons, 3 types
+Atom influence computed (rc_max = 10.0593 Bohr, 5 entries)
+Computing pseudocharge...
+  pschg: type=0, 0 images, Znucl=10.0
+  pschg: type=1, 1 images, Znucl=12.0
+    img 0/1: box=[7:14,9:14,2:14] ext=20x18x25=9000
+  pschg: type=2, 4 images, Znucl=6.0
+    img 0/4: box=[5:14,5:14,0:7] ext=22x22x20=9680
+  pschg loop done in 2.1 ms
+Pseudocharge: int(b) = 0.000000 (expected: -40.0)
+Eself = -0.000000, Ec = 0.000000, Esc = -0.000000 Ha
+DEBUG_PSCHG: b_2norm=0.0000000006 b_min=-0.0000000000 b_max=0.0000000003
+Nonlocal projectors: 0 total
+Atomic density: max=0.0000, int*dV=0.000000 (expected 40)
+DEBUG_RHO0: sum=0.0000000000 norm2=0.0000000000 rho[0]=0.0000000000e+00 rho[100]=0.0000000000e+00 rho[1000]=0.0000000000e+00
+NLCC: core charge integral = 0.000000
+
+===== Starting SCF =====
+GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=1, kpt=1)
+GPUSCF init: Vxc_sum=-1.378862e-01 phi_sum=-6.436499e-24 Veff_sum=-1.378862e-01 exc_sum=-1.035354e-01
+GPUSCF init: Veff[0]=-4.085511681184363e-05 Veff[100]=-4.085518049650086e-05 Veff[1000]=-4.085517847210811e-05
+Lanczos: eigmin=-9.993442e-02, eigmax=4.054149e+01, lambda_cutoff=2.022078e+01
+Chebyshev degree: 17 (h_eff=0.508667)
+
+--- GPU SCF Loop (Nspin=1, Nkpts=4, k-point) ---
+SCF iter   1: Etot =      23.0265954519 Ha, SCF error =  1.000e+00
+SCF iter   2: Etot =       7.6615060365 Ha, SCF error =  2.768e-01
+SCF iter   3: Etot =       7.3724174895 Ha, SCF error =  2.632e-01
+SCF iter   4: Etot =       7.7724887924 Ha, SCF error =  3.230e-02
+SCF iter   5: Etot =       7.6531992937 Ha, SCF error =  4.909e-02
+SCF iter   6: Etot =       7.8004666417 Ha, SCF error =  1.602e-02
+SCF iter   7: Etot =       7.6622225384 Ha, SCF error =  1.616e-02
+SCF iter   8: Etot =       7.9161500041 Ha, SCF error =  3.507e-02
+SCF iter   9: Etot =       7.6701444588 Ha, SCF error =  1.205e-02
+SCF iter  10: Etot =       7.8984613611 Ha, SCF error =  3.211e-02
+SCF iter  11: Etot =       7.6767761015 Ha, SCF error =  1.320e-02
+SCF iter  12: Etot =       7.9198124915 Ha, SCF error =  3.345e-02
+SCF iter  13: Etot =       7.6777772146 Ha, SCF error =  1.427e-02
+SCF iter  14: Etot =       7.9124958080 Ha, SCF error =  2.958e-02
+SCF iter  15: Etot =       7.6788205091 Ha, SCF error =  1.314e-02
+SCF iter  16: Etot =       7.9247011586 Ha, SCF error =  4.226e-02
+SCF iter  17: Etot =       7.6819590444 Ha, SCF error =  5.362e-03
+SCF iter  18: Etot =       7.9201458353 Ha, SCF error =  5.966e-02
+SCF iter  19: Etot =       7.6832556267 Ha, SCF error =  3.169e-02
+SCF iter  20: Etot =       7.9208648230 Ha, SCF error =  9.609e-02
+SCF iter  21: Etot =       7.6772275083 Ha, SCF error =  5.305e-02
+SCF iter  22: Etot =       7.9147259717 Ha, SCF error =  9.981e-02
+SCF iter  23: Etot =       7.6772771236 Ha, SCF error =  5.257e-02
+SCF iter  24: Etot =       7.9225515536 Ha, SCF error =  9.577e-02
+SCF iter  25: Etot =       7.6797818030 Ha, SCF error =  4.333e-02
+SCF iter  26: Etot =       7.9161879118 Ha, SCF error =  9.661e-02
+SCF iter  27: Etot =       7.6823465158 Ha, SCF error =  2.636e-02
+SCF iter  28: Etot =       7.9271209777 Ha, SCF error =  7.223e-02
+SCF iter  29: Etot =       7.6826489067 Ha, SCF error =  2.721e-02
+SCF iter  30: Etot =       7.9216919032 Ha, SCF error =  7.782e-02
+SCF iter  31: Etot =       7.6820304959 Ha, SCF error =  3.135e-02
+SCF iter  32: Etot =       7.9250071101 Ha, SCF error =  7.491e-02
+SCF iter  33: Etot =       7.6818975620 Ha, SCF error =  3.209e-02
+SCF iter  34: Etot =       7.9205157299 Ha, SCF error =  7.796e-02
+SCF iter  35: Etot =       7.6817056050 Ha, SCF error =  3.272e-02
+SCF iter  36: Etot =       7.9221386991 Ha, SCF error =  7.977e-02
+SCF iter  37: Etot =       7.6814562309 Ha, SCF error =  3.314e-02
+SCF iter  38: Etot =       7.9182380199 Ha, SCF error =  8.017e-02
+SCF iter  39: Etot =       7.6810751742 Ha, SCF error =  3.540e-02
+SCF iter  40: Etot =       7.9174595873 Ha, SCF error =  8.815e-02
+SCF iter  41: Etot =       7.6809516175 Ha, SCF error =  3.408e-02
+SCF iter  42: Etot =       7.9182688354 Ha, SCF error =  7.470e-02
+SCF iter  43: Etot =       7.6818759301 Ha, SCF error =  3.021e-02
+SCF iter  44: Etot =       7.9177368639 Ha, SCF error =  7.710e-02
+SCF iter  45: Etot =       7.6815994992 Ha, SCF error =  3.129e-02
+SCF iter  46: Etot =       7.9149360633 Ha, SCF error =  7.705e-02
+SCF iter  47: Etot =       7.6815894105 Ha, SCF error =  3.137e-02
+SCF iter  48: Etot =       7.9148320737 Ha, SCF error =  7.848e-02
+SCF iter  49: Etot =       7.6816797772 Ha, SCF error =  2.972e-02
+SCF iter  50: Etot =       7.9123115426 Ha, SCF error =  7.723e-02
+SCF iter  51: Etot =       7.6815568271 Ha, SCF error =  3.108e-02
+SCF iter  52: Etot =       7.9117768353 Ha, SCF error =  7.922e-02
+SCF iter  53: Etot =       7.6808909643 Ha, SCF error =  3.499e-02
+SCF iter  54: Etot =       7.9092306805 Ha, SCF error =  8.079e-02
+SCF iter  55: Etot =       7.6814459741 Ha, SCF error =  3.079e-02
+SCF iter  56: Etot =       7.9108915912 Ha, SCF error =  7.547e-02
+SCF iter  57: Etot =       7.6818439319 Ha, SCF error =  2.859e-02
+SCF iter  58: Etot =       7.9086375835 Ha, SCF error =  7.418e-02
+SCF iter  59: Etot =       7.6820242998 Ha, SCF error =  2.738e-02
+SCF iter  60: Etot =       7.9088864431 Ha, SCF error =  7.190e-02
+SCF iter  61: Etot =       7.6821712207 Ha, SCF error =  2.567e-02
+SCF iter  62: Etot =       7.9062675509 Ha, SCF error =  6.951e-02
+SCF iter  63: Etot =       7.6822958716 Ha, SCF error =  2.532e-02
+SCF iter  64: Etot =       7.9059747757 Ha, SCF error =  6.950e-02
+SCF iter  65: Etot =       7.6822543327 Ha, SCF error =  2.526e-02
+SCF iter  66: Etot =       7.9033641246 Ha, SCF error =  6.924e-02
+SCF iter  67: Etot =       7.6822696415 Ha, SCF error =  2.553e-02
+SCF iter  68: Etot =       7.9031590512 Ha, SCF error =  6.940e-02
+SCF iter  69: Etot =       7.6821489242 Ha, SCF error =  2.661e-02
+SCF iter  70: Etot =       7.9014676829 Ha, SCF error =  6.729e-02
+SCF iter  71: Etot =       7.6824282975 Ha, SCF error =  2.379e-02
+SCF iter  72: Etot =       7.9011476727 Ha, SCF error =  6.726e-02
+SCF iter  73: Etot =       7.6824023002 Ha, SCF error =  2.383e-02
+SCF iter  74: Etot =       7.8990895136 Ha, SCF error =  6.697e-02
+SCF iter  75: Etot =       7.6824715649 Ha, SCF error =  2.317e-02
+SCF iter  76: Etot =       7.8990247345 Ha, SCF error =  6.619e-02
+SCF iter  77: Etot =       7.6824894254 Ha, SCF error =  2.263e-02
+SCF iter  78: Etot =       7.8969949488 Ha, SCF error =  6.639e-02
+SCF iter  79: Etot =       7.6824798414 Ha, SCF error =  2.345e-02
+SCF iter  80: Etot =       7.8969456377 Ha, SCF error =  6.641e-02
+SCF iter  81: Etot =       7.6824948318 Ha, SCF error =  2.247e-02
+SCF iter  82: Etot =       7.8953571274 Ha, SCF error =  6.478e-02
+SCF iter  83: Etot =       7.6825733089 Ha, SCF error =  2.237e-02
+SCF iter  84: Etot =       7.8956384452 Ha, SCF error =  6.531e-02
+SCF iter  85: Etot =       7.6825466404 Ha, SCF error =  2.223e-02
+SCF iter  86: Etot =       7.8944713272 Ha, SCF error =  6.477e-02
+SCF iter  87: Etot =       7.6825986201 Ha, SCF error =  2.159e-02
+SCF iter  88: Etot =       7.8943820253 Ha, SCF error =  6.420e-02
+SCF iter  89: Etot =       7.6826061713 Ha, SCF error =  2.156e-02
+SCF iter  90: Etot =       7.8934276045 Ha, SCF error =  6.378e-02
+SCF iter  91: Etot =       7.6826380462 Ha, SCF error =  2.136e-02
+SCF iter  92: Etot =       7.8932287742 Ha, SCF error =  6.401e-02
+SCF iter  93: Etot =       7.6826256909 Ha, SCF error =  2.129e-02
+SCF iter  94: Etot =       7.8925644173 Ha, SCF error =  6.372e-02
+SCF iter  95: Etot =       7.6826465848 Ha, SCF error =  2.124e-02
+SCF iter  96: Etot =       7.8924314786 Ha, SCF error =  6.374e-02
+SCF iter  97: Etot =       7.6826396139 Ha, SCF error =  2.131e-02
+SCF iter  98: Etot =       7.8918897212 Ha, SCF error =  6.367e-02
+SCF iter  99: Etot =       7.6826510861 Ha, SCF error =  2.129e-02
+SCF iter 100: Etot =       7.8918202204 Ha, SCF error =  6.357e-02
+WARNING: GPU SCF did not converge within 100 iterations.
+DEBUG_OURS: b_2norm=0.0000000006 b_min=-0.0000000000 b_max=0.0000000003
+DEBUG_OURS: phi_2norm=0.3338302704 phi_min=-0.0215928424 phi_max=0.0090485643
+DEBUG_OURS: rho_2norm=5.2319929592 rho_sum=303.9206116858
+DEBUG_OURS: rho[0]=8.5030656560e-02 rho[100]=8.8900173384e-02 rho[1000]=8.9415886178e-02
+DEBUG_OURS: b[0]=0.0000000000e+00 b[100]=-1.8308617155e-16 b[1000]=1.2999041947e-15
+DEBUG_OURS: phi[0]=-2.1588524219e-02 phi[100]=-2.6425483667e-03 phi[1000]=-6.3428969430e-04
+
+===== SCF NOT CONVERGED =====
+  Eband   =       3.1890178120 Ha
+  Exc     =     -15.3417567991 Ha
+  Ehart   =       0.0014853477 Ha
+  Eself   =      -0.0000000000 Ha
+  Ec      =       0.0000000000 Ha
+  Entropy =      -0.0000000000 Ha
+  Etotal  =       7.8918202204 Ha
+  Eatom   =       1.5783640441 Ha/atom
+  Ef      =       0.5356240612 Ha
+
+Local forces (Ha/Bohr):
+  Atom   1:   0.0000000000   0.0000000000   0.0000000000
+  Atom   2:   0.0000000000  -0.0000000000  -0.0000000000
+  Atom   3:   0.0000000000   0.0000000000   0.0000000000
+  Atom   4:   0.0000000000   0.0000000000   0.0000000000
+  Atom   5:  -0.0000000000   0.0000000000  -0.0000000000
+
+Nonlocal forces (Ha/Bohr):
+  Atom   1:   0.0000000000   0.0000000000   0.0000000000
+  Atom   2:   0.0000000000   0.0000000000   0.0000000000
+  Atom   3:   0.0000000000   0.0000000000   0.0000000000
+  Atom   4:   0.0000000000   0.0000000000   0.0000000000
+  Atom   5:   0.0000000000   0.0000000000   0.0000000000
+
+NLCC XC forces (Ha/Bohr):
+  Atom   1:   0.0000000000   0.0000000000   0.0000000000
+  Atom   2:   0.0000000000   0.0000000000   0.0000000000
+  Atom   3:   0.0000000000   0.0000000000   0.0000000000
+  Atom   4:   0.0000000000   0.0000000000   0.0000000000
+  Atom   5:  -0.0000000000   0.0000000000   0.0000000000
+
+Total forces (Ha/Bohr):
+  Atom   1:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   2:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   3:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   4:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   5:  -0.0000000000   0.0000000000  -0.0000000000
+
+Stress tensor (GPa):
+  σ_xx =   -2905.202250  σ_xy =       2.961892  σ_xz =      -2.181445
+  σ_yy =   -1833.301877  σ_yz =       1.324781  σ_zz =    -779.948385
+
+Pressure: 1839.484171 GPa
+
+LYNX calculation complete.

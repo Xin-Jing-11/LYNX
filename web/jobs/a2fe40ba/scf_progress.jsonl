@@ -1,0 +1,11 @@
+{"iter": 1, "energy": 22.3730121463, "residual": 1.0}
+{"iter": 2, "energy": 7.0305322559, "residual": 0.05069}
+{"iter": 3, "energy": 7.021556298, "residual": 0.02252}
+{"iter": 4, "energy": 7.0201360514, "residual": 0.008889}
+{"iter": 5, "energy": 7.0199014945, "residual": 0.004285}
+{"iter": 6, "energy": 7.0199320431, "residual": 0.0006294}
+{"iter": 7, "energy": 7.0199254218, "residual": 0.0001896}
+{"iter": 8, "energy": 7.0199255516, "residual": 9.532e-05}
+{"iter": 9, "energy": 7.0199255589, "residual": 1.636e-05}
+{"iter": 10, "energy": 7.0199255495, "residual": 3.931e-06}
+{"iter": 11, "energy": 7.0199255496, "residual": 5.901e-07}

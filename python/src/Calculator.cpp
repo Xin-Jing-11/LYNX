@@ -267,7 +267,8 @@ std::array<double, 6> Calculator::compute_stress() {
                           Nspin_calc,
                           has_nlcc_ ? rho_core_.data() : nullptr,
                           kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge,
-                          &kpoints_, kpt_start, band_start);
+                          &kpoints_, kpt_start, band_start,
+                          scf_.vtau(), scf_.tau());
 }
 
 const lynx::Domain& Calculator::domain() const {

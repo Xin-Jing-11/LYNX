@@ -58,28 +58,6 @@ int main(int argc, char** argv) {
 
         lynx::OutputWriter::print_summary(config, lattice, grid, rank);
 
-        if (rank == 0 && !lattice.is_orthogonal()) {
-            auto& lT = lattice.lapc_T();
-            std::printf("lapcT = [[%.6f, %.6f, %.6f],\n"
-                        "         [%.6f, %.6f, %.6f],\n"
-                        "         [%.6f, %.6f, %.6f]]\n",
-                lT(0,0), lT(0,1), lT(0,2), lT(1,0), lT(1,1), lT(1,2), lT(2,0), lT(2,1), lT(2,2));
-            std::printf("dV = %.10e, jacobian = %.6f\n", grid.dV(), lattice.jacobian());
-            // Dump stencil coefficients for comparison with reference
-            int FDn = stencil.FDn();
-            std::printf("DUMP_STENCIL FDn=%d\n", FDn);
-            for (int p = 0; p <= FDn; ++p) {
-                std::printf("DUMP_D2_COEFF p=%d x=%.15e y=%.15e z=%.15e\n",
-                            p, stencil.D2_coeff_x()[p], stencil.D2_coeff_y()[p], stencil.D2_coeff_z()[p]);
-            }
-            std::printf("DUMP_D2_XY");
-            for (int p = 0; p <= FDn; ++p) std::printf(" %.15e", stencil.D2_coeff_xy()[p]);
-            std::printf("\n");
-            std::printf("DUMP_D1_Y");
-            for (int p = 0; p <= FDn; ++p) std::printf(" %.15e", stencil.D1_coeff_y()[p]);
-            std::printf("\n");
-        }
-
         // ===== Generate k-point grid =====
         lynx::KPoints kpoints;
         kpoints.generate(config.Kx, config.Ky, config.Kz, config.kpt_shift, lattice);
@@ -544,7 +522,8 @@ int main(int argc, char** argv) {
                                         config.xc,
                                         Nspin_calc,
                                         has_nlcc ? rho_core.data() : nullptr,
-                                        kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start, band_start);
+                                        kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start, band_start,
+                                        scf.vtau(), scf.tau());
 
             if (rank == 0) {
                 std::printf("\nStress tensor (GPa):\n");

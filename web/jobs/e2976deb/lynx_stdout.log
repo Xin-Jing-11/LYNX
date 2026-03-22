@@ -1,0 +1,128 @@
+====================================================
+              LYNX C++ (Phase 1)
+====================================================
+
+Lattice vectors (Bohr):
+      7.630000     0.000000     0.000000
+      0.000000     7.630000     0.000000
+      0.000000     0.000000     7.630000
+
+Lattice lengths: 7.630000  7.630000  7.630000 Bohr
+Cell volume:     444.194947 Bohr^3
+Cell type:       Orthogonal
+
+Grid: 30 x 30 x 30 = 27000
+Mesh spacing: dx=0.254333  dy=0.254333  dz=0.254333 Bohr
+FD order: 12
+
+Atom types: 3, Total atoms: 5
+  Ba: 1 atoms
+  Ti: 1 atoms
+  O: 3 atoms
+
+Nstates: 29
+K-points: 1 x 1 x 1
+SCF tolerance: 1.0e-06
+Max SCF iterations: 100
+====================================================
+K-points: 1x1x1 grid, 1 full -> 1 symmetry-reduced (gamma-only)
+  k[ 0]:   0.0000   0.0000   0.0000  wt=1.000
+
+Parallelization: 1 procs, domain [0:29]x[0:29]x[0:29] = 27000 pts
+  npspin=1, npkpt=1, npband=1
+  This rank: spin_start=0 Nspin_local=1 kpt_start=0 Nkpts_local=1 band_start=0 Nband_local=29
+Atoms: 5 total, 40 electrons, 3 types
+Atom influence computed (rc_max = 8.0247 Bohr, 4 entries)
+Computing pseudocharge...
+  pschg: type=0, 0 images, Znucl=10.0
+  pschg: type=1, 1 images, Znucl=12.0
+    img 0/1: box=[21:29,25:29,12:29] ext=21x17x30=10710
+  pschg: type=2, 3 images, Znucl=6.0
+    img 0/3: box=[17:29,18:29,0:7] ext=25x24x20=12000
+  pschg loop done in 3.4 ms
+Pseudocharge: int(b) = 0.000000 (expected: -40.0)
+Eself = 0.000000, Ec = 0.000000, Esc = 0.000000 Ha
+DEBUG_PSCHG: b_2norm=0.0000000000 b_min=-0.0000000000 b_max=0.0000000000
+Nonlocal projectors: 0 total
+Atomic density: max=0.0000, int*dV=0.000000 (expected 40)
+DEBUG_RHO0: sum=0.0000000000 norm2=0.0000000000 rho[0]=0.0000000000e+00 rho[100]=0.0000000000e+00 rho[1000]=0.0000000000e+00
+NLCC: core charge integral = 0.000000
+
+===== Starting SCF =====
+GPU SCF enabled — dispatching to fully GPU-resident path (Nspin=1, kpt=0)
+GPUSCF init: Vxc_sum=-1.103090e+00 phi_sum=1.760343e-27 Veff_sum=-1.103090e+00 exc_sum=-8.282832e-01
+GPUSCF init: Veff[0]=-4.085516984337475e-05 Veff[100]=-4.085516984664895e-05 Veff[1000]=-4.085516984665118e-05
+Lanczos: eigmin=-1.000251e-01, eigmax=1.656363e+02, lambda_cutoff=8.276816e+01
+Chebyshev degree: 29 (h_eff=0.254333)
+
+--- GPU SCF Loop (Nspin=1, Nkpts=1, gamma) ---
+SCF iter   1: Etot =      22.3737854511 Ha, SCF error =  1.000e+00
+SCF iter   2: Etot =       6.9913227129 Ha, SCF error =  1.411e-01
+SCF iter   3: Etot =       7.0145958486 Ha, SCF error =  8.840e-02
+SCF iter   4: Etot =       7.0184240344 Ha, SCF error =  4.996e-02
+SCF iter   5: Etot =       7.0202572472 Ha, SCF error =  3.249e-02
+SCF iter   6: Etot =       7.0199385337 Ha, SCF error =  2.263e-02
+SCF iter   7: Etot =       7.0204365977 Ha, SCF error =  3.959e-03
+SCF iter   8: Etot =       7.0199246740 Ha, SCF error =  2.492e-03
+SCF iter   9: Etot =       7.0199307667 Ha, SCF error =  7.339e-04
+SCF iter  10: Etot =       7.0199255732 Ha, SCF error =  1.113e-04
+SCF iter  11: Etot =       7.0199255533 Ha, SCF error =  6.642e-05
+SCF iter  12: Etot =       7.0199255518 Ha, SCF error =  2.296e-05
+SCF iter  13: Etot =       7.0199255502 Ha, SCF error =  1.455e-06
+SCF iter  14: Etot =       7.0199255498 Ha, SCF error =  7.278e-07
+
+GPU SCF converged after 14 iterations.
+Final energy: 7.0199255498 Ha
+DEBUG_OURS: b_2norm=0.0000000000 b_min=-0.0000000000 b_max=0.0000000000
+DEBUG_OURS: phi_2norm=0.0000206468 phi_min=-0.0000003418 phi_max=0.0000004667
+DEBUG_OURS: rho_2norm=14.7968155299 rho_sum=2431.3648934867
+DEBUG_OURS: rho[0]=9.0050536880e-02 rho[100]=9.0050574209e-02 rho[1000]=9.0050572757e-02
+DEBUG_OURS: b[0]=0.0000000000e+00 b[100]=0.0000000000e+00 b[1000]=0.0000000000e+00
+DEBUG_OURS: phi[0]=2.5708028487e-08 phi[100]=1.0644807783e-07 phi[1000]=1.0744881192e-07
+
+===== SCF CONVERGED =====
+  Eband   =       2.3329560067 Ha
+  Exc     =     -15.3411285037 Ha
+  Ehart   =       0.0000000000 Ha
+  Eself   =       0.0000000000 Ha
+  Ec      =       0.0000000000 Ha
+  Entropy =      -0.0171175933 Ha
+  Etotal  =       7.0199255498 Ha
+  Eatom   =       1.4039851100 Ha/atom
+  Ef      =       0.5100807027 Ha
+
+Local forces (Ha/Bohr):
+  Atom   1:   0.0000000000   0.0000000000   0.0000000000
+  Atom   2:  -0.0000000000   0.0000000000   0.0000000000
+  Atom   3:   0.0000000000   0.0000000000   0.0000000000
+  Atom   4:   0.0000000000   0.0000000000   0.0000000000
+  Atom   5:  -0.0000000000   0.0000000000  -0.0000000000
+
+Nonlocal forces (Ha/Bohr):
+  Atom   1:   0.0000000000   0.0000000000   0.0000000000
+  Atom   2:   0.0000000000   0.0000000000   0.0000000000
+  Atom   3:   0.0000000000   0.0000000000   0.0000000000
+  Atom   4:   0.0000000000   0.0000000000   0.0000000000
+  Atom   5:   0.0000000000   0.0000000000   0.0000000000
+
+NLCC XC forces (Ha/Bohr):
+  Atom   1:   0.0000000000   0.0000000000   0.0000000000
+  Atom   2:   0.0000000000   0.0000000000   0.0000000000
+  Atom   3:   0.0000000000   0.0000000000   0.0000000000
+  Atom   4:   0.0000000000   0.0000000000   0.0000000000
+  Atom   5:   0.0000000000   0.0000000000   0.0000000000
+
+Total forces (Ha/Bohr):
+  Atom   1:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   2:  -0.0000000000   0.0000000000   0.0000000000
+  Atom   3:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   4:   0.0000000000  -0.0000000000   0.0000000000
+  Atom   5:  -0.0000000000   0.0000000000  -0.0000000000
+
+Stress tensor (GPa):
+  σ_xx =    -676.564813  σ_xy =      -0.000000  σ_xz =      -0.000000
+  σ_yy =    -676.564813  σ_yz =      -0.000000  σ_zz =    -676.564813
+
+Pressure: 676.564813 GPa
+
+LYNX calculation complete.

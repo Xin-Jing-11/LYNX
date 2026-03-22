@@ -1,0 +1,101 @@
+{
+  "lattice": {
+    "vectors": [
+      [
+        20,
+        0,
+        0
+      ],
+      [
+        0,
+        20,
+        0
+      ],
+      [
+        0,
+        0,
+        20
+      ]
+    ],
+    "cell_type": "orthogonal"
+  },
+  "grid": {
+    "Nx": 30,
+    "Ny": 30,
+    "Nz": 30,
+    "fd_order": 12,
+    "boundary_conditions": [
+      "dirichlet",
+      "dirichlet",
+      "dirichlet"
+    ]
+  },
+  "atoms": [
+    {
+      "element": "O",
+      "pseudo_file": "/home/xx/Desktop/SPARC/psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "fractional": true,
+      "coordinates": [
+        [
+          10,
+          10,
+          10.188
+        ]
+      ]
+    },
+    {
+      "element": "H",
+      "pseudo_file": "/home/xx/Desktop/SPARC/psps/01_H_1_1.0_1.0_pbe_v1.0.psp8",
+      "fractional": true,
+      "coordinates": [
+        [
+          10,
+          11.454,
+          8.782
+        ],
+        [
+          10,
+          8.546,
+          8.782
+        ]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "GGA_PBE",
+    "spin": "none",
+    "temperature": 300,
+    "smearing": "gaussian",
+    "Nstates": 8
+  },
+  "kpoints": {
+    "grid": [
+      1,
+      1,
+      1
+    ],
+    "shift": [
+      0,
+      0,
+      0
+    ]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-06,
+    "mixing": "density",
+    "preconditioner": "none",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": true,
+    "density_output_file": "/home/xx/Desktop/SPARC/web/jobs/e987d8ad/electron_density.bin",
+    "calc_stress": true
+  },
+  "device": "cpu",
+  "parallel": {
+    "nprocs": 1
+  }
+}
