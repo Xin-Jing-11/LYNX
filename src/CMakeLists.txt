@@ -79,5 +79,5 @@ if(USE_CUDA)
     set_target_properties(lynx_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
-add_executable(lynx_hpsi_compare ../tests/test_HamiltonianCompare.cpp)
+add_executable(lynx_hpsi_compare ../tests/unit/test_HamiltonianCompare.cpp)
 target_link_libraries(lynx_hpsi_compare PRIVATE lynx_core)

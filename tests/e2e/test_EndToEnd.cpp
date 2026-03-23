@@ -465,7 +465,7 @@ TEST(EndToEnd, XCFunctionalRealDensity) {
 //   Ef     = 0.31446488165 Ha
 // ============================================================
 TEST(EndToEnd, BaTiO3_SCF) {
-    std::string json_file = "tests/data/BaTiO3_quick.json";
+    std::string json_file = "tests/e2e/data/BaTiO3_quick.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -529,7 +529,7 @@ TEST(EndToEnd, BaTiO3_SCF) {
 //      -4.0031   7.3638 -17.0501
 // ============================================================
 TEST(EndToEnd, Si8_SCF) {
-    std::string json_file = "tests/data/Si8.json";
+    std::string json_file = "tests/e2e/data/Si8.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -700,7 +700,7 @@ TEST(EndToEnd, PtAu_SOC) {
 //   Grid: 25x26x27, gamma-only
 // ============================================================
 TEST(EndToEnd, Si4_gamma_SCAN) {
-    std::string json_file = "tests/data/Si4_scan_gamma.json";
+    std::string json_file = "tests/e2e/data/Si4_scan_gamma.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -746,7 +746,7 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
 //   Max stress ~4.07 GPa
 // ============================================================
 TEST(EndToEnd, Si4_kpt_SCAN) {
-    std::string json_file = "tests/data/Si4_kpt_scan.json";
+    std::string json_file = "tests/e2e/data/Si4_kpt_scan.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -845,7 +845,7 @@ TEST(EndToEnd, Si4_kpt_SCAN) {
 //   Stress (GPa): xx=-21918.9, xy=1393.2, xz=-51.0, yy=-21975.9, yz=-126.8, zz=-22380.8
 // ============================================================
 TEST(EndToEnd, Fe2_spin_SCAN_gamma) {
-    std::string json_file = "tests/data/Fe2_spin_scan_gamma.json";
+    std::string json_file = "tests/e2e/data/Fe2_spin_scan_gamma.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -942,7 +942,7 @@ TEST(EndToEnd, Fe2_spin_SCAN_gamma) {
 //   Stress (GPa): xx=-22513.5, xy=16.2, xz=-16.2, yy=-22631.8, yz=-36.4, zz=-22631.8
 // ============================================================
 TEST(EndToEnd, Fe2_spin_SCAN_kpt) {
-    std::string json_file = "tests/data/Fe2_spin_scan_kpt.json";
+    std::string json_file = "tests/e2e/data/Fe2_spin_scan_kpt.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
