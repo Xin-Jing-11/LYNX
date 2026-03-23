@@ -712,8 +712,13 @@ double SCF::run(Wavefunction& wfn,
     // For serial: seed = 0 * 100 + 1 = 1
     int spincomm_rank = spincomm_->is_null() ? 0 : spincomm_->rank();
     int bandcomm_rank = bandcomm_->is_null() ? 0 : bandcomm_->rank();
-    unsigned rand_seed = spincomm_rank * 100 + bandcomm_rank * 10 + 1;
     for (int s = 0; s < Nspin_local; ++s) {
+        // Include spin index in seed so spin-up and spin-down get different
+        // random wavefunctions. This breaks spin symmetry and allows magnetic
+        // ground states to be found (matches SPARC's behavior with NP_SPIN_PARAL>1
+        // where different spin channels have different MPI ranks/seeds).
+        int s_glob = spin_start_ + s;
+        unsigned rand_seed = spincomm_rank * 100 + bandcomm_rank * 10 + s_glob * 1000 + 1;
         for (int k = 0; k < Nkpts; ++k) {
             if (is_kpt_) {
                 wfn.randomize_kpt(s, k, rand_seed);
