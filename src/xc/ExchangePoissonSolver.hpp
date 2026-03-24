@@ -61,6 +61,11 @@ public:
     const double* pois_const_data() const { return pois_const_.data(); }
     const double* pois_const_stress_data() const { return pois_const_stress_.data(); }
     const double* pois_const_stress2_data() const { return pois_const_stress2_.data(); }
+    // K-point phase factor accessors for GPU upload
+    const Complex* neg_phase_data() const { return neg_phase_.data(); }
+    const Complex* pos_phase_data() const { return pos_phase_.data(); }
+    int Nkpts_sym() const { return Nkpts_sym_; }
+    int Nkpts_hf() const { return Nkpts_hf_; }
 
 private:
     int Nx_ = 0, Ny_ = 0, Nz_ = 0;

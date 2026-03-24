@@ -18,6 +18,7 @@
 #include "atoms/Crystal.hpp"
 #include "xc/ExactExchange.hpp"
 #include "xc/GPUExchangePoissonSolver.cuh"
+#include <vector>
 
 namespace lynx {
 
@@ -272,14 +273,20 @@ private:
 
     // --- EXX (exact exchange) GPU state ---
     ExactExchange* exx_cpu_ = nullptr;   // CPU EXX operator (non-owning, for energy)
-    double* d_Xi_ = nullptr;             // [Nd x Nocc] ACE operator on device (current spin)
-    double* d_Y_exx_ = nullptr;          // [Nocc x Nband] scratch for apply_Vx
+    double* d_Xi_ = nullptr;             // [Nd x Nocc] ACE operator on device (gamma, current spin)
+    double* d_Y_exx_ = nullptr;          // [Nocc x Nband] scratch for apply_Vx (gamma)
     double* d_psi_full_ = nullptr;       // [Nd x Ns] gathered psi for build_ACE (device)
     int exx_Nocc_ = 0;                   // number of occupied states in Xi
     double exx_frac_ = 0.0;             // exchange fraction (0.25 for PBE0)
     int exx_spin_ = 0;                  // current spin channel for apply_Vx
+    int exx_kpt_ = 0;                   // current k-point index for apply_Vx (k-point mode)
     bool exx_active_ = false;           // true during Fock inner SCF (apply_Vx enabled)
     XCType xc_type_full_ = XCType::LDA_PZ;  // full XC type (for hybrid detection)
+
+    // K-point EXX GPU state
+    // d_Xi_kpt_[spin * Nkpts + kpt] = device pointer to [Nd x Nocc] complex ACE operator
+    std::vector<cuDoubleComplex*> d_Xi_kpt_;
+    cuDoubleComplex* d_Y_exx_z_ = nullptr;  // [Nocc x Nband] complex scratch for apply_Vx_kpt
 
     // GPU Poisson solver for exchange (cuFFT-based)
     gpu::GPUExchangePoissonSolver gpu_poisson_;
