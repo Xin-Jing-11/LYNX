@@ -16,6 +16,8 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "atoms/Crystal.hpp"
+#include "xc/ExactExchange.hpp"
+#include "xc/GPUExchangePoissonSolver.cuh"
 
 namespace lynx {
 
@@ -62,7 +64,10 @@ public:
                int kpt_start = 0,
                const double* rho_up_init = nullptr,  // spin-up density (Nd, for Nspin=2)
                const double* rho_dn_init = nullptr,   // spin-down density (Nd, for Nspin=2)
-               bool is_soc = false);                   // SOC mode (spinor wavefunctions)
+               bool is_soc = false,                    // SOC mode (spinor wavefunctions)
+               // Hybrid EXX parameters (optional)
+               ExactExchange* exx = nullptr,           // CPU EXX operator (non-owning)
+               XCType xc_type_hybrid = XCType::LDA_PZ);  // for is_hybrid() check
 
     // Download final GPU state back to CPU arrays for forces/stress
     void download_results(double* phi, double* Vxc, double* exc,
@@ -264,6 +269,22 @@ private:
 
     void setup_bloch_factors(const std::vector<AtomNlocInfluence>& nloc_influence,
                              const Crystal& crystal, const Vec3& kpt_cart);
+
+    // --- EXX (exact exchange) GPU state ---
+    ExactExchange* exx_cpu_ = nullptr;   // CPU EXX operator (non-owning, for energy)
+    double* d_Xi_ = nullptr;             // [Nd x Nocc] ACE operator on device (current spin)
+    double* d_Y_exx_ = nullptr;          // [Nocc x Nband] scratch for apply_Vx
+    double* d_psi_full_ = nullptr;       // [Nd x Ns] gathered psi for build_ACE (device)
+    int exx_Nocc_ = 0;                   // number of occupied states in Xi
+    double exx_frac_ = 0.0;             // exchange fraction (0.25 for PBE0)
+    int exx_spin_ = 0;                  // current spin channel for apply_Vx
+    bool exx_active_ = false;           // true during Fock inner SCF (apply_Vx enabled)
+    XCType xc_type_full_ = XCType::LDA_PZ;  // full XC type (for hybrid detection)
+
+    // GPU Poisson solver for exchange (cuFFT-based)
+    gpu::GPUExchangePoissonSolver gpu_poisson_;
+
+    void exx_cleanup();
 
     void cleanup();
 };
