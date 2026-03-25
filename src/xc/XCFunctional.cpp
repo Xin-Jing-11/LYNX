@@ -31,6 +31,8 @@ void XCFunctional::get_func_ids(int& xc_id, int& cc_id) const {
         case XCType::MGGA_SCAN:   xc_id = XC_MGGA_X_SCAN;   cc_id = XC_MGGA_C_SCAN;   break;
         case XCType::MGGA_RSCAN:  xc_id = XC_MGGA_X_RSCAN;  cc_id = XC_MGGA_C_RSCAN;  break;
         case XCType::MGGA_R2SCAN: xc_id = XC_MGGA_X_R2SCAN; cc_id = XC_MGGA_C_R2SCAN; break;
+        case XCType::HYB_PBE0:   xc_id = XC_GGA_X_PBE; cc_id = XC_GGA_C_PBE; break;
+        case XCType::HYB_HSE:    xc_id = XC_GGA_X_PBE; cc_id = XC_GGA_C_PBE; break;
         default:                  xc_id = XC_LDA_X; cc_id = XC_LDA_C_PW;              break;
     }
 }
@@ -189,12 +191,15 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         xc_gga_exc_vxc(&func_x, np, rho, sigma.data(), zk_x.data(), vrho_x.data(), vsigma_x.data());
         xc_gga_exc_vxc(&func_c, np, rho, sigma.data(), zk_c.data(), vrho_c.data(), vsigma_c.data());
 
+        // Apply exchange scaling for hybrid functionals (1-exx_frac during Fock loop)
+        double xs = exchange_scale_;
+
         // Combine: Dxcdgrho = 2*vsigma (our convention for -div(Dxcdgrho * ∇ρ))
         std::vector<double> v2xc(Nd_d);
         for (int i = 0; i < Nd_d; i++) {
-            exc[i] = zk_x[i] + zk_c[i];
-            Vxc[i] = vrho_x[i] + vrho_c[i];
-            v2xc[i] = 2.0 * (vsigma_x[i] + vsigma_c[i]);
+            exc[i] = xs * zk_x[i] + zk_c[i];
+            Vxc[i] = xs * vrho_x[i] + vrho_c[i];
+            v2xc[i] = 2.0 * (xs * vsigma_x[i] + vsigma_c[i]);
         }
 
         if (Dxcdgrho_out)
@@ -484,11 +489,14 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         xc_gga_exc_vxc(&func_c, np, rho_libxc.data(), sigma_libxc.data(),
                         zk_c.data(), vrho_c.data(), vsigma_c.data());
 
+        // Apply exchange scaling for hybrid functionals
+        double xs = exchange_scale_;
+
         // Combine local part (libxc vrho interleaved → our [up|down])
         for (int i = 0; i < Nd_d; i++) {
-            exc[i] = zk_x[i] + zk_c[i];
-            Vxc[i]        = vrho_x[2*i] + vrho_c[2*i];
-            Vxc[Nd_d + i] = vrho_x[2*i + 1] + vrho_c[2*i + 1];
+            exc[i] = xs * zk_x[i] + zk_c[i];
+            Vxc[i]        = xs * vrho_x[2*i] + vrho_c[2*i];
+            Vxc[Nd_d + i] = xs * vrho_x[2*i + 1] + vrho_c[2*i + 1];
         }
 
         // GGA divergence: Vxc_s -= ∇·(∂f/∂(∇ρ_s))
@@ -498,9 +506,9 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         std::vector<double> fx_dn(Nd_d), fy_dn(Nd_d), fz_dn(Nd_d);
 
         for (int i = 0; i < Nd_d; i++) {
-            double vs_uu = vsigma_x[3*i]   + vsigma_c[3*i];
-            double vs_ud = vsigma_x[3*i+1] + vsigma_c[3*i+1];
-            double vs_dd = vsigma_x[3*i+2] + vsigma_c[3*i+2];
+            double vs_uu = xs * vsigma_x[3*i]   + vsigma_c[3*i];
+            double vs_ud = xs * vsigma_x[3*i+1] + vsigma_c[3*i+1];
+            double vs_dd = xs * vsigma_x[3*i+2] + vsigma_c[3*i+2];
 
             int iu = Nd_d + i, id = 2*Nd_d + i;
 
@@ -545,8 +553,8 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         if (Dxcdgrho_out) {
             for (int i = 0; i < Nd_d; i++) {
                 Dxcdgrho_out[i] = 2.0 * (vsigma_c[3*i] + 2.0*vsigma_c[3*i+1] + vsigma_c[3*i+2]);
-                Dxcdgrho_out[Nd_d + i] = 2.0 * vsigma_x[3*i];
-                Dxcdgrho_out[2*Nd_d + i] = 2.0 * vsigma_x[3*i + 2];
+                Dxcdgrho_out[Nd_d + i] = 2.0 * xs * vsigma_x[3*i];
+                Dxcdgrho_out[2*Nd_d + i] = 2.0 * xs * vsigma_x[3*i + 2];
             }
         }
 

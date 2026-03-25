@@ -44,12 +44,32 @@ public:
     // Check if this is a Gamma-only calculation (single k-point at origin)
     bool is_gamma_only() const;
 
+    // Half-frequency k-points for exact exchange (EXX)
+    // For PBE0/HSE: the full unreduced k-grid is used in the exchange sum.
+    // Nkpts_hf = Nkpts_full (all k-points before symmetry reduction)
+    int Nkpts_hf() const { return Nkpts_full_; }
+
+    // kpthf_ind[i]: maps full k-point i to symmetry-reduced index
+    const std::vector<int>& kpthf_ind() const { return kpthf_ind_; }
+
+    // kpthf_pn[i]: 1 if full k-point i maps directly to sym-reduced k-point,
+    //              0 if it maps via time reversal (need conjugate)
+    const std::vector<int>& kpthf_pn() const { return kpthf_pn_; }
+
+    // k-point Cartesian coordinates for the full unreduced grid
+    const std::vector<Vec3>& kpts_hf_cart() const { return kpts_hf_cart_; }
+
 private:
     int Nkpts_sym_ = 0;
     int Nkpts_full_ = 0;
     std::vector<Vec3> kpts_cart_;
     std::vector<Vec3> kpts_red_;
     std::vector<double> weights_;
+
+    // EXX half-frequency data (populated in generate())
+    std::vector<int> kpthf_ind_;       // full -> sym-reduced index map
+    std::vector<int> kpthf_pn_;        // 1=direct, 0=time-reversed
+    std::vector<Vec3> kpts_hf_cart_;   // full k-grid Cartesian coords
 };
 
 } // namespace lynx

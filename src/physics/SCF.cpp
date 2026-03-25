@@ -1,4 +1,5 @@
 #include "physics/SCF.hpp"
+#include "xc/ExactExchange.hpp"
 #include "core/constants.hpp"
 #include <cmath>
 #include <cstdio>
@@ -262,6 +263,11 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
     // If NLCC, add core density to valence density for XC evaluation
     XCFunctional xc;
     xc.setup(xc_type_, *domain_, *grid_, gradient_, halo_);
+
+    // For hybrid functionals in Fock loop: scale exchange by (1-exx_frac)
+    if (in_fock_loop_ && is_hybrid(xc_type_) && exx_) {
+        xc.set_exchange_scale(1.0 - params_.exx_params.exx_frac);
+    }
 
     // Allocate Dxcdgrho_ if GGA or mGGA
     int dxc_ncol = (Nspin_global_ == 2) ? 3 : 1;  // 3 columns for spin: [v2c, v2x_up, v2x_down]

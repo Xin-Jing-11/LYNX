@@ -22,6 +22,8 @@ add_library(lynx_core
     electronic/ElectronDensity.cpp
     electronic/Occupation.cpp
     xc/XCFunctional.cpp
+    xc/ExactExchange.cpp
+    xc/ExchangePoissonSolver.cpp
     solvers/LinearSolver.cpp
     solvers/PoissonSolver.cpp
     solvers/Mixer.cpp

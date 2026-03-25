@@ -84,6 +84,61 @@ void KPoints::generate(int Kx, int Ky, int Kz, Vec3 shift, const Lattice& lattic
     }
 
     Nkpts_sym_ = k;
+
+    // Build half-frequency k-point data for EXX
+    // Iterate over the full unreduced grid again, mapping each to a sym-reduced index
+    kpthf_ind_.resize(Nkpts_full_);
+    kpthf_pn_.resize(Nkpts_full_);
+    kpts_hf_cart_.resize(Nkpts_full_);
+
+    int idx_full = 0;
+    for (int nk1 = nk1_s; nk1 < nk1_e; ++nk1) {
+        for (int nk2 = nk2_s; nk2 < nk2_e; ++nk2) {
+            for (int nk3 = nk3_s; nk3 < nk3_e; ++nk3) {
+                double k1_red = nk1 * 1.0 / Kx;
+                double k2_red = nk2 * 1.0 / Ky;
+                double k3_red = nk3 * 1.0 / Kz;
+                k1_red = std::fmod(k1_red + shift.x / Kx + 0.5 - TOL, 1.0) - 0.5 + TOL;
+                k2_red = std::fmod(k2_red + shift.y / Ky + 0.5 - TOL, 1.0) - 0.5 + TOL;
+                k3_red = std::fmod(k3_red + shift.z / Kz + 0.5 - TOL, 1.0) - 0.5 + TOL;
+                double k1c = k1_red * 2.0 * constants::PI / L.x;
+                double k2c = k2_red * 2.0 * constants::PI / L.y;
+                double k3c = k3_red * 2.0 * constants::PI / L.z;
+
+                kpts_hf_cart_[idx_full] = {k1c, k2c, k3c};
+
+                // Find matching sym-reduced k-point (direct match)
+                bool found_direct = false;
+                for (int nk = 0; nk < Nkpts_sym_; ++nk) {
+                    if (std::fabs(k1c - kpts_cart_[nk].x) < TOL &&
+                        std::fabs(k2c - kpts_cart_[nk].y) < TOL &&
+                        std::fabs(k3c - kpts_cart_[nk].z) < TOL) {
+                        kpthf_ind_[idx_full] = nk;
+                        kpthf_pn_[idx_full] = 1;  // direct
+                        found_direct = true;
+                        break;
+                    }
+                }
+                if (!found_direct) {
+                    // Must be a time-reversed partner: -k matches some sym k-point
+                    for (int nk = 0; nk < Nkpts_sym_; ++nk) {
+                        bool mx = (std::fabs(k1c + kpts_cart_[nk].x) < TOL) ||
+                                  (std::fabs(k1c + kpts_cart_[nk].x - sumx) < TOL);
+                        bool my = (std::fabs(k2c + kpts_cart_[nk].y) < TOL) ||
+                                  (std::fabs(k2c + kpts_cart_[nk].y - sumy) < TOL);
+                        bool mz = (std::fabs(k3c + kpts_cart_[nk].z) < TOL) ||
+                                  (std::fabs(k3c + kpts_cart_[nk].z - sumz) < TOL);
+                        if (mx && my && mz) {
+                            kpthf_ind_[idx_full] = nk;
+                            kpthf_pn_[idx_full] = 0;  // time-reversed
+                            break;
+                        }
+                    }
+                }
+                idx_full++;
+            }
+        }
+    }
 }
 
 std::vector<double> KPoints::normalized_weights() const {

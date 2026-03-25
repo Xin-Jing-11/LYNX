@@ -22,6 +22,7 @@
 #include "electronic/ElectronDensity.hpp"
 #include "electronic/Occupation.hpp"
 #include "xc/XCFunctional.hpp"
+#include "xc/ExactExchange.hpp"
 #include "solvers/PoissonSolver.hpp"
 #include "solvers/EigenSolver.hpp"
 #include "solvers/Mixer.hpp"
@@ -263,6 +264,18 @@ static DFTResult run_single_point(const std::string& json_file) {
         std::printf("NLCC: has_nlcc=false\n");
     }
 
+    // Setup exact exchange for hybrid functionals
+    std::unique_ptr<ExactExchange> exx_ptr;
+    if (lynx::is_hybrid(config.xc)) {
+        exx_ptr = std::make_unique<ExactExchange>();
+        int npband = std::max(1, config.parallel.npband);
+        int npkpt = std::max(1, config.parallel.npkpt);
+        exx_ptr->setup(grid, lattice, &kpoints, bandcomm, kpt_bridge, spin_bridge,
+                        config.exx_params, Nspin, Nstates, Nband_local, band_start,
+                        npband, npkpt, kpt_start, spin_start);
+        scf.set_exx(exx_ptr.get());
+    }
+
     scf.run(wfn, Nelectron, Natom,
             elec.pseudocharge().data(), Vloc.data(),
             elec.Eself(), elec.Ec(), config.xc,
@@ -334,8 +347,8 @@ static DFTResult run_single_point(const std::string& json_file) {
         result.pressure = stress_calc.pressure();
 
         // Add EXX stress contribution for hybrid functionals
-        if (exx) {
-            auto stress_exx = exx->compute_stress(wfn, gradient, halo, domain);
+        if (lynx::is_hybrid(config.xc) && scf.exx().is_setup()) {
+            auto stress_exx = scf.exx().compute_stress(wfn, gradient, halo, domain);
             for (int i = 0; i < 6; ++i)
                 result.stress[i] += stress_exx[i];
             // Recompute pressure with EXX included

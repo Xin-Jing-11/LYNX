@@ -33,6 +33,8 @@
 
 namespace lynx {
 
+class ExactExchange;  // forward declaration
+
 struct SCFParams {
     int max_iter = 100;
     int min_iter = 2;
@@ -48,6 +50,7 @@ struct SCFParams {
     int nchefsi = 1;             // CheFSI passes per subsequent SCF iteration
     double poisson_tol = -1.0;   // Default: computed as tol * 0.01
     bool print_eigen = false;
+    EXXParams exx_params;     // exact exchange parameters (hybrid functionals)
 };
 
 class SCF {
@@ -180,6 +183,10 @@ private:
 
     // SOC / noncollinear
     bool is_soc_ = false;
+
+    // Exact exchange (hybrid functionals)
+    ExactExchange* exx_ = nullptr;
+    bool in_fock_loop_ = false;
     NDArray<double> Veff_spinor_;  // [V_uu | V_dd | Re(V_ud) | Im(V_ud)], 4*Nd_d
 
     // Compute kinetic energy density tau from wavefunctions

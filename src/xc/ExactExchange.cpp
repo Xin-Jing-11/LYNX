@@ -62,11 +62,6 @@ void ExactExchange::setup(const FDGrid& grid, const Lattice& lattice,
     kpoints_ = kpoints;
     is_gamma_ = !kpoints || kpoints->is_gamma_only();
 
-    // Setup HF k-point grid for exact exchange
-    if (kpoints && !kpoints->is_gamma_only()) {
-        const_cast<KPoints*>(kpoints)->setup_hf_kpoints();
-    }
-
     // Local k-points
     if (kpoints) {
         // Each kpt_bridge rank handles ceil(Nkpts/npkpt) k-points
@@ -1020,11 +1015,11 @@ std::array<double, 6> ExactExchange::compute_stress(
                 }
 
                 // k-q vector for Bloch-periodic halo exchange
-                Vec3 dk_vec = {
+                Vec3 dk_vec(
                     kpts_cart[kpt_k].x - kpts_hf_cart[q_hf].x,
                     kpts_cart[kpt_k].y - kpts_hf_cart[q_hf].y,
                     kpts_cart[kpt_k].z - kpts_hf_cart[q_hf].z
-                };
+                );
 
                 for (int j = 0; j < Nocc; j++) {
                     if (occ_q[j] < OCC_THRESHOLD) continue;

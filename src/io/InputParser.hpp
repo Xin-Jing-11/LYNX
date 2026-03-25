@@ -36,6 +36,7 @@ struct SystemConfig {
     double elec_temp = -1.0;         // Default: auto (0.2 eV for Gaussian, 0.1 eV for FD)
     SmearingType smearing = SmearingType::GaussianSmearing;
     XCType xc = XCType::GGA_PBE;
+    EXXParams exx_params;    // exact exchange params (hybrid functionals)
     int Nelectron = 0;
 
     // K-points

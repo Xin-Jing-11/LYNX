@@ -46,6 +46,8 @@ XCType parse_xc(const std::string& s) {
     if (s == "SCAN") return XCType::MGGA_SCAN;
     if (s == "RSCAN") return XCType::MGGA_RSCAN;
     if (s == "R2SCAN") return XCType::MGGA_R2SCAN;
+    if (s == "PBE0" || s == "HYB_PBE0") return XCType::HYB_PBE0;
+    if (s == "HSE" || s == "HSE06" || s == "HYB_HSE") return XCType::HYB_HSE;
     throw std::runtime_error("Unknown XC functional: " + s);
 }
 
@@ -142,6 +144,27 @@ SystemConfig InputParser::parse(const std::string& json_file) {
             config.Nstates = elec["Nstates"].get<int>();
         if (elec.contains("Nelectron"))
             config.Nelectron = elec["Nelectron"].get<int>();
+
+        // EXX parameters for hybrid functionals
+        if (elec.contains("exx_frac"))
+            config.exx_params.exx_frac = elec["exx_frac"].get<double>();
+        if (elec.contains("exx_range_fock"))
+            config.exx_params.hyb_range_fock = elec["exx_range_fock"].get<double>();
+        if (elec.contains("exx_div_flag"))
+            config.exx_params.exx_div_flag = elec["exx_div_flag"].get<int>();
+        if (elec.contains("maxit_fock"))
+            config.exx_params.maxit_fock = elec["maxit_fock"].get<int>();
+        if (elec.contains("tol_fock"))
+            config.exx_params.tol_fock = elec["tol_fock"].get<double>();
+    }
+
+    // Set default EXX parameters based on XC type
+    if (config.xc == XCType::HYB_PBE0) {
+        if (config.exx_params.hyb_range_fock < 0)
+            config.exx_params.hyb_range_fock = 0.0;  // unscreened
+    } else if (config.xc == XCType::HYB_HSE) {
+        if (config.exx_params.hyb_range_fock < 0)
+            config.exx_params.hyb_range_fock = 0.11;  // HSE06 screening
     }
 
     // K-points

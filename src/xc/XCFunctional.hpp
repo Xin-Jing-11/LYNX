@@ -43,9 +43,13 @@ public:
                        const double* tau = nullptr,
                        double* vtau = nullptr) const;
 
+    // Set exchange scaling factor (1.0 = full exchange, 0.75 = PBE0 during Fock loop)
+    void set_exchange_scale(double s) { exchange_scale_ = s; }
+
     XCType type() const { return type_; }
     bool is_gga() const {
-        return type_ == XCType::GGA_PBE || type_ == XCType::GGA_PBEsol || type_ == XCType::GGA_RPBE;
+        return type_ == XCType::GGA_PBE || type_ == XCType::GGA_PBEsol || type_ == XCType::GGA_RPBE
+            || type_ == XCType::HYB_PBE0 || type_ == XCType::HYB_HSE;
     }
     bool is_mgga() const {
         return type_ == XCType::MGGA_SCAN || type_ == XCType::MGGA_RSCAN || type_ == XCType::MGGA_R2SCAN;
@@ -57,6 +61,7 @@ private:
     const FDGrid* grid_ = nullptr;
     const Gradient* gradient_ = nullptr;
     const HaloExchange* halo_ = nullptr;
+    double exchange_scale_ = 1.0;  // scaling for exchange (1-exx_frac for hybrids in Fock loop)
 
     // Get libxc functional IDs for current XC type
     void get_func_ids(int& xc_id, int& cc_id) const;

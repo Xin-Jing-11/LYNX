@@ -12,6 +12,8 @@
 
 namespace lynx {
 
+class ExactExchange;  // forward declaration
+
 using Complex = std::complex<double>;
 
 // Hamiltonian operator: H*psi = -0.5*Lap*psi + Veff*psi + Vnl*psi
@@ -40,7 +42,7 @@ public:
     // --- Complex (k-point) interface ---
 
     // Set the nonlocal projector for k-point (complex Chi with Bloch phases)
-    void set_vnl_kpt(const NonlocalProjector* vnl_kpt) { vnl_kpt_ = vnl_kpt; }
+    void set_vnl_kpt(const NonlocalProjector* vnl_kpt) const { vnl_kpt_ = vnl_kpt; }
 
     // Apply H*psi for a specific k-point
     // kpt_cart: k-point in Cartesian reciprocal coords
@@ -65,6 +67,11 @@ public:
     void set_vtau(const double* vtau) { vtau_ = vtau; }
     const double* vtau() const { return vtau_; }
 
+    // EXX: set exact exchange operator for hybrid functionals
+    void set_exx(ExactExchange* exx) const { exx_ = exx; }
+    void set_exx_context(int spin, int kpt) const { exx_spin_ = spin; exx_kpt_ = kpt; }
+    const ExactExchange* exx() const { return exx_; }
+
     // mGGA term: H_mGGA ψ = -0.5 ∇·(vtau · ∇ψ)
     void apply_mgga(const double* psi, double* y, int ncol) const;
     void apply_mgga_kpt(const Complex* psi, Complex* y, int ncol,
@@ -79,8 +86,11 @@ private:
     const FDGrid* grid_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;      // Gamma-point nonlocal
-    const NonlocalProjector* vnl_kpt_ = nullptr;   // k-point nonlocal (complex Chi)
+    mutable const NonlocalProjector* vnl_kpt_ = nullptr;   // k-point nonlocal (complex Chi)
     const double* vtau_ = nullptr;                  // mGGA vtau potential
+    mutable ExactExchange* exx_ = nullptr;           // EXX operator (hybrid)
+    mutable int exx_spin_ = 0;                       // current spin for EXX apply
+    mutable int exx_kpt_ = 0;                        // current k-point for EXX apply
 
     // Templated stencil application (shared between real and complex)
     template<typename T>

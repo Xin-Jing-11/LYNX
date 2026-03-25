@@ -23,6 +23,7 @@
 #include "physics/Energy.hpp"
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
+#include "xc/ExactExchange.hpp"
 #include "physics/Electrostatics.hpp"
 #include "parallel/Parallelization.hpp"
 #include "parallel/HaloExchange.hpp"
