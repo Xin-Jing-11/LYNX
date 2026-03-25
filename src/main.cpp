@@ -23,6 +23,7 @@
 #include "physics/Energy.hpp"
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
+#include "xc/ExactExchange.hpp"
 #include "physics/Electrostatics.hpp"
 #include "parallel/Parallelization.hpp"
 #include "parallel/HaloExchange.hpp"
@@ -234,16 +235,6 @@ int main(int argc, char** argv) {
             std::printf("Eself = %.6f, Ec = %.6f, Esc = %.6f Ha\n",
                         elec.Eself(), elec.Ec(), elec.Eself() + elec.Ec());
 
-            // Debug: print pseudocharge norm and stats
-            double b_norm2 = 0, b_min = 1e99, b_max = -1e99;
-            for (int i = 0; i < Nd_d; ++i) {
-                double bi = elec.pseudocharge().data()[i];
-                b_norm2 += bi * bi;
-                b_min = std::min(b_min, bi);
-                b_max = std::max(b_max, bi);
-            }
-            std::printf("DEBUG_PSCHG: b_2norm=%.10f b_min=%.10f b_max=%.10f\n",
-                        std::sqrt(b_norm2), b_min, b_max);
         }
 
         // ===== Setup operators =====
@@ -405,27 +396,6 @@ int main(int argc, char** argv) {
                               has_nlcc ? rho_core.data() : nullptr);
 
         if (rank == 0) {
-            // Debug: dump norms for comparison with reference
-            {
-                double norm_b = 0, norm_phi = 0, norm_rho = 0, rho_sum = 0;
-                double b_min = 1e99, b_max = -1e99, phi_min = 1e99, phi_max = -1e99;
-                const double* b = elec.pseudocharge().data();
-                const double* phi = scf.phi();
-                const double* rho = scf.density().rho_total().data();
-                for (int i = 0; i < Nd_d; ++i) {
-                    norm_b += b[i]*b[i];
-                    b_min = std::min(b_min, b[i]); b_max = std::max(b_max, b[i]);
-                    norm_phi += phi[i]*phi[i];
-                    phi_min = std::min(phi_min, phi[i]); phi_max = std::max(phi_max, phi[i]);
-                    norm_rho += rho[i]*rho[i]; rho_sum += rho[i];
-                }
-                std::printf("DEBUG_OURS: b_2norm=%.10f b_min=%.10f b_max=%.10f\n", std::sqrt(norm_b), b_min, b_max);
-                std::printf("DEBUG_OURS: phi_2norm=%.10f phi_min=%.10f phi_max=%.10f\n", std::sqrt(norm_phi), phi_min, phi_max);
-                std::printf("DEBUG_OURS: rho_2norm=%.10f rho_sum=%.10f\n", std::sqrt(norm_rho), rho_sum);
-                std::printf("DEBUG_OURS: rho[0]=%.10e rho[100]=%.10e rho[1000]=%.10e\n", rho[0], rho[100], rho[1000]);
-                std::printf("DEBUG_OURS: b[0]=%.10e b[100]=%.10e b[1000]=%.10e\n", b[0], b[100], b[1000]);
-                std::printf("DEBUG_OURS: phi[0]=%.10e phi[100]=%.10e phi[1000]=%.10e\n", phi[0], phi[100], phi[1000]);
-            }
             std::printf("\n===== SCF %s =====\n", scf.converged() ? "CONVERGED" : "NOT CONVERGED");
             const auto& E = scf.energy();
             std::printf("  Eband   = %18.10f Ha\n", E.Eband);
@@ -525,6 +495,13 @@ int main(int argc, char** argv) {
                                         kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start, band_start,
                                         scf.vtau(), scf.tau());
 
+            // Add EXX stress for hybrid functionals
+            if (lynx::is_hybrid(config.xc) && scf.exx().is_setup()) {
+                auto stress_exx = scf.exx().compute_stress(wfn, gradient, halo, domain);
+                for (int i = 0; i < 6; i++)
+                    sigma[i] += stress_exx[i];
+            }
+
             if (rank == 0) {
                 std::printf("\nStress tensor (GPa):\n");
                 const double au_to_gpa = 29421.01569650548;
@@ -532,7 +509,7 @@ int main(int argc, char** argv) {
                             sigma[0] * au_to_gpa, sigma[1] * au_to_gpa, sigma[2] * au_to_gpa);
                 std::printf("  σ_yy = %14.6f  σ_yz = %14.6f  σ_zz = %14.6f\n",
                             sigma[3] * au_to_gpa, sigma[4] * au_to_gpa, sigma[5] * au_to_gpa);
-                std::printf("\nPressure: %.6f GPa\n", stress.pressure() * au_to_gpa);
+                std::printf("\nPressure: %.6f GPa\n", -(sigma[0] + sigma[3] + sigma[5]) / 3.0 * au_to_gpa);
             }
         }
 

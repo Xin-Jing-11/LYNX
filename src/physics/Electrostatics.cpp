@@ -8,7 +8,6 @@
 #include <vector>
 #include <algorithm>
 #include <mpi.h>
-#include <chrono>
 
 namespace lynx {
 
@@ -169,7 +168,6 @@ void Electrostatics::compute_pseudocharge(
     Eself_ = 0.0;
     Ec_ = 0.0;
     int_b_ = 0.0;
-    auto t0 = std::chrono::steady_clock::now();
 
     int ntypes = crystal.n_types();
     for (int it = 0; it < ntypes; ++it) {
@@ -182,9 +180,6 @@ void Electrostatics::compute_pseudocharge(
 
         // Reference cutoff radius (must match LYNX's REFERENCE_CUTOFF = 0.5 Bohr)
         double rc_ref = 0.5;
-        std::printf("  pschg: type=%d, %d images, Znucl=%.1f\n", it, inf.n_atom, Znucl);
-        std::fflush(stdout);
-
         for (int iat = 0; iat < inf.n_atom; ++iat) {
             Vec3 pos = inf.coords[iat];
 
@@ -201,12 +196,6 @@ void Electrostatics::compute_pseudocharge(
             int nyp = ny_loc + 2 * FDn;
             int nzp = nz_loc + 2 * FDn;
             int ndp = nxp * nyp * nzp;
-            if (iat % 10 == 0) {
-                std::printf("    img %d/%d: box=[%d:%d,%d:%d,%d:%d] ext=%dx%dx%d=%d\n",
-                    iat, inf.n_atom, i_s, i_e, j_s, j_e, k_s, k_e, nxp, nyp, nzp, ndp);
-                std::fflush(stdout);
-            }
-
             // Compute V_J and V_ref on the extended grid
             std::vector<double> VJ(ndp, 0.0);
             std::vector<double> VJ_ref(ndp, 0.0);
@@ -299,13 +288,6 @@ void Electrostatics::compute_pseudocharge(
             }
             Eself_ += eself_atom;  // accumulate without dV yet; will multiply by 0.5*dV at the end
         }
-    }
-
-    {
-        auto t1 = std::chrono::steady_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        std::printf("  pschg loop done in %.1f ms\n", ms);
-        std::fflush(stdout);
     }
 
     // Integral of pseudocharge (should equal -total_Z)

@@ -1,4 +1,5 @@
 #include "physics/SCF.hpp"
+#include "xc/ExactExchange.hpp"
 #include "core/constants.hpp"
 #include <cmath>
 #include <cstdio>
@@ -262,6 +263,11 @@ void SCF::compute_Veff(const double* rho, const double* rho_b, const double* Vlo
     // If NLCC, add core density to valence density for XC evaluation
     XCFunctional xc;
     xc.setup(xc_type_, *domain_, *grid_, gradient_, halo_);
+
+    // For hybrid functionals in Fock loop: scale exchange by (1-exx_frac)
+    if (in_fock_loop_ && is_hybrid(xc_type_) && exx_) {
+        xc.set_exchange_scale(1.0 - params_.exx_params.exx_frac);
+    }
 
     // Allocate Dxcdgrho_ if GGA or mGGA
     int dxc_ncol = (Nspin_global_ == 2) ? 3 : 1;  // 3 columns for spin: [v2c, v2x_up, v2x_down]
@@ -1113,6 +1119,284 @@ double SCF::run(Wavefunction& wfn,
         std::printf("WARNING: SCF did not converge within %d iterations.\n", params_.max_iter);
     }
 
+    // ===== Outer Fock Loop for hybrid functionals =====
+    if (exx_ && is_hybrid(xc_type_)) {
+        if (rank_world == 0)
+            std::printf("\n===== Starting outer Fock loop for hybrid functional =====\n");
+
+        double Eexx_prev = 0.0;
+        auto exx_p = params_.exx_params;
+        // Match SPARC: TOL_FOCK = 0.2 * TOL_SCF when not explicitly set
+        if (exx_p.tol_fock < 0.0) {
+            exx_p.tol_fock = 0.2 * params_.tol;
+        }
+        if (rank_world == 0)
+            std::printf("Fock params: maxit=%d, minit=%d, tol_fock=%.2e\n",
+                        exx_p.maxit_fock, exx_p.minit_fock, exx_p.tol_fock);
+
+        // Enter Fock phase: switch to hybrid-scaled XC
+        in_fock_loop_ = true;
+
+        // Reset mixing history and recompute Vxc/Veff with hybrid-scaled XC
+        // (matching SPARC Exact_Exchange_loop: lines 95-138)
+        mixer.reset();
+        compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+
+        for (int fock_iter = 0; fock_iter < exx_p.maxit_fock; fock_iter++) {
+            // 1. Build ACE operator from current orbitals
+            exx_->build_ACE(wfn);
+
+            // 2. Compute exchange energy estimate
+            double Eexx_est = exx_->compute_energy(wfn);
+            if (rank_world == 0)
+                std::printf("Fock iter %2d: building ACE, Eexx_est = %.10f Ha\n", fock_iter + 1, Eexx_est);
+
+            // 3. Enable Vx in the Hamiltonian for inner SCF
+            // SPARC applies Vx when usefock is even (during Fock inner SCF)
+            // Combined with (1-exx_frac)*PBE_X in Vxc, this gives the correct hybrid Hamiltonian
+            hamiltonian_->set_exx(exx_);
+
+            // 4. Re-estimate Chebyshev filter bounds for hybrid Hamiltonian
+            // Full Lanczos with exchange to capture the correct spectrum.
+            // Use small Chebyshev degree to prevent catastrophic amplification
+            // from the large occupied-unoccupied eigenvalue gap created by exchange.
+            {
+                for (int s = 0; s < Nspin_local; ++s) {
+                    int s_glob = spin_start_ + s;
+                    if (is_kpt_) {
+                        Vec3 kpt0 = kpoints_->kpts_cart()[kpt_start_];
+                        if (vnl_ && vnl_->is_setup()) {
+                            const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt0);
+                            hamiltonian_->set_vnl_kpt(vnl_);
+                        }
+                        hamiltonian_->set_exx_context(s_glob, kpt_start_);
+                        eigsolver.lanczos_bounds_kpt(Veff_.data() + s_glob * Nd_d, Nd_d,
+                                                      kpt0, cell_lengths,
+                                                      eigval_min[s], eigval_max[s]);
+                    } else {
+                        hamiltonian_->set_exx_context(s_glob, 0);
+                        eigsolver.lanczos_bounds(Veff_.data() + s_glob * Nd_d, Nd_d,
+                                                  eigval_min[s], eigval_max[s]);
+                    }
+                    eigval_max[s] *= 1.01;  // 1% buffer
+                }
+
+                // lambda_cutoff = highest previous eigenvalue + margin
+                double eig_last_max = -1e30;
+                for (int s = 0; s < Nspin_local; ++s) {
+                    const double* eigs = wfn.eigenvalues(s, 0).data();
+                    if (eigs[Nband - 1] > eig_last_max)
+                        eig_last_max = eigs[Nband - 1];
+                }
+                lambda_cutoff = eig_last_max + 0.1;
+
+                if (rank_world == 0) {
+                    for (int s = 0; s < Nspin_local; ++s)
+                        std::printf("Fock Lanczos bounds (spin %d): eigmin=%.6e, eigmax=%.6e, cutoff=%.6e\n",
+                                    spin_start_ + s, eigval_min[s], eigval_max[s], lambda_cutoff);
+                }
+            }
+
+            // 5. Reset mixer at start of each Fock inner SCF
+            // (matches SPARC: scf_loop resets mixing_hist at lines 124-125 of electronicGroundState.c)
+            mixer.reset();
+
+            // 6. Run inner SCF with EXX enabled
+            converged_ = false;
+            for (int scf_iter = 0; scf_iter < params_.max_iter; ++scf_iter) {
+                int nchefsi_inner = params_.nchefsi;
+
+                // Use reduced Chebyshev degree during inner Fock SCF to prevent
+                // With correct normalization, exchange shifts eigenvalues by O(0.1) Ha
+                // so the full Chebyshev degree is safe to use.
+                int cheb_deg_inner = params_.cheb_degree;
+
+                for (int chefsi_pass = 0; chefsi_pass < nchefsi_inner; ++chefsi_pass) {
+                    // Eigensolver (same as above, with EXX active via Hamiltonian)
+                    for (int s = 0; s < Nspin_local; ++s) {
+                        int s_glob = spin_start_ + s;
+                        double* Veff_s = Veff_.data() + s_glob * Nd_d;
+                        for (int k = 0; k < Nkpts; ++k) {
+                            double* eig_inner = wfn.eigenvalues(s, k).data();
+                            if (is_kpt_) {
+                                Complex* psi_c = wfn.psi_kpt(s, k).data();
+                                int k_glob = kpt_start_ + k;
+                                Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+                                if (vnl_ && vnl_->is_setup()) {
+                                    const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
+                                    hamiltonian_->set_vnl_kpt(vnl_);
+                                }
+                                hamiltonian_->set_exx_context(s_glob, k_glob);
+                                eigsolver.solve_kpt(psi_c, eig_inner, Veff_s, Nd_d, Nband_loc,
+                                                    lambda_cutoff, eigval_min[s], eigval_max[s],
+                                                    kpt, cell_lengths,
+                                                    cheb_deg_inner,
+                                                    wfn.psi_kpt(s, k).ld());
+                            } else {
+                                double* psi = wfn.psi(s, k).data();
+                                hamiltonian_->set_exx_context(s_glob, 0);
+                                eigsolver.solve(psi, eig_inner, Veff_s, Nd_d, Nband_loc,
+                                                lambda_cutoff, eigval_min[s], eigval_max[s],
+                                                cheb_deg_inner,
+                                                wfn.psi(s, k).ld());
+                            }
+                        }
+                    }
+
+                    // Update spectral bounds
+                    {
+                        double eig_last_max = -1e30;
+                        for (int s = 0; s < Nspin_local; ++s) {
+                            const double* eigs = wfn.eigenvalues(s, 0).data();
+                            if (scf_iter > 0) eigval_min[s] = eigs[0];
+                            if (eigs[Nband - 1] > eig_last_max)
+                                eig_last_max = eigs[Nband - 1];
+                        }
+                        lambda_cutoff = eig_last_max + 0.1;
+                    }
+
+                    Ef_ = Occupation::compute(wfn, Nelectron, beta, params_.smearing,
+                                              kpt_weights, *kptcomm_, *spincomm_, kpt_start_);
+                }
+
+                // Compute density
+                ElectronDensity rho_new_fock;
+                rho_new_fock.allocate(Nd_d, Nspin);
+                rho_new_fock.compute(wfn, kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
+                                     Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
+
+                // Energy with Eexx correction (matching SPARC Calculate_Free_Energy usefock%2==0)
+                // Standard: Etot = Eband - E2 + Exc - E3 + Ehart + Eself + Ec + Entropy
+                // Hybrid:   Exc += Eexx, Etot = standard + Eexx - 2*Eexx = standard - Eexx
+                // Eexx_est is FIXED during the inner SCF
+                energy_ = Energy::compute_all(wfn, density_, Veff_.data(), phi_.data(),
+                                               exc_.data(), Vxc_.data(), rho_b,
+                                               Eself, Ec, beta, params_.smearing,
+                                               kpt_weights, Nd_d, grid_->dV(),
+                                               rho_core, Ef_, kpt_start_,
+                                               kptcomm_, spincomm_, Nspin);
+                energy_.Exc += Eexx_est;
+                energy_.Etotal -= Eexx_est;
+
+                // SCF error
+                double scf_error_fock = 0.0;
+                {
+                    const double* rho_in = density_.rho_total().data();
+                    const double* rho_out = rho_new_fock.rho_total().data();
+                    double sum_sq_out = 0.0, sum_sq_diff = 0.0;
+                    for (int i = 0; i < Nd_d; ++i) {
+                        double diff = rho_out[i] - rho_in[i];
+                        sum_sq_out += rho_out[i] * rho_out[i];
+                        sum_sq_diff += diff * diff;
+                    }
+                    scf_error_fock = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
+                }
+
+                if (rank_world == 0) {
+                    std::printf("  Fock %d SCF %3d: Etot = %18.10f, err = %10.3e, Ef = %10.5f",
+                                fock_iter + 1, scf_iter + 1, energy_.Etotal, scf_error_fock, Ef_);
+                    if (scf_iter == 0)
+                        std::printf("  [Eband=%.6f Exc=%.6f Eexx_est=%.6f std=%.6f]",
+                                    energy_.Eband, energy_.Exc - Eexx_est, Eexx_est,
+                                    energy_.Etotal + Eexx_est);
+                    std::printf("\n");
+                }
+
+                // Inner Fock SCF uses TOL_SCF (1e-6), matching SPARC when usefock%2==0
+                if (scf_iter >= params_.min_iter && scf_error_fock < params_.tol) {
+                    converged_ = true;
+                    break;
+                }
+
+                // Mix density
+                if (Nspin == 1) {
+                    mixer.mix(density_.rho_total().data(), rho_new_fock.rho_total().data(), Nd_d);
+                    double* rho_mix = density_.rho_total().data();
+                    for (int i = 0; i < Nd_d; ++i) if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
+                    {
+                        double rho_sum = 0.0;
+                        for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
+                        double Ne_current = rho_sum * grid_->dV();
+                        if (Ne_current > 1e-10) {
+                            double scale = static_cast<double>(Nelectron) / Ne_current;
+                            for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
+                        }
+                    }
+                    std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
+                } else {
+                    // Spin-polarized mixing (same as main loop)
+                    std::vector<double> dens_in(2 * Nd_d), dens_out(2 * Nd_d);
+                    const double* rho_up_in = density_.rho(0).data();
+                    const double* rho_dn_in = density_.rho(1).data();
+                    for (int i = 0; i < Nd_d; ++i) {
+                        dens_in[i] = density_.rho_total().data()[i];
+                        dens_in[Nd_d + i] = rho_up_in[i] - rho_dn_in[i];
+                    }
+                    const double* rho_up_out = rho_new_fock.rho(0).data();
+                    const double* rho_dn_out = rho_new_fock.rho(1).data();
+                    for (int i = 0; i < Nd_d; ++i) {
+                        dens_out[i] = rho_new_fock.rho_total().data()[i];
+                        dens_out[Nd_d + i] = rho_up_out[i] - rho_dn_out[i];
+                    }
+                    mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
+                    double* rho_tot = density_.rho_total().data();
+                    double* rho_up = density_.rho(0).data();
+                    double* rho_dn = density_.rho(1).data();
+                    for (int i = 0; i < Nd_d; ++i) {
+                        rho_tot[i] = dens_in[i];
+                        double mag = dens_in[Nd_d + i];
+                        rho_up[i] = 0.5 * (rho_tot[i] + mag);
+                        rho_dn[i] = 0.5 * (rho_tot[i] - mag);
+                        if (rho_up[i] < 0.0) rho_up[i] = 0.0;
+                        if (rho_dn[i] < 0.0) rho_dn[i] = 0.0;
+                        rho_tot[i] = rho_up[i] + rho_dn[i];
+                    }
+                    {
+                        double rho_sum = 0.0;
+                        for (int i = 0; i < Nd_d; ++i) rho_sum += rho_tot[i];
+                        double Ne_current = rho_sum * grid_->dV();
+                        if (Ne_current > 1e-10) {
+                            double scale = static_cast<double>(Nelectron) / Ne_current;
+                            for (int i = 0; i < Nd_d; ++i) { rho_up[i] *= scale; rho_dn[i] *= scale; rho_tot[i] *= scale; }
+                        }
+                    }
+                }
+
+                compute_Veff(density_.rho_total().data(), rho_b, Vloc_);
+            }
+
+            // 6. Energy correction (matching SPARC exactExchange.c:310-325)
+            // Inner SCF energy already has: Exc += Eexx_est, Etot -= Eexx_est (i.e. standard - Eexx_est)
+            // Now undo old Eexx and apply new Eexx
+            Eexx_prev = Eexx_est;
+            // Undo old: Exc -= Eexx_est, Etot += 2*Eexx_est
+            energy_.Exc -= Eexx_est;
+            energy_.Etotal += 2.0 * Eexx_est;
+            // Recompute Eexx with post-SCF orbitals
+            double Eexx_new = exx_->compute_energy(wfn);
+            // Apply new: Exc += Eexx_new, Etot -= 2*Eexx_new
+            energy_.Exc += Eexx_new;
+            energy_.Etotal -= 2.0 * Eexx_new;
+            energy_.Eexx = Eexx_new;
+
+            // 7. Check Fock convergence
+            double err_fock = std::fabs(Eexx_new - Eexx_prev) / std::max(1, Natom);
+            if (rank_world == 0) {
+                std::printf("Fock iter %2d: Eexx = %.10f, |dEexx|/atom = %.3e, Etot = %.10f\n",
+                            fock_iter + 1, Eexx_new, err_fock, energy_.Etotal);
+            }
+
+            if (err_fock < exx_p.tol_fock && fock_iter >= exx_p.minit_fock) {
+                if (rank_world == 0)
+                    std::printf("Fock loop converged after %d iterations.\n", fock_iter + 1);
+                break;
+            }
+        }
+
+        // Disable Vx in Hamiltonian after Fock loop
+        hamiltonian_->set_exx(nullptr);
+    }
+
     return energy_.Etotal;
 }
 
@@ -1174,6 +1458,11 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
     bool is_soc = (wfn.Nspinor() == 2);
 
     // Create and run GPU SCF
+    // For hybrid functionals, the initial PBE phase uses the base GGA functional.
+    // The full hybrid XC type is passed separately for the Fock loop.
+    XCType xc_type_gpu = is_hybrid(xc_type) ? hybrid_base_xc(xc_type) : xc_type;
+    bool is_gga_gpu = (xc_type_gpu == XCType::GGA_PBE || xc_type_gpu == XCType::GGA_PBEsol ||
+                       xc_type_gpu == XCType::GGA_RPBE);
     gpu_runner_ = std::make_unique<GPUSCFRunner>();
     double Etotal = gpu_runner_->run(
         wfn, params_, *grid_, *domain_, *stencil_,
@@ -1181,12 +1470,14 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         *crystal_, *nloc_influence_, *bandcomm_,
         Nelectron, Natom,
         density_.rho_total().data(), rho_b,
-        Eself, Ec, xc_type, rho_core, is_gga,
+        Eself, Ec, xc_type_gpu, rho_core, is_gga_gpu,
         Nspin, is_kpt_, kpoints_, kpt_weights,
         Nspin_local_, spin_start_, kpt_start_,
         density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(0).data() : nullptr,
         density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(1).data() : nullptr,
-        is_soc);
+        is_soc,
+        exx_,       // EXX operator (may be null)
+        xc_type);   // full hybrid XC type
 
     // Download results for forces/stress
     gpu_runner_->download_results(

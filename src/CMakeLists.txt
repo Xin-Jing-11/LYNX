@@ -22,6 +22,8 @@ add_library(lynx_core
     electronic/ElectronDensity.cpp
     electronic/Occupation.cpp
     xc/XCFunctional.cpp
+    xc/ExactExchange.cpp
+    xc/ExchangePoissonSolver.cpp
     solvers/LinearSolver.cpp
     solvers/PoissonSolver.cpp
     solvers/Mixer.cpp
@@ -71,10 +73,12 @@ if(USE_CUDA)
         solvers/EigenSolver.cu
         solvers/LinearSolver.cu
         xc/XCFunctional.cu
+        xc/GPUExactExchange.cu
+        xc/GPUExchangePoissonSolver.cu
         physics/GPUSCF.cu
         physics/GPUForceStress.cu
     )
-    target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand)
+    target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand CUDA::cufft)
     target_compile_definitions(lynx_core PUBLIC USE_CUDA)
     set_target_properties(lynx_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()

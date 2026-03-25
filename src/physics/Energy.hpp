@@ -20,6 +20,7 @@ struct EnergyComponents {
     double Eself = 0.0;      // Self energy of pseudocharges
     double Ec = 0.0;         // Correction energy (overlap of b)
     double Entropy = 0.0;    // Electronic entropy contribution (-T*S)
+    double Eexx = 0.0;       // Exact exchange energy (hybrid functionals)
     double Etotal = 0.0;     // Total free energy
     double Eatom = 0.0;      // Energy per atom
 };
