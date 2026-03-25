@@ -203,6 +203,11 @@ public:
     // For spin: rho_init is total density (Nd_d), mag_init is magnetization (Nd_d, may be null)
     void set_initial_density(const double* rho_init, int Nd_d,
                              const double* mag_init = nullptr);
+
+    // Set exact exchange operator for hybrid functionals
+    void set_exx(ExactExchange* exx) { exx_ = exx; }
+    const ExactExchange& exx() const { return *exx_; }
+    ExactExchange& exx() { return *exx_; }
 };
 
 } // namespace lynx

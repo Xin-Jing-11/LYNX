@@ -29,6 +29,7 @@ find_package(MPI REQUIRED)
 # --- Math libraries (BLAS, LAPACK, ScaLAPACK) ---
 if(USE_MKL)
     set(MKL_THREADING sequential)
+    set(MKL_INTERFACE lp64)
     find_package(MKL CONFIG QUIET)
     if(MKL_FOUND AND TARGET MKL::MKL)
         # oneAPI CMake config uses imported targets

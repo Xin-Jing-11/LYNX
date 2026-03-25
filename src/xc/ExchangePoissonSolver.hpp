@@ -67,6 +67,16 @@ public:
     int Nkpts_sym() const { return Nkpts_sym_; }
     int Nkpts_hf() const { return Nkpts_hf_; }
 
+    // Public wrapper for phase factor application (for diagnostics)
+    void apply_phase_factor_public(Complex* data, int ncol, bool positive, int kpt_k, int kpt_q) const {
+        apply_phase_factor(data, ncol, positive, kpt_k, kpt_q);
+    }
+
+    // Get k-point shift index for a given (k, q) pair
+    int get_kpt_shift(int kpt_k, int kpt_q) const {
+        return Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
+    }
+
 private:
     int Nx_ = 0, Ny_ = 0, Nz_ = 0;
     int Nd_ = 0;       // Nx*Ny*Nz

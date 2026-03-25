@@ -332,6 +332,15 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             &kpoints, kpt_start, band_start,
                                             scf.vtau(), scf.tau());
         result.pressure = stress_calc.pressure();
+
+        // Add EXX stress contribution for hybrid functionals
+        if (exx) {
+            auto stress_exx = exx->compute_stress(wfn, gradient, halo, domain);
+            for (int i = 0; i < 6; ++i)
+                result.stress[i] += stress_exx[i];
+            // Recompute pressure with EXX included
+            result.pressure = -(result.stress[0] + result.stress[3] + result.stress[5]) / 3.0;
+        }
     }
 
     return result;
@@ -1031,6 +1040,21 @@ TEST(EndToEnd, Fe2_spin_SCAN_kpt) {
     }
 }
 
+TEST(EndToEnd, Si2_kpt_PBE) {
+    std::string json_file = "tests/e2e/data/Si2_kpt_PBE.json";
+    auto result = run_single_point(json_file);
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0) {
+        const double au_to_gpa = 29421.01569650548;
+        std::printf("\n=== Si2 PBE Stress (GPa) ===\n");
+        std::printf("  %10.4f %10.4f %10.4f\n", result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+        std::printf("  %10.4f %10.4f %10.4f\n", result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
+        std::printf("  %10.4f %10.4f %10.4f\n", result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+    }
+}
+
 // ============================================================
 // Test: Si4 PBE0 gamma — hybrid functional, ortho cell, 4 atoms
 // Reference: SPARC PBE0 (settings matched to SCAN Si4 benchmark)
@@ -1045,7 +1069,7 @@ TEST(EndToEnd, Fe2_spin_SCAN_kpt) {
 //   NOTE: Gamma-only PBE0 may have G=0 divergence for periodic systems
 // ============================================================
 TEST(EndToEnd, Si4_PBE0_gamma) {
-    std::string json_file = "tests/data/Si4_PBE0_gamma.json";
+    std::string json_file = "tests/e2e/data/Si4_PBE0_gamma.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -1092,7 +1116,7 @@ TEST(EndToEnd, Si4_PBE0_gamma) {
 //   Settings: same as Si4_PBE0_gamma but with 2×2×2 k-points (0.5 shift)
 // ============================================================
 TEST(EndToEnd, Si4_PBE0_kpt) {
-    std::string json_file = "tests/data/Si4_PBE0_kpt.json";
+    std::string json_file = "tests/e2e/data/Si4_PBE0_kpt.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -1146,7 +1170,7 @@ TEST(EndToEnd, Si4_PBE0_kpt) {
 //     Pseudopotential: Fe_LDA.psp8
 // ============================================================
 TEST(EndToEnd, Fe2_spin_PBE0_gamma) {
-    std::string json_file = "tests/data/Fe2_spin_PBE0_gamma.json";
+    std::string json_file = "tests/e2e/data/Fe2_spin_PBE0_gamma.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;
@@ -1200,7 +1224,7 @@ TEST(EndToEnd, Fe2_spin_PBE0_gamma) {
 //     Pseudopotential: Fe_LDA.psp8
 // ============================================================
 TEST(EndToEnd, Fe2_spin_PBE0_kpt) {
-    std::string json_file = "tests/data/Fe2_spin_PBE0_kpt.json";
+    std::string json_file = "tests/e2e/data/Fe2_spin_PBE0_kpt.json";
     auto result = run_single_point(json_file);
 
     int rank = 0;

@@ -293,7 +293,8 @@ void Stress::compute_xc_stress(
     stress_xc_[1] = stress_xc_[2] = stress_xc_[4] = 0.0;
 
     // GGA/mGGA gradient correction: -∫ Dxcdgrho · ∂ρ/∂x_α · ∂ρ/∂x_β dV
-    bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol || xc_type == XCType::GGA_RPBE);
+    bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol || xc_type == XCType::GGA_RPBE
+                   || xc_type == XCType::HYB_PBE0 || xc_type == XCType::HYB_HSE);
     bool needs_grad_stress = is_gga || is_mgga_type(xc_type);
     if (needs_grad_stress && Dxcdgrho) {
         int FDn = gradient.stencil().FDn();
@@ -1523,6 +1524,7 @@ void Stress::compute_nonlocal_kinetic(
     energy_nl *= occfac;
     energy_soc *= 2.0;  // SOC energy scaled by 2.0 (spn_fac for SOC)
 
+    // Debug: print NL energy
     // Subtract E_nl + E_soc from diagonal
     double energy_diag = energy_nl + energy_soc;
     stress_nl_[0] = snl[0] - energy_diag;
