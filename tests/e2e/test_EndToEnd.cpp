@@ -1053,6 +1053,92 @@ TEST(EndToEnd, Fe2_spin_SCAN_kpt) {
     }
 }
 
+// ============================================================
+// Test: Si4 gamma-point rSCAN — deformed orthogonal cell
+// Same geometry as SCAN gamma test, XC = rSCAN
+// ============================================================
+TEST(EndToEnd, Si4_gamma_RSCAN) {
+    std::string json_file = "tests/e2e/data/Si4_rscan_gamma.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        const double au_to_gpa = 29421.01569650548;
+        std::printf("\n=== Si4 gamma rSCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+        std::printf("  Eband  = %.10f Ha\n", result.Eband);
+        std::printf("  Exc    = %.10f Ha\n", result.Exc);
+
+        std::printf("\n  Forces (Ha/Bohr):\n");
+        for (int i = 0; i < result.Natom; ++i) {
+            std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                        i + 1,
+                        result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+        }
+
+        double s_xx = result.stress[0] * au_to_gpa;
+        double s_xy = result.stress[1] * au_to_gpa;
+        double s_xz = result.stress[2] * au_to_gpa;
+        double s_yy = result.stress[3] * au_to_gpa;
+        double s_yz = result.stress[4] * au_to_gpa;
+        double s_zz = result.stress[5] * au_to_gpa;
+
+        std::printf("\n  Stress (GPa):\n");
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xx, s_xy, s_xz);
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xy, s_yy, s_yz);
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xz, s_yz, s_zz);
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+    EXPECT_EQ(static_cast<int>(result.forces.size()), 12);
+}
+
+// ============================================================
+// Test: Si4 gamma-point r2SCAN — deformed orthogonal cell
+// Same geometry as SCAN gamma test, XC = r2SCAN
+// ============================================================
+TEST(EndToEnd, Si4_gamma_R2SCAN) {
+    std::string json_file = "tests/e2e/data/Si4_r2scan_gamma.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        const double au_to_gpa = 29421.01569650548;
+        std::printf("\n=== Si4 gamma r2SCAN Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+        std::printf("  Eband  = %.10f Ha\n", result.Eband);
+        std::printf("  Exc    = %.10f Ha\n", result.Exc);
+
+        std::printf("\n  Forces (Ha/Bohr):\n");
+        for (int i = 0; i < result.Natom; ++i) {
+            std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                        i + 1,
+                        result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+        }
+
+        double s_xx = result.stress[0] * au_to_gpa;
+        double s_xy = result.stress[1] * au_to_gpa;
+        double s_xz = result.stress[2] * au_to_gpa;
+        double s_yy = result.stress[3] * au_to_gpa;
+        double s_yz = result.stress[4] * au_to_gpa;
+        double s_zz = result.stress[5] * au_to_gpa;
+
+        std::printf("\n  Stress (GPa):\n");
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xx, s_xy, s_xz);
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xy, s_yy, s_yz);
+        std::printf("    %10.4f %10.4f %10.4f\n", s_xz, s_yz, s_zz);
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+    EXPECT_EQ(static_cast<int>(result.forces.size()), 12);
+}
+
 TEST(EndToEnd, Si2_kpt_PBE) {
     std::string json_file = "tests/e2e/data/Si2_kpt_PBE.json";
     auto result = run_single_point(json_file);
