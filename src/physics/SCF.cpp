@@ -1407,7 +1407,8 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
     int Nd_d = domain_->Nd_d();
     int Nspin = Nspin_global_;
     bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol ||
-                   xc_type == XCType::GGA_RPBE);
+                   xc_type == XCType::GGA_RPBE ||
+                   xc_type == XCType::HYB_PBE0 || xc_type == XCType::HYB_HSE);
 
     // Allocate work arrays (needed for download_results)
     bool has_gradient = is_gga || is_mgga_type(xc_type);

@@ -493,17 +493,6 @@ void chebyshev_filter_z_gpu(
     // Step 1: Y = (H*X - c*X) * (sigma/e)
     apply_H_z(d_X, d_Veff, d_HX, d_x_ex, Ns);
 
-    // Debug: check HX norm for first vector
-    {
-        cudaDeviceSynchronize();
-        double nrm2 = 0;
-        cublasStatus_t s = cublasDnrm2(GPUContext::instance().cublas, 2*Nd, (double*)d_HX, 1, &nrm2);
-        double nrmX = 0;
-        cublasDnrm2(GPUContext::instance().cublas, 2*Nd, (double*)d_X, 1, &nrmX);
-        printf("[chefsi_z] ||HX||=%.6e ||X||=%.6e ratio=%.3f e=%.3f c=%.3f sigma=%.6e scale=%.6e degree=%d\n",
-               nrm2, nrmX, nrm2/std::max(nrmX,1e-30), e, c, sigma, sigma/e, degree);
-    }
-
     double scale = sigma / e;
     chefsi_init_kernel_z<<<grid, bs>>>(d_Y, d_HX, d_X, scale, c, total);
 
@@ -576,13 +565,6 @@ void orthogonalize_z_gpu(cuDoubleComplex* d_X, cuDoubleComplex* d_S,
     // S = X^H * X * dV
     compute_ata_z_gpu(d_X, d_S, Nd, N, dV);
 
-    {
-        cudaDeviceSynchronize();
-        double s00[2];
-        cudaMemcpy(s00, d_S, 2*sizeof(double), cudaMemcpyDeviceToHost);
-        printf("[orth_z] S[0,0]=(%.6e,%.6e) Nd=%d N=%d dV=%.6e\n", s00[0], s00[1], Nd, N, dV);
-    }
-
     // Cholesky factorization: S = R^H * R (upper triangular)
     int lwork = 0;
     cusolverDnZpotrf_bufferSize(ctx.cusolver, CUBLAS_FILL_MODE_UPPER,
@@ -591,14 +573,6 @@ void orthogonalize_z_gpu(cuDoubleComplex* d_X, cuDoubleComplex* d_S,
     cuDoubleComplex* d_work = ctx.scratch_pool.alloc<cuDoubleComplex>(lwork);
     cusolverDnZpotrf(ctx.cusolver, CUBLAS_FILL_MODE_UPPER,
                       N, d_S, N, d_work, lwork, ctx.buf.cusolver_devinfo);
-
-    {
-        cudaDeviceSynchronize();
-        int devinfo;
-        cudaMemcpy(&devinfo, ctx.buf.cusolver_devinfo, sizeof(int), cudaMemcpyDeviceToHost);
-        if (devinfo != 0)
-            printf("[orth_z] zpotrf FAILED: devinfo=%d (matrix not positive definite)\n", devinfo);
-    }
 
     // X = X * R^{-1}  (triangular solve)
     cuDoubleComplex one = make_cuDoubleComplex(1.0, 0.0);
@@ -628,23 +602,8 @@ void project_and_diag_z_gpu(
     // HX = H * X
     apply_H_z(d_X, d_Veff, d_HX, d_x_ex, N);
 
-    {
-        cudaDeviceSynchronize();
-        double hx0[2];
-        cudaMemcpy(hx0, d_HX, 2*sizeof(double), cudaMemcpyDeviceToHost);
-        if (std::isnan(hx0[0]))
-            printf("[proj_diag_z] NaN in HX after apply_H! HX[0]=(%.3e,%.3e)\n", hx0[0], hx0[1]);
-    }
-
     // Hs = X^H * HX * dV
     compute_atb_z_gpu(d_X, d_HX, d_Hs, Nd, N, dV);
-
-    {
-        cudaDeviceSynchronize();
-        double hs0[2];
-        cudaMemcpy(hs0, d_Hs, 2*sizeof(double), cudaMemcpyDeviceToHost);
-        printf("[proj_diag_z] Hs[0,0]=(%.6e,%.6e) Nd=%d N=%d dV=%.6e\n", hs0[0], hs0[1], Nd, N, dV);
-    }
 
     // Hermitianize
     hermitianize_z_gpu(d_Hs, N);
@@ -656,20 +615,10 @@ void project_and_diag_z_gpu(
                                   N, d_Hs, N, d_eigvals, &lwork);
 
     cuDoubleComplex* d_work = ctx.scratch_pool.alloc<cuDoubleComplex>(lwork);
-    cusolverStatus_t zheevd_status = cusolverDnZheevd(ctx.cusolver, CUSOLVER_EIG_MODE_VECTOR,
+    cusolverDnZheevd(ctx.cusolver, CUSOLVER_EIG_MODE_VECTOR,
                       CUBLAS_FILL_MODE_UPPER,
                       N, d_Hs, N, d_eigvals, d_work, lwork,
                       ctx.buf.cusolver_devinfo);
-    {
-        cudaDeviceSynchronize();
-        int devinfo;
-        cudaMemcpy(&devinfo, ctx.buf.cusolver_devinfo, sizeof(int), cudaMemcpyDeviceToHost);
-        double eig0;
-        cudaMemcpy(&eig0, d_eigvals, sizeof(double), cudaMemcpyDeviceToHost);
-        if (std::isnan(eig0) || devinfo != 0)
-            printf("[proj_diag_z] zheevd: status=%d devinfo=%d eig[0]=%.6e lwork=%d\n",
-                   (int)zheevd_status, devinfo, eig0, lwork);
-    }
 
     ctx.scratch_pool.restore(_scratch_cp);
     // d_Hs now contains complex eigenvectors (columns), d_eigvals has real eigenvalues

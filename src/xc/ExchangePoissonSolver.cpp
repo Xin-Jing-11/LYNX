@@ -6,8 +6,12 @@
 #include <cassert>
 #include <mpi.h>
 
+#ifdef USE_CUDA
+#include <cufftw.h>
+#else
 #ifdef USE_MKL
 #include <mkl_dfti.h>
+#endif
 #endif
 
 namespace lynx {
@@ -434,25 +438,16 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
 
     std::vector<Complex> rhs_bar(Ndc_ * ncol);
 
-    // Forward FFT (real to complex) via MKL DFTI
+    // Forward FFT (real to complex) via FFTW3
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_REAL, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        DftiSetValue(desc, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-        MKL_LONG si[4] = {0, (MKL_LONG)(Ny_*Nx_), (MKL_LONG)Nx_, 1};
-        MKL_LONG so[4] = {0, (MKL_LONG)(Ny_*(Nx_/2+1)), (MKL_LONG)(Nx_/2+1), 1};
-        DftiSetValue(desc, DFTI_INPUT_STRIDES, si);
-        DftiSetValue(desc, DFTI_OUTPUT_STRIDES, so);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Ndc_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeForward(desc, rhs, reinterpret_cast<double*>(rhs_bar.data()));
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft_r2c(
+            3, n, ncol,
+            rhs, nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Ndc_,
+            FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     // Multiply by Poisson constants (last shift = zero shift for gamma)
@@ -463,28 +458,19 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
     }
 
-    // Inverse FFT (complex to real) via MKL DFTI
+    // Inverse FFT (complex to real) via FFTW3
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_REAL, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        DftiSetValue(desc, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-        MKL_LONG si[4] = {0, (MKL_LONG)(Ny_*(Nx_/2+1)), (MKL_LONG)(Nx_/2+1), 1};
-        MKL_LONG so[4] = {0, (MKL_LONG)(Ny_*Nx_), (MKL_LONG)Nx_, 1};
-        DftiSetValue(desc, DFTI_INPUT_STRIDES, si);
-        DftiSetValue(desc, DFTI_OUTPUT_STRIDES, so);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Ndc_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeBackward(desc, reinterpret_cast<double*>(rhs_bar.data()), sol);
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft_c2r(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Ndc_,
+            sol, nullptr, 1, Nd_,
+            FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
-    // Normalize (MKL produces unnormalized output)
+    // Normalize (FFTW produces unnormalized output)
     double inv_Nd = 1.0 / Nd_;
     for (int i = 0; i < Nd_ * ncol; i++)
         sol[i] *= inv_Nd;
@@ -498,25 +484,16 @@ void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* so
 
     std::vector<Complex> rhs_bar(Ndc_ * ncol);
 
-    // Forward FFT (real to complex)
+    // Forward FFT (real to complex) via FFTW3
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_REAL, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        DftiSetValue(desc, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-        MKL_LONG si[4] = {0, (MKL_LONG)(Ny_*Nx_), (MKL_LONG)Nx_, 1};
-        MKL_LONG so[4] = {0, (MKL_LONG)(Ny_*(Nx_/2+1)), (MKL_LONG)(Nx_/2+1), 1};
-        DftiSetValue(desc, DFTI_INPUT_STRIDES, si);
-        DftiSetValue(desc, DFTI_OUTPUT_STRIDES, so);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Ndc_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeForward(desc, rhs, reinterpret_cast<double*>(rhs_bar.data()));
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft_r2c(
+            3, n, ncol,
+            rhs, nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Ndc_,
+            FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     // Multiply by stress Poisson constants (last shift = zero shift for gamma)
@@ -528,25 +505,16 @@ void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* so
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
     }
 
-    // Inverse FFT (complex to real)
+    // Inverse FFT (complex to real) via FFTW3
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_REAL, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        DftiSetValue(desc, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-        MKL_LONG si[4] = {0, (MKL_LONG)(Ny_*(Nx_/2+1)), (MKL_LONG)(Nx_/2+1), 1};
-        MKL_LONG so[4] = {0, (MKL_LONG)(Ny_*Nx_), (MKL_LONG)Nx_, 1};
-        DftiSetValue(desc, DFTI_INPUT_STRIDES, si);
-        DftiSetValue(desc, DFTI_OUTPUT_STRIDES, so);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Ndc_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeBackward(desc, reinterpret_cast<double*>(rhs_bar.data()), sol);
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft_c2r(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Ndc_,
+            sol, nullptr, 1, Nd_,
+            FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     double inv_Nd = 1.0 / Nd_;
@@ -568,21 +536,17 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
     // Apply negative phase factor: rhs *= exp(-i*(k-q)*r)
     apply_phase_factor(rhs_copy.data(), ncol, false, kpt_k, kpt_q);
 
-    // Forward FFT (complex to complex) via MKL DFTI
+    // Forward FFT (complex to complex) via FFTW3
     std::vector<Complex> rhs_bar(Nd_ * ncol);
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeForward(desc, rhs_copy.data(), rhs_bar.data());
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_copy.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            FFTW_FORWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     // Multiply by Poisson constants
@@ -601,20 +565,16 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
         }
     }
 
-    // Inverse FFT (complex to complex) via MKL DFTI
+    // Inverse FFT (complex to complex) via FFTW3
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeBackward(desc, rhs_bar.data(), sol);
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(sol), nullptr, 1, Nd_,
+            FFTW_BACKWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     // Normalize
@@ -642,18 +602,14 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
 
     std::vector<Complex> rhs_bar(Nd_ * ncol);
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeForward(desc, rhs_copy.data(), rhs_bar.data());
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_copy.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            FFTW_FORWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     // Select appropriate stress constants
@@ -674,18 +630,14 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
     }
 
     {
-        DFTI_DESCRIPTOR_HANDLE desc = nullptr;
-        MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-        DftiCreateDescriptor(&desc, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
-        DftiSetValue(desc, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-        if (ncol > 1) {
-            DftiSetValue(desc, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-            DftiSetValue(desc, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-            DftiSetValue(desc, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-        }
-        DftiCommitDescriptor(desc);
-        DftiComputeBackward(desc, rhs_bar.data(), sol);
-        DftiFreeDescriptor(&desc);
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(sol), nullptr, 1, Nd_,
+            FFTW_BACKWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
     }
 
     double inv_Nd = 1.0 / Nd_;

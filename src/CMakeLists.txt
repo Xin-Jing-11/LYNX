@@ -78,7 +78,7 @@ if(USE_CUDA)
         physics/GPUSCF.cu
         physics/GPUForceStress.cu
     )
-    target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand CUDA::cufft)
+    target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand CUDA::cufft CUDA::cufftw)
     target_compile_definitions(lynx_core PUBLIC USE_CUDA)
     set_target_properties(lynx_core PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
