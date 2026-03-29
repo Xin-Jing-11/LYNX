@@ -1346,6 +1346,173 @@ void compute_soc_stress_gpu(
     cudaFreeAsync(d_x_ex, 0);
 }
 
+// ============================================================
+// mGGA psi stress kernel
+// Like kinetic_stress_kernel but weighted by vtau:
+// sk[voigt] = -occfac * dV * sum_n(g_n * sum_i(vtau[i] * dpsi_a[i,n] * dpsi_b[i,n]))
+// ============================================================
+__global__ void mgga_psi_stress_kernel(
+    const double* __restrict__ d_Dpsi_a,   // (Nd, Nband) gradient in direction a
+    const double* __restrict__ d_Dpsi_b,   // (Nd, Nband) gradient in direction b
+    const double* __restrict__ d_vtau,     // (Nd) vtau for this spin
+    const double* __restrict__ d_occ,      // (Nband) occupations
+    double* __restrict__ d_sk_out,         // [1] partial result for this Voigt pair
+    int Nd, int Nband,
+    double neg_occfac_dV)                  // = -occfac * dV
+{
+    int band = blockIdx.x;
+    if (band >= Nband) return;
+
+    double g_n = d_occ[band];
+
+    extern __shared__ double sdata[];
+
+    double local_dot = 0.0;
+    const double* pa = d_Dpsi_a + band * Nd;
+    const double* pb = d_Dpsi_b + band * Nd;
+    for (int i = threadIdx.x; i < Nd; i += blockDim.x) {
+        local_dot += d_vtau[i] * pa[i] * pb[i];
+    }
+
+    sdata[threadIdx.x] = local_dot;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        atomicAdd(d_sk_out, neg_occfac_dV * g_n * sdata[0]);
+    }
+}
+
+// ============================================================
+// GPU dot product reduction kernel: result = sum(a[i] * b[i])
+// ============================================================
+__global__ void dot_product_reduce_kernel(
+    const double* __restrict__ a,
+    const double* __restrict__ b,
+    double* __restrict__ result,
+    int N)
+{
+    extern __shared__ double sdata[];
+
+    double local_sum = 0.0;
+    for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < N; i += blockDim.x * gridDim.x) {
+        local_sum += a[i] * b[i];
+    }
+
+    sdata[threadIdx.x] = local_sum;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s)
+            sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+        atomicAdd(result, sdata[0]);
+    }
+}
+
+// ============================================================
+// Host function: compute_mgga_stress_gpu
+// Computes mGGA psi stress on GPU (avoids downloading psi/vtau)
+// Also computes tau_vtau_dot = ∫ τ·vtau dV
+// ============================================================
+void compute_mgga_stress_gpu(
+    const double* d_psi,       // (Nd, Nband) wavefunctions on GPU
+    const double* d_occ,       // (Nband) occupations on GPU
+    const double* d_vtau,      // (Nd) vtau for this spin channel
+    const double* d_tau,       // (Nd * tau_len) tau array on GPU
+    const double* d_vtau_full, // (Nd * vtau_len) vtau array on GPU
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double occfac,
+    int tau_dot_len,           // number of elements for tau·vtau dot (Nd for nospin, 2*Nd for spin)
+    // Output (host)
+    double* h_stress_mgga,     // [6] mGGA psi stress (Voigt)
+    double* h_tau_vtau_dot)    // scalar: ∫ τ·vtau dV
+{
+    auto& ctx = GPUContext::instance();
+
+    int nx_ex = nx + 2 * FDn;
+    int ny_ex = ny + 2 * FDn;
+
+    // Allocate gradient arrays
+    size_t grad_size = (size_t)Nd * Nband;
+    size_t grad_bytes = grad_size * sizeof(double);
+
+    double* d_Dpsi_x = nullptr;
+    double* d_Dpsi_y = nullptr;
+    double* d_Dpsi_z = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_x, grad_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_y, grad_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z, grad_bytes, 0));
+
+    // Scratch pool for small buffers
+    size_t scratch_cp = ctx.scratch_pool.checkpoint();
+
+    // mGGA psi stress: 6 Voigt components
+    double* d_smgga = ctx.scratch_pool.alloc<double>(6);
+    CUDA_CHECK(cudaMemset(d_smgga, 0, 6 * sizeof(double)));
+
+    // tau·vtau dot product result
+    double* d_dot = ctx.scratch_pool.alloc<double>(1);
+    CUDA_CHECK(cudaMemset(d_dot, 0, sizeof(double)));
+
+    // Halo exchange + gradients
+    double* d_x_ex = ctx.buf.x_ex;
+    halo_exchange_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
+    gradient_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
+    gradient_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
+    gradient_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
+
+    // Compute mGGA psi stress: 6 Voigt pairs
+    {
+        const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
+        int voigt_a[6] = {0, 0, 0, 1, 1, 2};
+        int voigt_b[6] = {0, 1, 2, 1, 2, 2};
+
+        int bs = 256;
+        size_t smem = bs * sizeof(double);
+        double neg_occfac_dV = -occfac * dV;
+
+        for (int v = 0; v < 6; ++v) {
+            mgga_psi_stress_kernel<<<Nband, bs, smem>>>(
+                d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
+                d_vtau, d_occ, d_smgga + v, Nd, Nband, neg_occfac_dV);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
+    // Compute tau·vtau dot product
+    {
+        int bs = 256;
+        int nblocks = std::min((tau_dot_len + bs - 1) / bs, 256);
+        size_t smem = bs * sizeof(double);
+        dot_product_reduce_kernel<<<nblocks, bs, smem>>>(
+            d_tau, d_vtau_full, d_dot, tau_dot_len);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Download results
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(h_stress_mgga, d_smgga, 6 * sizeof(double), cudaMemcpyDeviceToHost));
+
+    double dot_val = 0.0;
+    CUDA_CHECK(cudaMemcpy(&dot_val, d_dot, sizeof(double), cudaMemcpyDeviceToHost));
+    *h_tau_vtau_dot = dot_val * dV;
+
+    // Cleanup
+    cudaFreeAsync(d_Dpsi_x, 0);
+    cudaFreeAsync(d_Dpsi_y, 0);
+    cudaFreeAsync(d_Dpsi_z, 0);
+    ctx.scratch_pool.restore(scratch_cp);
+}
+
 } // namespace gpu
 } // namespace lynx
 

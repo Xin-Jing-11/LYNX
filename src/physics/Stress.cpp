@@ -77,7 +77,9 @@ std::array<double, 6> Stress::compute(
     int kpt_start,
     int band_start,
     const double* vtau,
-    const double* tau) {
+    const double* tau,
+    const double* gpu_mgga_psi_stress,
+    const double* gpu_tau_vtau_dot) {
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -94,8 +96,8 @@ std::array<double, 6> Stress::compute(
     if (grid.bcy() == BCType::Periodic) cell_measure_ *= L.y;
     if (grid.bcz() == BCType::Periodic) cell_measure_ *= L.z;
 
-    // 1. XC stress
-    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid, vtau, tau);
+    // 1. XC stress (pass GPU tau_vtau_dot if available to skip CPU reduction)
+    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid, vtau, tau, gpu_tau_vtau_dot);
 
     // 1b. NLCC XC stress correction
     if (rho_core) {
@@ -111,7 +113,11 @@ std::array<double, 6> Stress::compute(
                              domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
 
     // 4. mGGA psi stress term: σ_ij += -occfac · Σ_n g_n · ∫ vtau · ∇_i ψ · ∇_j ψ dV
-    if (vtau && is_mgga_type(xc_type)) {
+    if (gpu_mgga_psi_stress && is_mgga_type(xc_type)) {
+        // Use pre-computed GPU values (already normalized by cell_measure)
+        for (int i = 0; i < 6; i++)
+            stress_xc_[i] += gpu_mgga_psi_stress[i];
+    } else if (vtau && is_mgga_type(xc_type)) {
         int Nd_d = domain.Nd_d();
         int Nband_loc = wfn.Nband();
         int Nspin_local = wfn.Nspin();
@@ -250,7 +256,8 @@ void Stress::compute_xc_stress(
     const Domain& domain,
     const FDGrid& grid,
     const double* vtau,
-    const double* tau) {
+    const double* tau,
+    const double* gpu_tau_vtau_dot) {
 
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
@@ -271,20 +278,23 @@ void Stress::compute_xc_stress(
     Exc_corr *= dV;
 
     // mGGA: add ∫ τ·vtau dV to Exc_corr (matching SPARC energy.c)
-    if (is_mgga_type(xc_type) && vtau && tau) {
-        double Emgga = 0.0;
-        if (Nspin == 2) {
-            // tau layout: [up | down | total], vtau layout: [up | down]
-            // Exc_corr += ∫ (tau_up · vtau_up + tau_dn · vtau_dn) dV
-            for (int i = 0; i < 2 * Nd_d; ++i) {
-                Emgga += tau[i] * vtau[i];
+    if (is_mgga_type(xc_type)) {
+        if (gpu_tau_vtau_dot) {
+            // Use pre-computed GPU value
+            Exc_corr += *gpu_tau_vtau_dot;
+        } else if (vtau && tau) {
+            double Emgga = 0.0;
+            if (Nspin == 2) {
+                for (int i = 0; i < 2 * Nd_d; ++i) {
+                    Emgga += tau[i] * vtau[i];
+                }
+            } else {
+                for (int i = 0; i < Nd_d; ++i) {
+                    Emgga += tau[i] * vtau[i];
+                }
             }
-        } else {
-            for (int i = 0; i < Nd_d; ++i) {
-                Emgga += tau[i] * vtau[i];
-            }
+            Exc_corr += Emgga * dV;
         }
-        Exc_corr += Emgga * dV;
     }
 
     // Diagonal: Exc - Exc_corr

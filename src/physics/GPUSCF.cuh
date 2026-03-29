@@ -115,6 +115,15 @@ public:
         double* stress_soc,   // [6] Voigt stress
         double* energy_soc);  // scalar SOC energy
 
+    // Compute mGGA psi stress and tau·vtau dot product on GPU (avoids D2H transfer)
+    void compute_mgga_stress(
+        const Wavefunction& wfn,
+        const Domain& domain,
+        const FDGrid& grid,
+        int Nspin,
+        double* stress_mgga,       // [6] mGGA psi stress (Voigt), unnormalized
+        double* tau_vtau_dot);     // scalar: ∫ τ·vtau dV
+
     // Download mGGA tau and vtau from GPU to CPU arrays
     void download_tau_vtau(double* tau, double* vtau, int tau_size, int vtau_size);
 

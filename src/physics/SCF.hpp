@@ -108,6 +108,10 @@ public:
     const double* vtau() const { return vtau_.data(); }
     const double* tau() const { return tau_.data(); }
 
+#ifdef USE_CUDA
+    GPUSCFRunner* gpu_runner() { return gpu_runner_.get(); }
+#endif
+
 private:
     const FDGrid* grid_ = nullptr;
     const Domain* domain_ = nullptr;
