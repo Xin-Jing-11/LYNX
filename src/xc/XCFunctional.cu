@@ -1,6 +1,9 @@
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #include <cmath>
+#include <vector>
+#include <xc.h>
+#include <xc_funcs.h>
 #include "core/gpu_common.cuh"
 
 namespace lynx {
@@ -1411,6 +1414,155 @@ void mgga_scan_spin_gpu(
         d_exc, d_vxc_up, d_vxc_dn,
         d_v2xc_c, d_v2xc_x_up, d_v2xc_x_dn,
         d_vtau_up, d_vtau_dn, N);
+}
+
+// ============================================================
+// rSCAN / r2SCAN GPU support via libxc CPU fallback
+// Downloads density/sigma/tau from GPU, calls libxc on host,
+// uploads exc/vxc/v2xc/vtau back to GPU.
+// ============================================================
+
+void mgga_libxc_gpu(int xc_x_id, int xc_c_id,
+                     const double* d_rho, const double* d_sigma, const double* d_tau,
+                     double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N) {
+    // Download from GPU
+    std::vector<double> h_rho(N), h_sigma(N), h_tau(N);
+    CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_sigma.data(), d_sigma, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_tau.data(), d_tau, N * sizeof(double), cudaMemcpyDeviceToHost));
+
+    // Apply sigma floor (matches CPU XCFunctional.cpp and SPARC)
+    for (int i = 0; i < N; i++) {
+        if (h_sigma[i] < 1e-14) h_sigma[i] = 1e-14;
+    }
+
+    // Evaluate via libxc
+    xc_func_type func_x, func_c;
+    xc_func_init(&func_x, xc_x_id, XC_UNPOLARIZED);
+    xc_func_init(&func_c, xc_c_id, XC_UNPOLARIZED);
+
+    std::vector<double> zk_x(N, 0.0), vrho_x(N, 0.0), vsigma_x(N, 0.0), vlapl_x(N, 0.0), vtau_x(N, 0.0);
+    std::vector<double> zk_c(N, 0.0), vrho_c(N, 0.0), vsigma_c(N, 0.0), vlapl_c(N, 0.0), vtau_c(N, 0.0);
+    std::vector<double> lapl(N, 0.0);
+
+    xc_mgga_exc_vxc(&func_x, N, h_rho.data(), h_sigma.data(), lapl.data(), h_tau.data(),
+                     zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
+    xc_mgga_exc_vxc(&func_c, N, h_rho.data(), h_sigma.data(), lapl.data(), h_tau.data(),
+                     zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
+
+    xc_func_end(&func_x);
+    xc_func_end(&func_c);
+
+    // Combine and upload
+    std::vector<double> h_exc(N), h_vxc(N), h_v2xc(N), h_vtau(N);
+    for (int i = 0; i < N; i++) {
+        h_exc[i] = zk_x[i] + zk_c[i];
+        h_vxc[i] = vrho_x[i] + vrho_c[i];
+        // v2xc = 2*vsigma (matches SCAN kernel convention: d(n*eps)/d|grad n|^2 * 2)
+        h_v2xc[i] = 2.0 * (vsigma_x[i] + vsigma_c[i]);
+        h_vtau[i] = vtau_x[i] + vtau_c[i];
+    }
+
+    CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vxc, h_vxc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_v2xc, h_v2xc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vtau, h_vtau.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+}
+
+void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
+                          const double* d_rho_up, const double* d_rho_dn,
+                          const double* d_sigma_uu, const double* d_sigma_dd, const double* d_sigma_tot,
+                          const double* d_tau_up, const double* d_tau_dn,
+                          double* d_exc, double* d_vxc_up, double* d_vxc_dn,
+                          double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
+                          double* d_vtau_up, double* d_vtau_dn, int N) {
+    // Download from GPU
+    std::vector<double> h_rho_up(N), h_rho_dn(N);
+    std::vector<double> h_sigma_uu(N), h_sigma_dd(N), h_sigma_tot(N);
+    std::vector<double> h_tau_up(N), h_tau_dn(N);
+    CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho_up, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho_dn, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_sigma_uu.data(), d_sigma_uu, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_sigma_dd.data(), d_sigma_dd, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_sigma_tot.data(), d_sigma_tot, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_tau_up.data(), d_tau_up, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_tau_dn.data(), d_tau_dn, N * sizeof(double), cudaMemcpyDeviceToHost));
+
+    // Apply sigma floor (matches CPU XCFunctional.cpp and SPARC)
+    for (int i = 0; i < N; i++) {
+        if (h_sigma_uu[i] < 1e-14) h_sigma_uu[i] = 1e-14;
+        if (h_sigma_dd[i] < 1e-14) h_sigma_dd[i] = 1e-14;
+        if (h_sigma_tot[i] < 1e-14) h_sigma_tot[i] = 1e-14;
+    }
+
+    // libxc expects: rho[2*N] = [up0,dn0,up1,dn1,...], sigma[3*N] = [uu0,ud0,dd0,uu1,ud1,dd1,...]
+    // tau[2*N] = [up0,dn0,...], lapl[2*N] = [up0,dn0,...]
+    std::vector<double> rho_2(2 * N), sigma_3(3 * N), tau_2(2 * N), lapl_2(2 * N, 0.0);
+    for (int i = 0; i < N; i++) {
+        rho_2[2*i]     = h_rho_up[i];
+        rho_2[2*i + 1] = h_rho_dn[i];
+        sigma_3[3*i]     = h_sigma_uu[i];
+        // sigma_ud = (sigma_tot - sigma_uu - sigma_dd) / 2
+        sigma_3[3*i + 1] = 0.5 * (h_sigma_tot[i] - h_sigma_uu[i] - h_sigma_dd[i]);
+        sigma_3[3*i + 2] = h_sigma_dd[i];
+        tau_2[2*i]     = h_tau_up[i];
+        tau_2[2*i + 1] = h_tau_dn[i];
+    }
+
+    // Evaluate via libxc (polarized)
+    xc_func_type func_x, func_c;
+    xc_func_init(&func_x, xc_x_id, XC_POLARIZED);
+    xc_func_init(&func_c, xc_c_id, XC_POLARIZED);
+
+    std::vector<double> zk_x(N, 0.0), vrho_x(2*N, 0.0), vsigma_x(3*N, 0.0), vlapl_x(2*N, 0.0), vtau_x(2*N, 0.0);
+    std::vector<double> zk_c(N, 0.0), vrho_c(2*N, 0.0), vsigma_c(3*N, 0.0), vlapl_c(2*N, 0.0), vtau_c(2*N, 0.0);
+
+    xc_mgga_exc_vxc(&func_x, N, rho_2.data(), sigma_3.data(), lapl_2.data(), tau_2.data(),
+                     zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
+    xc_mgga_exc_vxc(&func_c, N, rho_2.data(), sigma_3.data(), lapl_2.data(), tau_2.data(),
+                     zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
+
+    xc_func_end(&func_x);
+    xc_func_end(&func_c);
+
+    // Unpack and upload
+    // exc = zk_x + zk_c (per particle of total density)
+    // vxc_up/dn = vrho_x[up/dn] + vrho_c[up/dn]
+    // v2xc layout matches SCAN spin kernel: [v2xc_c | v2xc_x_up | v2xc_x_dn]
+    //   v2xc_c = 2*vsigma_ud (cross term for correlation divergence on total grad)
+    //   v2xc_x_up = 2*(vsigma_uu_x + vsigma_uu_c) (same-spin up)
+    //   v2xc_x_dn = 2*(vsigma_dd_x + vsigma_dd_c) (same-spin dn)
+    // But we need to match exactly how SCAN spin kernel packs v2xc.
+    // From CPU XCFunctional.cpp evaluate_spin:
+    //   Dxcdgrho[0..Nd-1] = 2*(vsigma_c_ud)  (correlation cross term for total density gradient)
+    //   Dxcdgrho[Nd..2Nd-1] = 2*(vsigma_x_uu + vsigma_c_uu)  (exchange+corr same-spin up)
+    //   Dxcdgrho[2Nd..3Nd-1] = 2*(vsigma_x_dd + vsigma_c_dd)  (exchange+corr same-spin dn)
+    std::vector<double> h_exc(N), h_vxc_up(N), h_vxc_dn(N);
+    std::vector<double> h_v2xc_c(N), h_v2xc_x_up(N), h_v2xc_x_dn(N);
+    std::vector<double> h_vtau_up(N), h_vtau_dn(N);
+
+    for (int i = 0; i < N; i++) {
+        h_exc[i] = zk_x[i] + zk_c[i];
+        h_vxc_up[i] = vrho_x[2*i] + vrho_c[2*i];
+        h_vxc_dn[i] = vrho_x[2*i+1] + vrho_c[2*i+1];
+        // v2xc_c: correlation cross-term (ud) for divergence on total density gradient
+        h_v2xc_c[i] = 2.0 * (vsigma_x[3*i+1] + vsigma_c[3*i+1]);
+        // v2xc_x_up: same-spin up (uu)
+        h_v2xc_x_up[i] = 2.0 * (vsigma_x[3*i] + vsigma_c[3*i]);
+        // v2xc_x_dn: same-spin dn (dd)
+        h_v2xc_x_dn[i] = 2.0 * (vsigma_x[3*i+2] + vsigma_c[3*i+2]);
+        h_vtau_up[i] = vtau_x[2*i] + vtau_c[2*i];
+        h_vtau_dn[i] = vtau_x[2*i+1] + vtau_c[2*i+1];
+    }
+
+    CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vxc_up, h_vxc_up.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vxc_dn, h_vxc_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_v2xc_c, h_v2xc_c.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_v2xc_x_up, h_v2xc_x_up.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_v2xc_x_dn, h_v2xc_x_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vtau_up, h_vtau_up.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_vtau_dn, h_vtau_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice));
 }
 
 } // namespace gpu

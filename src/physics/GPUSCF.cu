@@ -30,8 +30,19 @@
 #include "physics/Electrostatics.hpp"
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
+#include <xc_funcs.h>
 
 namespace lynx {
+
+// Helper: get libxc functional IDs for mGGA XC types
+static void get_mgga_libxc_ids(XCType xc_type, int& xc_x_id, int& xc_c_id) {
+    switch (xc_type) {
+        case XCType::MGGA_SCAN:   xc_x_id = XC_MGGA_X_SCAN;   xc_c_id = XC_MGGA_C_SCAN;   break;
+        case XCType::MGGA_RSCAN:  xc_x_id = XC_MGGA_X_RSCAN;  xc_c_id = XC_MGGA_C_RSCAN;  break;
+        case XCType::MGGA_R2SCAN: xc_x_id = XC_MGGA_X_R2SCAN; xc_c_id = XC_MGGA_C_R2SCAN; break;
+        default:                  xc_x_id = XC_MGGA_X_SCAN;    xc_c_id = XC_MGGA_C_SCAN;   break;
+    }
+}
 
 // ============================================================
 // Forward declarations for GPU functions
@@ -244,6 +255,18 @@ void mgga_scan_spin_gpu(
     double* d_exc, double* d_vxc_up, double* d_vxc_dn,
     double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
     double* d_vtau_up, double* d_vtau_dn, int N);
+
+// rSCAN/r2SCAN via libxc CPU fallback
+void mgga_libxc_gpu(int xc_x_id, int xc_c_id,
+                     const double* d_rho, const double* d_sigma, const double* d_tau,
+                     double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N);
+void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
+                          const double* d_rho_up, const double* d_rho_dn,
+                          const double* d_sigma_uu, const double* d_sigma_dd, const double* d_sigma_tot,
+                          const double* d_tau_up, const double* d_tau_dn,
+                          double* d_exc, double* d_vxc_up, double* d_vxc_dn,
+                          double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
+                          double* d_vtau_up, double* d_vtau_dn, int N);
 
 // SOC operators
 void spinor_offdiag_veff_gpu(
@@ -1494,8 +1517,15 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
         if (is_mgga_ && tau_valid_) {
-            // SCAN mGGA kernel: (rho_xc, sigma, tau) -> (exc, Vxc, v2xc, vtau)
-            gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
+            if (xc_type_ == XCType::MGGA_SCAN) {
+                // Hand-coded SCAN kernel (fastest path)
+                gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
+            } else {
+                // rSCAN/r2SCAN via libxc CPU fallback
+                int xc_x_id, xc_c_id;
+                get_mgga_libxc_ids(xc_type_, xc_x_id, xc_c_id);
+                gpu::mgga_libxc_gpu(xc_x_id, xc_c_id, d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
+            }
         } else {
             // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
             // Also used for first mGGA iteration before tau is computed (matching CPU PBE-first logic)
@@ -1591,16 +1621,27 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
 
         if (is_mgga_ && tau_valid_) {
-            // SCAN spin mGGA kernel
-            // sigma layout: [total|up|dn], rho_xc: [total|up|dn]
-            // d_tau_: [up(Nd)|dn(Nd)], d_vtau_: [up(Nd)|dn(Nd)]
-            gpu::mgga_scan_spin_gpu(
-                d_rho_xc + Nd, d_rho_xc + 2 * Nd,          // rho_up, rho_dn
-                d_sigma + Nd, d_sigma + 2 * Nd, d_sigma,    // sigma_uu, sigma_dd, sigma_tot
-                d_tau_, d_tau_ + Nd,                         // tau_up, tau_dn
-                d_exc, d_Vxc, d_Vxc + Nd,                   // exc, vxc_up, vxc_dn
-                d_v2xc, d_v2xc + Nd, d_v2xc + 2 * Nd,      // v2xc_c, v2xc_x_up, v2xc_x_dn
-                d_vtau_, d_vtau_ + Nd, Nd);                  // vtau_up, vtau_dn
+            if (xc_type_ == XCType::MGGA_SCAN) {
+                // Hand-coded SCAN spin kernel (fastest path)
+                gpu::mgga_scan_spin_gpu(
+                    d_rho_xc + Nd, d_rho_xc + 2 * Nd,          // rho_up, rho_dn
+                    d_sigma + Nd, d_sigma + 2 * Nd, d_sigma,    // sigma_uu, sigma_dd, sigma_tot
+                    d_tau_, d_tau_ + Nd,                         // tau_up, tau_dn
+                    d_exc, d_Vxc, d_Vxc + Nd,                   // exc, vxc_up, vxc_dn
+                    d_v2xc, d_v2xc + Nd, d_v2xc + 2 * Nd,      // v2xc_c, v2xc_x_up, v2xc_x_dn
+                    d_vtau_, d_vtau_ + Nd, Nd);                  // vtau_up, vtau_dn
+            } else {
+                // rSCAN/r2SCAN via libxc CPU fallback
+                int xc_x_id, xc_c_id;
+                get_mgga_libxc_ids(xc_type_, xc_x_id, xc_c_id);
+                gpu::mgga_libxc_spin_gpu(xc_x_id, xc_c_id,
+                    d_rho_xc + Nd, d_rho_xc + 2 * Nd,          // rho_up, rho_dn
+                    d_sigma + Nd, d_sigma + 2 * Nd, d_sigma,    // sigma_uu, sigma_dd, sigma_tot
+                    d_tau_, d_tau_ + Nd,                         // tau_up, tau_dn
+                    d_exc, d_Vxc, d_Vxc + Nd,                   // exc, vxc_up, vxc_dn
+                    d_v2xc, d_v2xc + Nd, d_v2xc + 2 * Nd,      // v2xc_c, v2xc_x_up, v2xc_x_dn
+                    d_vtau_, d_vtau_ + Nd, Nd);                  // vtau_up, vtau_dn
+            }
 
         } else {
             // Fused spin PBE kernel: (rho_xc[3*Nd], sigma[3*Nd]) -> (exc, Vxc[2*Nd], v2xc[3*Nd])
@@ -1971,7 +2012,8 @@ double GPUSCFRunner::run(
     Nd_ = domain.Nd_d();
     dV_ = grid.dV();
     is_gga_ = is_gga;
-    is_mgga_ = (xc_type == XCType::MGGA_SCAN);
+    is_mgga_ = (xc_type == XCType::MGGA_SCAN || xc_type == XCType::MGGA_RSCAN || xc_type == XCType::MGGA_R2SCAN);
+    xc_type_ = xc_type;
     tau_valid_ = false;
     // For mGGA, also set GGA flag since gradient pipeline is shared
     if (is_mgga_) is_gga_ = true;
@@ -3419,8 +3461,8 @@ double GPUSCFRunner::run(
             // XC with hybrid-scaled exchange (libxc handles exx_frac internally)
             Gradient gradient_cpu(stencil, domain);
             XCFunctional xcfunc;
-            xcfunc.setup(xc_type_full_, domain, grid, &gradient_cpu, &halo,
-                         exx_p.hyb_range_fock, exx_frac_);
+            xcfunc.setup(xc_type_full_, domain, grid, &gradient_cpu, &halo);
+            xcfunc.set_exchange_scale(1.0 - exx_frac_);
 
             int vxc_size = Nd_ * Nspin;
             std::vector<double> h_Vxc(vxc_size, 0.0), h_exc(Nd_, 0.0);
@@ -3872,8 +3914,8 @@ double GPUSCFRunner::run(
 
             Gradient gradient_cpu(stencil, domain);
             XCFunctional xcfunc;
-            xcfunc.setup(xc_type_full_, domain, grid, &gradient_cpu, &halo,
-                         exx_p.hyb_range_fock, exx_frac_);
+            xcfunc.setup(xc_type_full_, domain, grid, &gradient_cpu, &halo);
+            xcfunc.set_exchange_scale(1.0 - exx_frac_);
 
             int vxc_size = Nd_ * Nspin;
             std::vector<double> h_Vxc(vxc_size, 0.0), h_exc(Nd_, 0.0);

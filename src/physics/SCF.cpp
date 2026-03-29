@@ -1410,14 +1410,14 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
                    xc_type == XCType::GGA_RPBE);
 
     // Allocate work arrays (needed for download_results)
-    bool has_gradient = is_gga || (xc_type == XCType::MGGA_SCAN);
+    bool has_gradient = is_gga || is_mgga_type(xc_type);
     int dxc_ncol = has_gradient ? ((Nspin == 2) ? 3 : 1) : 0;
     Veff_ = NDArray<double>(Nd_d * Nspin);
     Vxc_ = NDArray<double>(Nd_d * Nspin);
     exc_ = NDArray<double>(Nd_d);
     phi_ = NDArray<double>(Nd_d);
     if (dxc_ncol > 0) Dxcdgrho_ = NDArray<double>(Nd_d * dxc_ncol);
-    if (xc_type == XCType::MGGA_SCAN) {
+    if (is_mgga_type(xc_type)) {
         int tau_size = (Nspin == 2) ? 3 * Nd_d : Nd_d;
         int vtau_size = (Nspin == 2) ? 2 * Nd_d : Nd_d;
         tau_ = NDArray<double>(tau_size);
@@ -1485,7 +1485,7 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         dxc_ncol > 0 ? Dxcdgrho_.data() : nullptr,
         density_.rho_total().data(), wfn);
     // Download mGGA tau/vtau if applicable
-    if (xc_type == XCType::MGGA_SCAN && tau_.size() > 0 && vtau_.size() > 0) {
+    if ((xc_type == XCType::MGGA_SCAN || xc_type == XCType::MGGA_RSCAN || xc_type == XCType::MGGA_R2SCAN) && tau_.size() > 0 && vtau_.size() > 0) {
         if (Nspin == 2) {
             // GPU layout: [up(Nd)|dn(Nd)], CPU layout: [up(Nd)|dn(Nd)|total(Nd)]
             // Download up/dn from GPU into first 2*Nd slots, compute total at end

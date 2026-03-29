@@ -182,6 +182,7 @@ private:
     bool is_mgga_ = false;
     bool is_orth_ = true;
     bool has_mixed_deriv_ = false;  // non-orth mixed derivative terms
+    XCType xc_type_ = XCType::GGA_PBE;  // base XC type (for mGGA dispatch: SCAN vs rSCAN/r2SCAN)
 
     // mGGA (SCAN) device buffers and state
     double* d_tau_ = nullptr;       // [Nd] or [2*Nd] for spin
