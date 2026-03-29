@@ -744,7 +744,6 @@ std::array<double, 6> ExactExchange::compute_stress(
     if (is_gamma_) {
         // Gamma-point EXX stress: real wavefunctions
         int Nd_ex = halo.nd_ex();
-
         for (int s = 0; s < wfn.Nspin(); s++) {
             // Gather full real psi across band communicator
             std::vector<double> psi_full(Nd * Ns, 0.0);

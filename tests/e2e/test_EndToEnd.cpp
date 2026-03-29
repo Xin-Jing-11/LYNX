@@ -1188,6 +1188,52 @@ TEST(EndToEnd, Si4_PBE0_gamma) {
 }
 
 // ============================================================
+// Test: Si2 PBE0 with k-points — hybrid functional, non-ortho FCC cell
+// Reference: SPARC PBE0
+//   Settings: LATVEC_SCALE=6, 15x15x15, 2x2x2 kpt (0.5 shift), T=315.775 K
+//   SPARC Etotal = -7.403420694434764 Ha
+// ============================================================
+TEST(EndToEnd, Si2_kpt_PBE0) {
+    std::string json_file = "tests/e2e/data/Si2_kpt_PBE0.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    if (rank == 0) {
+        std::printf("\n=== Si2 PBE0 k-point Results ===\n");
+        std::printf("  Converged: %s\n", result.converged ? "yes" : "no");
+        std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+
+        if (result.forces.size() >= 6) {
+            std::printf("\n  Forces (Ha/Bohr):\n");
+            double max_force = 0.0;
+            for (int i = 0; i < 2; ++i) {
+                std::printf("  Atom %d: %12.6f %12.6f %12.6f\n",
+                            i + 1,
+                            result.forces[3*i], result.forces[3*i+1], result.forces[3*i+2]);
+                for (int d = 0; d < 3; ++d) {
+                    max_force = std::max(max_force, std::abs(result.forces[3*i+d]));
+                }
+            }
+            std::printf("  Max force component: %.6e Ha/Bohr\n", max_force);
+        }
+
+        if (result.stress.size() >= 6) {
+            const double au_to_gpa = 29421.01569650548;
+            std::printf("\n  Stress (GPa):\n");
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[0]*au_to_gpa, result.stress[1]*au_to_gpa, result.stress[2]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
+            std::printf("    %10.4f %10.4f %10.4f\n",
+                        result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
+        }
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+}
+
 // Test: Si4 PBE0 with k-points — hybrid functional, ortho cell
 // Reference: SPARC PBE0
 //   Settings: same as Si4_PBE0_gamma but with 2×2×2 k-points (0.5 shift)

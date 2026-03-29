@@ -180,12 +180,37 @@ __global__ void nonlocal_energy_kernel(
 // Weighted gather kernel for nonlocal stress:
 // beta_stress[(abase+jp)*Nband + n] += dV * sum_ig(chi(ig,jp) * xR[ig] * Dpsi[gpos[ig] + n*Nd])
 //
-// This is like fused_gather_chitpsi_kernel but with position weighting.
-// One block per influence atom. xR depends on (dim2, grid coordinates, atom position).
-// For orthogonal cells: xR = (grid_coord - atom_coord) in Cartesian.
+// Tiled weighted gather + Chi^T × (xR * Dpsi) kernel for stress.
+// Same tiling strategy as fused_gather_chitpsi_kernel.
+// Shared memory: (NL_TILE + nwarps) doubles ≈ 2 KB, O(1) w.r.t. system size.
+// xR (position weight) is computed on the fly from the grid index.
 // ------------------------------------------------------------
+static constexpr int NL_TILE_FS = 256;
+static constexpr int NL_MAX_NP_FS = 32;
+
+__device__ __forceinline__ double warpReduceSum_fs(double val) {
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    return val;
+}
+
+__device__ double blockReduceSum_fs(double val, double* smem) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int nwarps = blockDim.x >> 5;
+    val = warpReduceSum_fs(val);
+    if (lane == 0) smem[warp] = val;
+    __syncthreads();
+    if (warp == 0) {
+        val = (lane < nwarps) ? smem[lane] : 0.0;
+        val = warpReduceSum_fs(val);
+    }
+    __syncthreads();
+    return val;
+}
+
 __global__ void weighted_gather_chitpsi_kernel(
-    const double* __restrict__ Dpsi,       // (Nd, Nband) gradient in direction 'dim'
+    const double* __restrict__ Dpsi,
     const double* __restrict__ Chi_flat,
     const int* __restrict__ gpos_flat,
     const int* __restrict__ gpos_offsets,
@@ -193,14 +218,14 @@ __global__ void weighted_gather_chitpsi_kernel(
     const int* __restrict__ ndc_arr,
     const int* __restrict__ nproj_arr,
     const int* __restrict__ IP_displ,
-    const double* __restrict__ atom_pos,   // [n_influence * 3] atom position (x,y,z)
-    double* __restrict__ beta,             // [total_nproj * Nband]
+    const double* __restrict__ atom_pos,
+    double* __restrict__ beta,
     int Nd, int ncol_this, int ncol_stride, int col_start,
     double dV, int n_atoms,
     int nx, int ny, int nz,
     double dx, double dy, double dz,
     int xs, int ys, int zs,
-    int dim2)                              // which coordinate (0=x,1=y,2=z)
+    int dim2)
 {
     int iat = blockIdx.x;
     if (iat >= n_atoms) return;
@@ -217,50 +242,44 @@ __global__ void weighted_gather_chitpsi_kernel(
     double ap_y = atom_pos[iat * 3 + 1];
     double ap_z = atom_pos[iat * 3 + 2];
 
-    // Shared memory: psi_sh[ig + n * ndc] AND xR_sh[ig]
-    extern __shared__ double shared_mem[];
-    double* psi_sh = shared_mem;
-    double* xR_sh = shared_mem + ndc * ncol_this;
+    extern __shared__ double smem_w[];
+    double* psi_tile = smem_w;
+    double* reduce_buf = smem_w + NL_TILE_FS;
 
-    // Gather Dpsi and compute xR
-    int total_gather = ndc * ncol_this;
-    for (int idx = threadIdx.x; idx < total_gather; idx += blockDim.x) {
-        int ig = idx % ndc;
-        int n = idx / ndc;
-        psi_sh[idx] = Dpsi[gpos_flat[goff + ig] + (col_start + n) * Nd];
-    }
-    // Compute xR per grid point
-    for (int ig = threadIdx.x; ig < ndc; ig += blockDim.x) {
-        int flat = gpos_flat[goff + ig];
-        int li = flat % nx;
-        int lj = (flat / nx) % ny;
-        // int lk = flat / (nx * ny);  // unused unless dim2==2
-        double r;
-        if (dim2 == 0) {
-            r = (li + xs) * dx - ap_x;
-        } else if (dim2 == 1) {
-            r = (lj + ys) * dy - ap_y;
-        } else {
-            int lk = flat / (nx * ny);
-            r = (lk + zs) * dz - ap_z;
+    for (int n = 0; n < ncol_this; n++) {
+        double dots[NL_MAX_NP_FS];
+        #pragma unroll 4
+        for (int jp = 0; jp < NL_MAX_NP_FS; jp++) dots[jp] = 0.0;
+
+        for (int tile = 0; tile < ndc; tile += NL_TILE_FS) {
+            int tile_len = min(NL_TILE_FS, ndc - tile);
+
+            // Gather Dpsi into tile
+            for (int i = threadIdx.x; i < tile_len; i += blockDim.x)
+                psi_tile[i] = Dpsi[gpos_flat[goff + tile + i] + (col_start + n) * Nd];
+            __syncthreads();
+
+            // Accumulate chi * xR * Dpsi for each projector
+            for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                int flat = gpos_flat[goff + tile + i];
+                double r;
+                if (dim2 == 0) r = (flat % nx + xs) * dx - ap_x;
+                else if (dim2 == 1) r = ((flat / nx) % ny + ys) * dy - ap_y;
+                else r = (flat / (nx * ny) + zs) * dz - ap_z;
+
+                double pv = psi_tile[i] * r;
+                const double* chi_base = Chi_flat + coff + tile + i;
+                for (int jp = 0; jp < np; jp++)
+                    dots[jp] += chi_base[jp * ndc] * pv;
+            }
+            __syncthreads();
         }
-        xR_sh[ig] = r;
-    }
-    __syncthreads();
 
-    // Compute weighted inner product: beta[abase+jp, n] += dV * sum_ig(chi * xR * Dpsi)
-    int total_out = np * ncol_this;
-    for (int idx = threadIdx.x; idx < total_out; idx += blockDim.x) {
-        int jp = idx / ncol_this;
-        int n = idx % ncol_this;
-
-        double dot = 0.0;
-        const double* chi_col = Chi_flat + coff + jp * ndc;
-        const double* psi_col = psi_sh + n * ndc;
-        for (int ig = 0; ig < ndc; ++ig)
-            dot += chi_col[ig] * xR_sh[ig] * psi_col[ig];
-
-        atomicAdd(&beta[(abase + jp) * ncol_stride + (col_start + n)], dot * dV);
+        for (int jp = 0; jp < np; jp++) {
+            double val = blockReduceSum_fs(dots[jp], reduce_buf);
+            if (threadIdx.x == 0)
+                atomicAdd(&beta[(abase + jp) * ncol_stride + (col_start + n)], val * dV);
+        }
     }
 }
 
@@ -431,36 +450,19 @@ void compute_force_stress_gpu(
 
     // ----------------------------------------------------------------
     // Step 4: Compute alpha = dV * Chi^T * psi (all bands)
+    // Tiled kernel: fixed shared memory ≈ 2 KB, independent of system size
     // ----------------------------------------------------------------
     if (total_nproj > 0 && n_influence > 0) {
         CUDA_CHECK(cudaMemset(d_alpha, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
         int block_size = 256;
+        size_t smem_tiled = (NL_TILE_FS + block_size / 32) * sizeof(double);
 
-        // Query device shared memory limit
-        int device;
-        cudaGetDevice(&device);
-        int max_smem;
-        cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-
-        size_t smem_per_col = (size_t)max_ndc * sizeof(double);
-        int ncol_batch = Nband;
-        if (smem_per_col * Nband > (size_t)max_smem)
-            ncol_batch = std::max(1, (int)(max_smem / smem_per_col));
-
-        for (int col_start = 0; col_start < Nband; col_start += ncol_batch) {
-            int cols_this = std::min(ncol_batch, Nband - col_start);
-            size_t smem1 = (size_t)max_ndc * cols_this * sizeof(double);
-            if (smem1 > 48 * 1024) {
-                cudaFuncSetAttribute(fused_gather_chitpsi_kernel,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem1);
-            }
-            fused_gather_chitpsi_kernel<<<n_influence, block_size, smem1>>>(
-                d_psi, d_Chi_flat, d_gpos_flat,
-                d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-                d_alpha, Nd, cols_this, Nband, col_start, dV, n_influence);
-            CUDA_CHECK(cudaGetLastError());
-        }
+        fused_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled>>>(
+            d_psi, d_Chi_flat, d_gpos_flat,
+            d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+            d_alpha, Nd, Nband, Nband, 0, dV, n_influence);
+        CUDA_CHECK(cudaGetLastError());
 
         // ----------------------------------------------------------------
         // Step 5: Nonlocal energy (uses alpha before Gamma scaling)
@@ -475,7 +477,6 @@ void compute_force_stress_gpu(
         // ----------------------------------------------------------------
         // Step 6: Nonlocal force (3 dims)
         // For each dim: beta = dV * Chi^T * Dpsi_dim, then reduce
-        // f_nloc[atom*3+dim] -= spn_fac * wk * sum_n(g_n * sum_jp(Gamma * alpha * beta))
         // ----------------------------------------------------------------
         {
             const double* d_Dpsi_arr[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
@@ -484,21 +485,12 @@ void compute_force_stress_gpu(
             for (int dim = 0; dim < 3; ++dim) {
                 CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
-                for (int col_start = 0; col_start < Nband; col_start += ncol_batch) {
-                    int cols_this = std::min(ncol_batch, Nband - col_start);
-                    size_t smem1 = (size_t)max_ndc * cols_this * sizeof(double);
-                    if (smem1 > 48 * 1024) {
-                        cudaFuncSetAttribute(fused_gather_chitpsi_kernel,
-                            cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem1);
-                    }
-                    fused_gather_chitpsi_kernel<<<n_influence, block_size, smem1>>>(
-                        d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
-                        d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-                        d_beta, Nd, cols_this, Nband, col_start, dV, n_influence);
-                    CUDA_CHECK(cudaGetLastError());
-                }
+                fused_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled>>>(
+                    d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
+                    d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+                    d_beta, Nd, Nband, Nband, 0, dV, n_influence);
+                CUDA_CHECK(cudaGetLastError());
 
-                // Reduce force for this dim
                 nonlocal_force_reduce_kernel<<<ceildiv(n_phys_atoms, bs_force), bs_force>>>(
                     d_alpha, d_beta, d_occ, d_Gamma, d_IP_displ_phys,
                     n_phys_atoms, Nband, spn_fac * wk, d_force, dim);
@@ -508,9 +500,7 @@ void compute_force_stress_gpu(
 
         // ----------------------------------------------------------------
         // Step 7: Nonlocal stress (6 Voigt pairs)
-        // For each (dim, dim2):
-        //   beta_stress = dV * sum(chi * xR_dim2 * Dpsi_dim)
-        //   snl[voigt] -= spn_fac * wk * sum_n(g_n * sum_jp(Gamma * alpha * beta_stress))
+        // Tiled weighted kernel: fixed shared memory ≈ 2 KB
         // ----------------------------------------------------------------
         if (d_atom_pos) {
             const double* d_Dpsi_arr[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
@@ -524,31 +514,15 @@ void compute_force_stress_gpu(
 
                 CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
-                // Compute weighted gather: beta_stress
-                // Extra shared memory for xR array, so use smaller batch
-                size_t smem_xR = (size_t)max_ndc * sizeof(double);
-                int ncol_batch_w = Nband;
-                if ((smem_per_col * Nband + smem_xR) > (size_t)max_smem)
-                    ncol_batch_w = std::max(1, (int)((max_smem - smem_xR) / smem_per_col));
+                weighted_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled>>>(
+                    d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
+                    d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+                    d_atom_pos, d_beta,
+                    Nd, Nband, Nband, 0,
+                    dV, n_influence,
+                    nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2);
+                CUDA_CHECK(cudaGetLastError());
 
-                for (int col_start = 0; col_start < Nband; col_start += ncol_batch_w) {
-                    int cols_this = std::min(ncol_batch_w, Nband - col_start);
-                    size_t smem_w = (size_t)max_ndc * cols_this * sizeof(double) + smem_xR;
-                    if (smem_w > 48 * 1024) {
-                        cudaFuncSetAttribute(weighted_gather_chitpsi_kernel,
-                            cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_w);
-                    }
-                    weighted_gather_chitpsi_kernel<<<n_influence, block_size, smem_w>>>(
-                        d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
-                        d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-                        d_atom_pos, d_beta,
-                        Nd, cols_this, Nband, col_start,
-                        dV, n_influence,
-                        nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2);
-                    CUDA_CHECK(cudaGetLastError());
-                }
-
-                // Reduce nonlocal stress for this Voigt pair
                 nonlocal_stress_reduce_kernel<<<1, 1>>>(
                     d_alpha, d_beta, d_occ, d_Gamma, d_IP_displ_phys,
                     n_phys_atoms, Nband, wk, d_snl + v);

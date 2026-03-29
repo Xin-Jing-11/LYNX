@@ -5,20 +5,51 @@ namespace lynx {
 namespace gpu {
 
 // ============================================================
-// Fused gather + Chi^T × psi kernel
-//
-// One block per atom. Threads cooperate to:
-//   1. Gather psi values at scattered grid positions into shared memory
-//   2. Compute alpha_atom(nproj, ncol) = dV * Chi^T(nproj, ndc) × psi_gathered(ndc, ncol)
-//
-// Alpha layout: ROW-MAJOR alpha[(IP_displ[iat] + jp) * ncol + n]
-//
-// Block size: 256 threads
-// Shared memory: ndc * ncol doubles (for psi_gathered tile)
-//   Max: ~500 * 30 * 8 = 120 KB — fits in L1/smem on modern GPUs
+// Device helpers: warp and block reduction
 // ============================================================
+__device__ __forceinline__ double warpReduceSum_d(double val) {
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    return val;
+}
+
+// Block-level sum reduction. Returns correct sum in thread 0 only.
+// smem must have at least (blockDim.x / 32) doubles.
+__device__ double blockReduceSum_d(double val, double* smem) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int nwarps = blockDim.x >> 5;
+
+    val = warpReduceSum_d(val);
+    if (lane == 0) smem[warp] = val;
+    __syncthreads();
+
+    if (warp == 0) {
+        val = (lane < nwarps) ? smem[lane] : 0.0;
+        val = warpReduceSum_d(val);
+    }
+    __syncthreads();
+    return val;
+}
+
+// ============================================================
+// Tiled gather + Chi^T × psi kernel
+//
+// One block per atom. Processes ndc in fixed-size tiles.
+// Shared memory: (NL_TILE + nwarps) doubles ≈ 2 KB, O(1) w.r.t. system size.
+//
+// Algorithm per atom:
+//   For each wavefunction column n:
+//     For each tile of ndc grid points:
+//       1. Cooperatively gather scattered psi values into shared tile
+//       2. Each thread accumulates chi[jp,ig]*psi[ig] for its ig stride
+//     Block-reduce partial sums per projector, thread 0 writes to alpha
+// ============================================================
+static constexpr int NL_TILE = 256;
+static constexpr int NL_MAX_NP = 32;
+
 __global__ void fused_gather_chitpsi_kernel(
-    const double* __restrict__ psi,        // offset to col_start already applied
+    const double* __restrict__ psi,        // (Nd, ncol_stride)
     const double* __restrict__ Chi_flat,
     const int* __restrict__ gpos_flat,
     const int* __restrict__ gpos_offsets,
@@ -26,10 +57,10 @@ __global__ void fused_gather_chitpsi_kernel(
     const int* __restrict__ ndc_arr,
     const int* __restrict__ nproj_arr,
     const int* __restrict__ IP_displ,
-    double* __restrict__ alpha,            // full alpha array
-    int Nd, int ncol_this,                 // columns in this batch
-    int ncol_stride,                       // full alpha row stride
-    int col_start,                         // first column index
+    double* __restrict__ alpha,            // (total_nproj, ncol_stride)
+    int Nd, int ncol_this,
+    int ncol_stride,
+    int col_start,
     double dV, int n_atoms)
 {
     int iat = blockIdx.x;
@@ -43,43 +74,49 @@ __global__ void fused_gather_chitpsi_kernel(
     int coff = chi_offsets[iat];
     int abase = IP_displ[iat];
 
-    extern __shared__ double psi_sh[];
+    extern __shared__ double smem[];
+    double* psi_tile = smem;
+    double* reduce_buf = smem + NL_TILE;
 
-    // Gather psi into shared memory: psi_sh[ig + n * ndc]
-    int total_gather = ndc * ncol_this;
-    for (int idx = threadIdx.x; idx < total_gather; idx += blockDim.x) {
-        int ig = idx % ndc;
-        int n = idx / ndc;
-        psi_sh[idx] = psi[gpos_flat[goff + ig] + (col_start + n) * Nd];
-    }
-    __syncthreads();
+    for (int n = 0; n < ncol_this; n++) {
+        // Per-thread accumulators for each projector
+        double dots[NL_MAX_NP];
+        #pragma unroll 4
+        for (int jp = 0; jp < NL_MAX_NP; jp++)
+            dots[jp] = 0.0;
 
-    // Compute alpha = dV * Chi^T * psi_gathered
-    int total_out = np * ncol_this;
-    for (int idx = threadIdx.x; idx < total_out; idx += blockDim.x) {
-        int jp = idx / ncol_this;
-        int n = idx % ncol_this;
+        // Tile over ndc
+        for (int tile = 0; tile < ndc; tile += NL_TILE) {
+            int tile_len = min(NL_TILE, ndc - tile);
 
-        double dot = 0.0;
-        const double* chi_col = Chi_flat + coff + jp * ndc;
-        const double* psi_col = psi_sh + n * ndc;
-        for (int ig = 0; ig < ndc; ++ig)
-            dot += chi_col[ig] * psi_col[ig];
+            // Cooperative gather: scattered psi → shared tile
+            for (int i = threadIdx.x; i < tile_len; i += blockDim.x)
+                psi_tile[i] = psi[gpos_flat[goff + tile + i] + (col_start + n) * Nd];
+            __syncthreads();
 
-        atomicAdd(&alpha[(abase + jp) * ncol_stride + (col_start + n)], dot * dV);
+            // Each thread accumulates for its stride of ig values
+            for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                double pv = psi_tile[i];
+                const double* chi_base = Chi_flat + coff + tile + i;
+                for (int jp = 0; jp < np; jp++)
+                    dots[jp] += chi_base[jp * ndc] * pv;
+            }
+            __syncthreads();
+        }
+
+        // Block-reduce each projector and write to alpha
+        for (int jp = 0; jp < np; jp++) {
+            double val = blockReduceSum_d(dots[jp], reduce_buf);
+            if (threadIdx.x == 0)
+                atomicAdd(&alpha[(abase + jp) * ncol_stride + (col_start + n)], val * dV);
+        }
     }
 }
 
 // ============================================================
-// Fused Chi × alpha + scatter-add kernel
+// Fused Chi × alpha + scatter-add kernel (unchanged)
 //
-// One block per atom. Threads cooperate to:
-//   1. Load alpha_atom into shared memory
-//   2. Compute buf(ndc, ncol) = Chi(ndc, nproj) × alpha_atom(nproj, ncol)
-//   3. Scatter-add buf to Hpsi at grid positions
-//
-// Shared memory: nproj * ncol doubles (for alpha tile)
-//   Max: ~9 * 30 * 8 = 2.2 KB — tiny
+// One block per atom. Shared memory: nproj * ncol_this doubles (tiny, ~2 KB)
 // ============================================================
 __global__ void fused_chialpha_scatter_kernel(
     double* __restrict__ Hpsi,
@@ -107,7 +144,6 @@ __global__ void fused_chialpha_scatter_kernel(
     int coff = chi_offsets[iat];
     int abase = IP_displ[iat];
 
-    // Load alpha_atom tile into shared memory: alpha_sh[jp * ncol_this + n]
     extern __shared__ double alpha_sh[];
     int alpha_size = np * ncol_this;
     for (int idx = threadIdx.x; idx < alpha_size; idx += blockDim.x) {
@@ -117,7 +153,6 @@ __global__ void fused_chialpha_scatter_kernel(
     }
     __syncthreads();
 
-    // Compute Chi * alpha and scatter-add
     int total_out = ndc * ncol_this;
     for (int idx = threadIdx.x; idx < total_out; idx += blockDim.x) {
         int ig = idx % ndc;
@@ -148,63 +183,41 @@ __global__ void gamma_scale_kernel(
 }
 
 // ============================================================
-// Host wrapper: 3 kernel launches total (was 200+ cuBLAS calls)
+// Host wrapper: 3 kernel launches (gather, gamma, scatter)
 //
-// All metadata arrays (offsets, ndc, nproj, IP_displ) are on DEVICE.
-// Host only needs n_atoms, total_nproj, max_ndc for launch config.
+// Shared memory is fixed at ~2 KB regardless of system size.
+// No device smem query, no branching, no fallback paths.
 // ============================================================
 void nonlocal_projector_apply_gpu(
     const double* d_psi,
     double* d_Hpsi,
     const double* d_Chi_flat,
     const int* d_gpos_flat,
-    const int* d_gpos_offsets,   // [n_atoms+1] on device
-    const int* d_chi_offsets,    // [n_atoms+1] on device
-    const int* d_ndc_arr,        // [n_atoms] on device
-    const int* d_nproj_arr,      // [n_atoms] on device
-    const int* d_IP_displ,       // [n_atoms] on device
-    const double* d_Gamma,       // [total_nproj] on device
-    double* d_alpha,             // workspace [total_nproj * ncol] on device
+    const int* d_gpos_offsets,
+    const int* d_chi_offsets,
+    const int* d_ndc_arr,
+    const int* d_nproj_arr,
+    const int* d_IP_displ,
+    const double* d_Gamma,
+    double* d_alpha,
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
     int max_ndc, int max_nproj)
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
-    // Zero alpha
     CUDA_CHECK(cudaMemset(d_alpha, 0, total_nproj * ncol * sizeof(double)));
 
     int block_size = 256;
 
-    // Query device shared memory limit
-    int device;
-    cudaGetDevice(&device);
-    int max_smem;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-
-    // Step 1: Fused gather + Chi^T * psi → alpha
-    // Shared memory: max_ndc * ncol_batch doubles
-    // Tile over columns if shared memory would exceed limit
-    size_t smem_per_col = (size_t)max_ndc * sizeof(double);
-    int ncol_batch1 = ncol;
-    if (smem_per_col * ncol > (size_t)max_smem)
-        ncol_batch1 = std::max(1, (int)(max_smem / smem_per_col));
-
-    for (int col_start = 0; col_start < ncol; col_start += ncol_batch1) {
-        int cols_this = std::min(ncol_batch1, ncol - col_start);
-        size_t smem1 = (size_t)max_ndc * cols_this * sizeof(double);
-
-        if (smem1 > 48 * 1024) {
-            cudaFuncSetAttribute(fused_gather_chitpsi_kernel,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem1);
-        }
-
-        fused_gather_chitpsi_kernel<<<n_atoms, block_size, smem1>>>(
-            d_psi, d_Chi_flat, d_gpos_flat,
-            d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-            d_alpha, Nd, cols_this, ncol, col_start, dV, n_atoms);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    // Step 1: Tiled gather + Chi^T * psi → alpha
+    // Fixed shared memory: tile buffer + warp reduction buffer
+    size_t smem1 = (NL_TILE + block_size / 32) * sizeof(double);
+    fused_gather_chitpsi_kernel<<<n_atoms, block_size, smem1>>>(
+        d_psi, d_Chi_flat, d_gpos_flat,
+        d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+        d_alpha, Nd, ncol, ncol, 0, dV, n_atoms);
+    CUDA_CHECK(cudaGetLastError());
 
     // Step 2: Gamma scaling
     {
@@ -214,8 +227,13 @@ void nonlocal_projector_apply_gpu(
         CUDA_CHECK(cudaGetLastError());
     }
 
-    // Step 3: Fused Chi * alpha + scatter → Hpsi
-    // Shared memory: max_nproj * ncol_batch doubles (typically tiny, ~9*30*8=2KB)
+    // Step 3: Chi * alpha + scatter → Hpsi
+    // Shared memory: max_nproj * ncol_batch doubles (typically tiny, ~2 KB)
+    int device;
+    cudaGetDevice(&device);
+    int max_smem;
+    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+
     size_t smem_per_col3 = (size_t)max_nproj * sizeof(double);
     int ncol_batch3 = ncol;
     if (smem_per_col3 * ncol > (size_t)max_smem)
@@ -259,7 +277,6 @@ void nonlocal_projector_apply_gpu(
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
-    // Upload small metadata to device
     int *d_gpos_off, *d_chi_off, *d_ndc, *d_nproj, *d_ip;
     CUDA_CHECK(cudaMallocAsync(&d_gpos_off, (n_atoms + 1) * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_chi_off, (n_atoms + 1) * sizeof(int), 0));

@@ -609,8 +609,42 @@ void hamiltonian_apply_local_z_gpu(
 //  where theta = -k . R_image for each influence atom
 // ============================================================
 
-// Fused gather + Chi^T * psi for complex wavefunctions
+// Tiled gather + Chi^T * psi for complex wavefunctions
 // alpha_z = dV * bloch_fac * Chi^T * psi_z
+// Shared memory: (NL_TILE_Z * sizeof(cuDoubleComplex) + nwarps * 2 * sizeof(double)) ≈ 4 KB
+// O(1) w.r.t. system size — no fallback paths needed.
+static constexpr int NL_TILE_Z = 256;
+static constexpr int NL_MAX_NP_Z = 32;
+
+__device__ __forceinline__ double warpReduceSum_z_re(double val) {
+    for (int offset = 16; offset > 0; offset >>= 1)
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    return val;
+}
+
+__device__ cuDoubleComplex blockReduceSum_z(cuDoubleComplex val, double* smem) {
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+    int nwarps = blockDim.x >> 5;
+
+    // Reduce real and imaginary parts separately
+    double re = val.x, im = val.y;
+    re = warpReduceSum_z_re(re);
+    im = warpReduceSum_z_re(im);
+
+    if (lane == 0) { smem[warp] = re; smem[nwarps + warp] = im; }
+    __syncthreads();
+
+    if (warp == 0) {
+        re = (lane < nwarps) ? smem[lane] : 0.0;
+        im = (lane < nwarps) ? smem[nwarps + lane] : 0.0;
+        re = warpReduceSum_z_re(re);
+        im = warpReduceSum_z_re(im);
+    }
+    __syncthreads();
+    return make_cuDoubleComplex(re, im);
+}
+
 __global__ void fused_gather_chitpsi_z_kernel(
     const cuDoubleComplex* __restrict__ psi,
     const double* __restrict__ Chi_flat,
@@ -620,13 +654,12 @@ __global__ void fused_gather_chitpsi_z_kernel(
     const int* __restrict__ ndc_arr,
     const int* __restrict__ nproj_arr,
     const int* __restrict__ IP_displ,
-    const double* __restrict__ bloch_fac,  // [n_atoms * 2]: (cos, sin) per atom
+    const double* __restrict__ bloch_fac,
     cuDoubleComplex* __restrict__ alpha,
     int Nd, int ncol_this,
     int ncol_stride,
     int col_start,
-    double dV, int n_atoms,
-    int smem_available)  // 0 = no shared memory, >0 = bytes of shared memory allocated
+    double dV, int n_atoms)
 {
     int iat = blockIdx.x;
     if (iat >= n_atoms) return;
@@ -639,48 +672,49 @@ __global__ void fused_gather_chitpsi_z_kernel(
     int coff = chi_offsets[iat];
     int abase = IP_displ[iat];
 
-    // Bloch phase for this atom: e^{-ik.R_image}
     double bf_re = bloch_fac[2 * iat];
     double bf_im = bloch_fac[2 * iat + 1];
     cuDoubleComplex bloch = make_cuDoubleComplex(bf_re, bf_im);
 
+    // Shared memory: [NL_TILE_Z complex psi values] [2 * nwarps doubles for reduction]
     extern __shared__ char smem_raw[];
-    cuDoubleComplex* psi_sh = reinterpret_cast<cuDoubleComplex*>(smem_raw);
+    cuDoubleComplex* psi_tile = reinterpret_cast<cuDoubleComplex*>(smem_raw);
+    double* reduce_buf = reinterpret_cast<double*>(smem_raw + NL_TILE_Z * sizeof(cuDoubleComplex));
 
-    // Gather psi into shared memory if it fits; otherwise use global memory
-    int total_gather = ndc * ncol_this;
-    bool use_smem = (smem_available > 0 && total_gather * (int)sizeof(cuDoubleComplex) <= smem_available);
-    if (use_smem) {
-        for (int idx = threadIdx.x; idx < total_gather; idx += blockDim.x) {
-            int ig = idx % ndc;
-            int n = idx / ndc;
-            psi_sh[idx] = psi[gpos_flat[goff + ig] + (col_start + n) * Nd];
-        }
-        __syncthreads();
-    }
+    for (int n = 0; n < ncol_this; n++) {
+        // Per-thread complex accumulators for each projector
+        cuDoubleComplex dots[NL_MAX_NP_Z];
+        #pragma unroll 4
+        for (int jp = 0; jp < NL_MAX_NP_Z; jp++)
+            dots[jp] = make_cuDoubleComplex(0.0, 0.0);
 
-    // Compute alpha = dV * bloch * Chi^T * psi_gathered
-    int total_out = np * ncol_this;
-    for (int idx = threadIdx.x; idx < total_out; idx += blockDim.x) {
-        int jp = idx / ncol_this;
-        int n = idx % ncol_this;
+        for (int tile = 0; tile < ndc; tile += NL_TILE_Z) {
+            int tile_len = min(NL_TILE_Z, ndc - tile);
 
-        // Chi is REAL, psi is COMPLEX => dot is complex
-        cuDoubleComplex dot = make_cuDoubleComplex(0.0, 0.0);
-        const double* chi_col = Chi_flat + coff + jp * ndc;
-        if (use_smem) {
-            const cuDoubleComplex* psi_col = psi_sh + n * ndc;
-            for (int ig = 0; ig < ndc; ++ig)
-                dot = cuCadd(dot, rcmul(chi_col[ig], psi_col[ig]));
-        } else {
-            // Global memory fallback for large ndc
-            for (int ig = 0; ig < ndc; ++ig)
-                dot = cuCadd(dot, rcmul(chi_col[ig], psi[gpos_flat[goff + ig] + (col_start + n) * Nd]));
+            for (int i = threadIdx.x; i < tile_len; i += blockDim.x)
+                psi_tile[i] = psi[gpos_flat[goff + tile + i] + (col_start + n) * Nd];
+            __syncthreads();
+
+            // Chi is REAL, psi is COMPLEX
+            for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
+                cuDoubleComplex pv = psi_tile[i];
+                const double* chi_base = Chi_flat + coff + tile + i;
+                for (int jp = 0; jp < np; jp++) {
+                    double c = chi_base[jp * ndc];
+                    dots[jp].x += c * pv.x;
+                    dots[jp].y += c * pv.y;
+                }
+            }
+            __syncthreads();
         }
 
-        // Apply dV and Bloch phase: alpha += bloch * dV * dot
-        cuDoubleComplex contrib = cuCmul(bloch, rcmul(dV, dot));
-        atomicAddZ(&alpha[(abase + jp) * ncol_stride + (col_start + n)], contrib);
+        for (int jp = 0; jp < np; jp++) {
+            cuDoubleComplex val = blockReduceSum_z(dots[jp], reduce_buf);
+            if (threadIdx.x == 0) {
+                cuDoubleComplex contrib = cuCmul(bloch, rcmul(dV, val));
+                atomicAddZ(&alpha[(abase + jp) * ncol_stride + (col_start + n)], contrib);
+            }
+        }
     }
 }
 
@@ -785,47 +819,16 @@ void nonlocal_projector_apply_z_gpu(
     CUDA_CHECK(cudaMemset(d_alpha, 0, total_nproj * ncol * sizeof(cuDoubleComplex)));
 
     int block_size = 256;
+    int nwarps = block_size / 32;
 
-    // Query device shared memory limit
-    int device;
-    cudaGetDevice(&device);
-    int max_smem;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-
-    // Step 1: Fused gather + Chi^T * psi -> alpha (with Bloch phases)
-    size_t smem_per_col = (size_t)max_ndc * sizeof(cuDoubleComplex);
-    int ncol_batch1 = ncol;
-    if (smem_per_col * ncol > (size_t)max_smem)
-        ncol_batch1 = std::max(1, (int)(max_smem / smem_per_col));
-
-    // Check if max_ndc fits in shared memory for at least 1 column
-    bool smem_fits = (smem_per_col <= (size_t)max_smem);
-
-    for (int col_start = 0; col_start < ncol; col_start += ncol_batch1) {
-        int cols_this = std::min(ncol_batch1, ncol - col_start);
-
-        if (smem_fits) {
-            size_t smem1 = (size_t)max_ndc * cols_this * sizeof(cuDoubleComplex);
-            if (smem1 > 48 * 1024)
-                cudaFuncSetAttribute(fused_gather_chitpsi_z_kernel,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem1);
-
-            fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, smem1>>>(
-                d_psi, d_Chi_flat, d_gpos_flat,
-                d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-                d_bloch_fac, d_alpha, Nd, cols_this, ncol, col_start, dV, n_atoms,
-                (int)smem1);
-        } else {
-            // Large ndc: use no-smem path. Pass smem_available=16 (1 element) to avoid
-            // NVCC zero-smem issues, but kernel won't use smem (ndc > 1)
-            fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, 16>>>(
-                d_psi, d_Chi_flat, d_gpos_flat,
-                d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-                d_bloch_fac, d_alpha, Nd, 1, ncol, col_start, dV, n_atoms,
-                16);
-        }
-        CUDA_CHECK(cudaGetLastError());
-    }
+    // Step 1: Tiled gather + Chi^T * psi → alpha (with Bloch phases)
+    // Fixed shared memory: tile buffer + complex reduction buffer
+    size_t smem1 = NL_TILE_Z * sizeof(cuDoubleComplex) + 2 * nwarps * sizeof(double);
+    fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, smem1>>>(
+        d_psi, d_Chi_flat, d_gpos_flat,
+        d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+        d_bloch_fac, d_alpha, Nd, ncol, ncol, 0, dV, n_atoms);
+    CUDA_CHECK(cudaGetLastError());
 
     // Step 2: Gamma scaling (Gamma is real)
     {
@@ -836,6 +839,12 @@ void nonlocal_projector_apply_z_gpu(
     }
 
     // Step 3: Fused Chi * alpha + scatter -> Hpsi (with conjugate Bloch phase)
+    // Shared memory: max_nproj * ncol_batch * sizeof(cuDoubleComplex) — typically tiny
+    int device;
+    cudaGetDevice(&device);
+    int max_smem;
+    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+
     size_t smem_per_col3 = (size_t)max_nproj * sizeof(cuDoubleComplex);
     int ncol_batch3 = ncol;
     if (smem_per_col3 * ncol > (size_t)max_smem)

@@ -61,6 +61,8 @@ public:
                                           const Domain& domain);
 
     double Eexx() const { return Eexx_; }
+    void set_Eexx(double e) { Eexx_ = e; }
+    void set_Nstates_occ(int n) { Nstates_occ_ = n; }
 
     // Debug accessors for unit testing
     const Complex* Xi_kpt_data(int spin, int kpt) const { return Xi_kpt_[spin * Nkpts_local_ + kpt].data(); }

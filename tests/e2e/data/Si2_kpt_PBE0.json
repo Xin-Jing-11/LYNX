@@ -1,0 +1,51 @@
+{
+  "lattice": {
+    "vectors": [
+      [4.002746309969947, 4.447495899966606, 0.444749589996660],
+      [0.444749589996660, 4.447495899966606, 4.002746309969947],
+      [4.002746309969947, 0.444749589996660, 4.447495899966606]
+    ],
+    "cell_type": "nonorthogonal"
+  },
+  "grid": {
+    "Nx": 15, "Ny": 15, "Nz": 15,
+    "fd_order": 12,
+    "boundary_conditions": ["periodic", "periodic", "periodic"]
+  },
+  "atoms": [
+    {
+      "element": "Si",
+      "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8",
+      "fractional": true,
+      "coordinates": [
+        [0.0, 0.0, 0.0],
+        [0.25, 0.25, 0.25]
+      ]
+    }
+  ],
+  "electronic": {
+    "xc": "HYB_PBE0",
+    "spin": "none",
+    "temperature": 315.775131,
+    "smearing": "fermi-dirac",
+    "Nstates": 9
+  },
+  "kpoints": {
+    "grid": [2, 2, 2],
+    "shift": [0.5, 0.5, 0.5]
+  },
+  "scf": {
+    "max_iter": 100,
+    "tolerance": 1e-6,
+    "mixing": "density",
+    "preconditioner": "kerker",
+    "mixing_history": 7,
+    "mixing_parameter": 0.3
+  },
+  "output": {
+    "print_forces": true,
+    "print_atoms": false,
+    "calc_stress": true,
+    "calc_pressure": true
+  }
+}

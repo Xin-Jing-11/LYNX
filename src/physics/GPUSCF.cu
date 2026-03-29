@@ -104,6 +104,13 @@ void laplacian_orth_v2_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c, double diag_coeff, int ncol);
 
+void laplacian_nonorth_gpu(
+    const double* d_x_ex, const double* d_V, double* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    double a, double b, double c, double diag_coeff,
+    bool has_xy, bool has_xz, bool has_yz, int ncol);
+
 void gradient_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
@@ -1428,9 +1435,16 @@ void GPUSCFRunner::poisson_op_cb(const double* d_x, double* d_Ax) {
     gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
-    gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
-        s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
-        -1.0, 0.0, 0.0, s->poisson_diag_, 1);
+    if (s->is_orth_) {
+        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, 0.0, s->poisson_diag_, 1);
+    } else {
+        gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, 0.0, s->poisson_diag_,
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1);
+    }
 }
 
 // ============================================================
@@ -1454,9 +1468,16 @@ void GPUSCFRunner::kerker_op_cb(const double* d_x, double* d_Ax) {
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
     constexpr double kTF2 = 1.0;
-    gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
-        s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
-        -1.0, 0.0, kTF2, s->kerker_diag_, 1);
+    if (s->is_orth_) {
+        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, kTF2, s->kerker_diag_, 1);
+    } else {
+        gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, kTF2, s->kerker_diag_,
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1);
+    }
 }
 
 // ============================================================
@@ -1908,9 +1929,16 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
         int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
         gpu::halo_exchange_gpu(d_f_wavg, ctx.buf.aar_x_ex,
             nx_, ny_, nz_, FDn_, 1, true, true, true);
-        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
-            nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
-            1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
+        if (is_orth_) {
+            gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
+                1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
+        } else {
+            gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
+                1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_,
+                has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_, 1);
+        }
     }
 
     // Kerker step 2: Solve (-Lap + kTF^2)*Pf = Lf via AAR
@@ -2805,9 +2833,14 @@ double GPUSCFRunner::run(
                         if (scf_iter == 0 && pass == 0) {
                             int kpt_seed = same_spin_seed ? (42 + k) : (42 + s * Nkpts + k);
                             wfn.randomize_kpt(s, k, kpt_seed);
-                            size_t psi_bytes = 2 * (size_t)Nd_ * Nband * sizeof(double);
-                            CUDA_CHECK(cudaMemcpy(d_psi_sk, wfn.psi_kpt(s, k).data(),
-                                                   psi_bytes, cudaMemcpyHostToDevice));
+                            // Per-column upload to handle ld padding
+                            size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                            for (int n = 0; n < Nband; n++) {
+                                CUDA_CHECK(cudaMemcpy(
+                                    reinterpret_cast<char*>(d_psi_sk) + n * col_bytes,
+                                    wfn.psi_kpt(s, k).col(n),
+                                    col_bytes, cudaMemcpyHostToDevice));
+                            }
                         }
 
                         gpu::eigensolver_solve_z_gpu(
@@ -3425,8 +3458,8 @@ double GPUSCFRunner::run(
         auto exx_p = params.exx_params;
         if (exx_p.tol_fock < 0.0)
             exx_p.tol_fock = 0.2 * params.tol;
-        printf("Fock params: maxit=%d, minit=%d, tol_fock=%.2e, exx_frac=%.4f\n",
-               exx_p.maxit_fock, exx_p.minit_fock, exx_p.tol_fock, exx_frac_);
+        printf("Fock params: maxit=%d, minit=%d, tol_fock=%.2e, exx_frac=%.4f, dV=%.10e, Nd=%d\n",
+               exx_p.maxit_fock, exx_p.minit_fock, exx_p.tol_fock, exx_frac_, dV_, Nd_);
 
         double Eexx_prev = 0.0;
 
@@ -3458,7 +3491,7 @@ double GPUSCFRunner::run(
                 for (int i = 0; i < Nd_; i++) h_rho[i] = h_rho_up[i] + h_rho_dn[i];
             }
 
-            // XC with hybrid-scaled exchange (libxc handles exx_frac internally)
+            // XC with hybrid-scaled exchange: scale GGA exchange by (1 - exx_frac)
             Gradient gradient_cpu(stencil, domain);
             XCFunctional xcfunc;
             xcfunc.setup(xc_type_full_, domain, grid, &gradient_cpu, &halo);
@@ -3466,6 +3499,8 @@ double GPUSCFRunner::run(
 
             int vxc_size = Nd_ * Nspin;
             std::vector<double> h_Vxc(vxc_size, 0.0), h_exc(Nd_, 0.0);
+            int dxc_ncol = (Nspin == 2) ? 3 : 1;
+            std::vector<double> h_Dxcdgrho(Nd_ * dxc_ncol, 0.0);
 
             if (Nspin == 2) {
                 std::vector<double> rho_xc(3 * Nd_);
@@ -3476,14 +3511,12 @@ double GPUSCFRunner::run(
                     rho_xc[Nd_ + i] = rup;
                     rho_xc[2 * Nd_ + i] = rdn;
                 }
-                std::vector<double> h_Dxcdgrho(Nd_ * 3, 0.0);
                 xcfunc.evaluate_spin(rho_xc.data(), h_Vxc.data(), h_exc.data(), Nd_,
                                      xcfunc.is_gga() ? h_Dxcdgrho.data() : nullptr);
             } else {
                 std::vector<double> h_rho_xc(Nd_);
                 for (int i = 0; i < Nd_; i++)
                     h_rho_xc[i] = h_rho[i] + (has_nlcc_ ? rho_core[i] : 0.0);
-                std::vector<double> h_Dxcdgrho(Nd_, 0.0);
                 xcfunc.evaluate(h_rho_xc.data(), h_Vxc.data(), h_exc.data(), Nd_,
                                 xcfunc.is_gga() ? h_Dxcdgrho.data() : nullptr);
             }
@@ -3498,10 +3531,14 @@ double GPUSCFRunner::run(
                 for (int i = 0; i < Nd_; i++)
                     h_Veff[s * Nd_ + i] = h_Vxc[s * Nd_ + i] + h_phi[i];
 
-            // Upload Veff to GPU
+            // Upload Veff, Vxc, exc, Dxcdgrho to GPU
             CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_Vxc, h_Vxc.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            if (xcfunc.is_gga() && ctx.buf.Dxcdgrho) {
+                CUDA_CHECK(cudaMemcpy(ctx.buf.Dxcdgrho, h_Dxcdgrho.data(),
+                                       Nd_ * dxc_ncol * sizeof(double), cudaMemcpyHostToDevice));
+            }
         };
 
         // Reset mixing state for Fock phase
@@ -3613,12 +3650,14 @@ double GPUSCFRunner::run(
                     CUDA_CHECK(cudaDeviceSynchronize());
 
                     // Update bounds from eigenvalues
+                    // Only update eigval_min and lambda_cutoff.
+                    // eigval_max must stay at Lanczos spectral bound (Hamiltonian spectral radius).
                     std::vector<double> h_eigs(Nband);
                     CUDA_CHECK(cudaMemcpy(h_eigs.data(), d_eigvals_arr[s_glob],
                         Nband * sizeof(double), cudaMemcpyDeviceToHost));
                     eigval_min_s[s_glob] = h_eigs[0];
-                    eigval_max_s[s_glob] = h_eigs[Nband - 1];
-                    lambda_cutoff = 0.5 * (eigval_min_s[s_glob] + eigval_max_s[s_glob]);
+                    // DO NOT overwrite eigval_max_s — it's the Lanczos upper bound
+                    lambda_cutoff = h_eigs[Nband - 1] + 0.1;
                 }
             }
 
@@ -3626,6 +3665,12 @@ double GPUSCFRunner::run(
             converged_ = false;
             mix_iter_ = 0;
             CUDA_CHECK(cudaMemset(d_mix_fkm1_, 0, Nd_ * ((Nspin >= 2) ? 2 : 1) * sizeof(double)));
+
+            // Allocate temp buffer for spin-2 per-spin new densities
+            double* d_rho_new_spin_g = nullptr;
+            if (Nspin == 2) {
+                CUDA_CHECK(cudaMalloc(&d_rho_new_spin_g, 2 * (size_t)Nd_ * sizeof(double)));
+            }
 
             for (int scf_iter = 0; scf_iter < max_iter; scf_iter++) {
                 int nchefsi = (scf_iter == 0) ? rho_trigger : nchefsi_per_iter;
@@ -3679,13 +3724,19 @@ double GPUSCFRunner::run(
                 }
 
                 // Update spectral bounds
-                for (int s = 0; s < Nspin_local; s++) {
-                    int s_glob = spin_start + s;
-                    const auto& eigs = wfn.eigenvalues(s, 0);
-                    eigval_min_s[s_glob] = eigs(0);
-                    eigval_max_s[s_glob] = eigs(Nband - 1);
+                {
+                    double eig_last_max = -1e30;
+                    for (int s = 0; s < Nspin_local; s++) {
+                        int s_glob = spin_start + s;
+                        const auto& eigs = wfn.eigenvalues(s, 0);
+                        if (scf_iter > 0)
+                            eigval_min_s[s_glob] = eigs(0);
+                        // DO NOT overwrite eigval_max_s — it's the Lanczos upper bound
+                        if (eigs(Nband - 1) > eig_last_max)
+                            eig_last_max = eigs(Nband - 1);
+                    }
+                    lambda_cutoff = eig_last_max + 0.1;
                 }
-                lambda_cutoff = 0.5 * (eigval_min_s[0] + eigval_max_s[0]);
 
                 // Density: compute from GPU psi + occupations
                 {
@@ -3694,8 +3745,8 @@ double GPUSCFRunner::run(
                     double occfac = (Nspin == 1) ? 2.0 : 1.0;
 
                     if (Nspin == 2) {
-                        double* d_rho_new_up = ctx.buf.rho_total;
-                        double* d_rho_new_dn = ctx.buf.rho_total + Nd_;
+                        double* d_rho_new_up = d_rho_new_spin_g;
+                        double* d_rho_new_dn = d_rho_new_spin_g + Nd_;
                         CUDA_CHECK(cudaMemset(d_rho_new_up, 0, Nd_ * sizeof(double)));
                         CUDA_CHECK(cudaMemset(d_rho_new_dn, 0, Nd_ * sizeof(double)));
                         for (int s = 0; s < Nspin_local; s++) {
@@ -3739,7 +3790,7 @@ double GPUSCFRunner::run(
                     scf_error = (sum_sq_out > 0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
                 }
 
-                // Energy evaluation (CPU: download rho_new, exc, Vxc, phi, psi -> compute Eband, Exc, etc.)
+                // Energy evaluation (matching CPU Energy::compute_all + hybrid correction)
                 {
                     // Eband = sum_s sum_n occ_n * eigenvalue_n
                     double Eband = 0.0;
@@ -3751,23 +3802,76 @@ double GPUSCFRunner::run(
                             Eband += occ_fac * occ_s(n) * eig_s(n);
                     }
 
-                    std::vector<double> h_rho_out(Nd_), h_exc_v(Nd_), h_phi_v(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_rho_out.data(), d_rho_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    // Download input density (d_rho = mixed density used for Veff),
+                    // exc, Vxc, phi from GPU. Must use input density for all integrals.
+                    int vxc_size = Nd_ * Nspin;
+                    std::vector<double> h_rho_in(Nd_), h_exc_v(Nd_), h_phi_v(Nd_), h_Vxc_v(vxc_size);
                     CUDA_CHECK(cudaMemcpy(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
                     CUDA_CHECK(cudaMemcpy(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(h_Vxc_v.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost));
 
-                    double Exc = 0.0, Eelec = 0.0;
-                    for (int i = 0; i < Nd_; i++) {
-                        Exc += h_rho_out[i] * h_exc_v[i];
-                        Eelec += h_rho_out[i] * h_phi_v[i];
+                    // Get total input density
+                    if (Nspin == 2) {
+                        std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
+                        CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        for (int i = 0; i < Nd_; i++) h_rho_in[i] = h_rho_up[i] + h_rho_dn[i];
+                    } else {
+                        CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    }
+
+                    // Exc = int(rho * exc) dV (with NLCC: (rho + rho_core) * exc)
+                    double Exc = 0.0;
+                    if (has_nlcc_) {
+                        for (int i = 0; i < Nd_; i++)
+                            Exc += (h_rho_in[i] + rho_core[i]) * h_exc_v[i];
+                    } else {
+                        for (int i = 0; i < Nd_; i++)
+                            Exc += h_rho_in[i] * h_exc_v[i];
                     }
                     Exc *= dV_;
-                    Eelec *= 0.5 * dV_;
 
+                    // E2 = int(rho * Vxc) dV (XC double-counting)
+                    double E2 = 0.0;
+                    if (Nspin == 2) {
+                        std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
+                        CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        for (int i = 0; i < Nd_; i++)
+                            E2 += h_rho_up[i] * h_Vxc_v[i] + h_rho_dn[i] * h_Vxc_v[Nd_ + i];
+                    } else {
+                        for (int i = 0; i < Nd_; i++)
+                            E2 += h_rho_in[i] * h_Vxc_v[i];
+                    }
+                    E2 *= dV_;
+
+                    // E3 = int(rho * phi) dV (electrostatic double-counting)
+                    double E3 = 0.0;
+                    for (int i = 0; i < Nd_; i++)
+                        E3 += h_rho_in[i] * h_phi_v[i];
+                    E3 *= dV_;
+
+                    // Ehart = 0.5 * int((rho + rho_b) * phi) dV
+                    double Ehart = 0.0;
+                    std::vector<double> h_rho_b(Nd_);
+                    CUDA_CHECK(cudaMemcpy(h_rho_b.data(), d_pseudocharge_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    for (int i = 0; i < Nd_; i++)
+                        Ehart += (h_rho_in[i] + h_rho_b[i]) * h_phi_v[i];
+                    Ehart *= 0.5 * dV_;
+
+                    // Entropy
+                    double Entropy = Occupation::entropy(wfn, beta_smearing,
+                                                          params.smearing, kpt_weights_in, Ef, 0, Nspin);
+
+                    // Standard total energy (without EXX)
+                    double Etotal_std = Eband - E2 + Exc - E3 + Ehart + Eself + Ec + Entropy;
+
+                    // Hybrid correction: Exc += Eexx, Etotal -= Eexx
                     energy_.Eband = Eband;
-                    energy_.Exc = Exc + Eexx_est;  // hybrid: add EXX
-                    energy_.Ehart = Eelec;
-                    energy_.Etotal = Eband + Ec + Eself - Eelec + Exc - Eexx_est;
+                    energy_.Exc = Exc + Eexx_est;
+                    energy_.Ehart = Ehart;
+                    energy_.Entropy = Entropy;
+                    energy_.Etotal = Etotal_std - Eexx_est;
                 }
 
                 printf("  Fock %d SCF %3d: Etot = %18.10f Ha, err = %10.3e, Ef = %.6f\n",
@@ -3782,8 +3886,8 @@ double GPUSCFRunner::run(
                 // Mix density
                 if (Nspin == 2) {
                     // Mix spin-up and spin-down separately
-                    double* d_rho_new_up = ctx.buf.rho_total;
-                    double* d_rho_new_dn = ctx.buf.rho_total + Nd_;
+                    double* d_rho_new_up = d_rho_new_spin_g;
+                    double* d_rho_new_dn = d_rho_new_spin_g + Nd_;
                     gpu_pulay_mix(d_rho, d_rho_new_up, Nd_, mixing_history, mixing_param);
                     gpu_pulay_mix(d_rho + Nd_, d_rho_new_dn, Nd_, mixing_history, mixing_param);
                 } else {
@@ -3794,28 +3898,25 @@ double GPUSCFRunner::run(
                 recompute_veff_hybrid();
 
                 // Also recompute Poisson (phi from mixed rho)
+                // gpu_poisson_solve internally adds pseudocharge: RHS = 4pi*(rho + b)
+                // So pass total density directly, not rho - b.
                 {
-                    double* d_rho_total = (Nspin == 2) ? d_rho_new : d_rho;
+                    double* d_rho_total = d_rho;
                     if (Nspin == 2) {
                         int bs = 256;
                         int gs = gpu::ceildiv(Nd_, bs);
                         add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
                         d_rho_total = d_rho_new;
                     }
-                    // rhs = rho_mixed - rho_b
-                    double* d_rhs = ctx.buf.b;
-                    {
-                        int bs = 256;
-                        int gs = gpu::ceildiv(Nd_, bs);
-                        sub_kernel<<<gs, bs>>>(d_rho_total, d_pseudocharge_, d_rhs, Nd_);
-                    }
-                    gpu_poisson_solve(d_rhs, d_phi, ctx.buf.b, Nd_, poisson_tol);
+                    gpu_poisson_solve(d_rho_total, d_phi, ctx.buf.b, Nd_, poisson_tol);
 
                     // Update Veff = Vxc + phi (already done in recompute_veff_hybrid,
                     // but phi may have changed)
                     recompute_veff_hybrid();
                 }
             }
+
+            if (d_rho_new_spin_g) { cudaFree(d_rho_new_spin_g); d_rho_new_spin_g = nullptr; }
 
             // Disable apply_Vx for energy recomputation
             exx_active_ = false;
@@ -3862,6 +3963,12 @@ double GPUSCFRunner::run(
             recompute_veff_hybrid();
         }
 
+        // Sync Eexx and Nocc to CPU ExactExchange object (needed for stress computation)
+        if (exx_cpu_) {
+            exx_cpu_->set_Eexx(energy_.Eexx);
+            exx_cpu_->set_Nstates_occ(exx_Nocc_);
+        }
+
         // Clean up EXX GPU buffers
         exx_cleanup();
     }
@@ -3878,6 +3985,21 @@ double GPUSCFRunner::run(
 
         double Eexx_prev = 0.0;
         int Nkpts = (int)kpt_weights_in.size();
+
+        // Download converged psi from GPU to CPU wfn (needed for ACE build)
+        for (int s = 0; s < Nspin_local_; s++) {
+            for (int k = 0; k < Nkpts; k++) {
+                cuDoubleComplex* d_psi_sk = static_cast<cuDoubleComplex*>(
+                    d_psi_z_kpt_[s * Nkpts + k]);
+                size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                for (int n = 0; n < Nband; n++) {
+                    CUDA_CHECK(cudaMemcpy(
+                        wfn.psi_kpt(s, k).col(n),
+                        reinterpret_cast<const char*>(d_psi_sk) + n * col_bytes,
+                        col_bytes, cudaMemcpyDeviceToHost));
+                }
+            }
+        }
 
         // Set up GPU Poisson solver for exchange (k-point Z2Z path)
         {
@@ -3919,6 +4041,8 @@ double GPUSCFRunner::run(
 
             int vxc_size = Nd_ * Nspin;
             std::vector<double> h_Vxc(vxc_size, 0.0), h_exc(Nd_, 0.0);
+            int dxc_ncol_kpt = (Nspin == 2) ? 3 : 1;
+            std::vector<double> h_Dxcdgrho(Nd_ * dxc_ncol_kpt, 0.0);
 
             if (Nspin == 2) {
                 std::vector<double> rho_xc(3 * Nd_);
@@ -3929,14 +4053,12 @@ double GPUSCFRunner::run(
                     rho_xc[Nd_ + i] = rup;
                     rho_xc[2 * Nd_ + i] = rdn;
                 }
-                std::vector<double> h_Dxcdgrho(Nd_ * 3, 0.0);
                 xcfunc.evaluate_spin(rho_xc.data(), h_Vxc.data(), h_exc.data(), Nd_,
                                      xcfunc.is_gga() ? h_Dxcdgrho.data() : nullptr);
             } else {
                 std::vector<double> h_rho_xc(Nd_);
                 for (int i = 0; i < Nd_; i++)
                     h_rho_xc[i] = h_rho[i] + (has_nlcc_ ? rho_core[i] : 0.0);
-                std::vector<double> h_Dxcdgrho(Nd_, 0.0);
                 xcfunc.evaluate(h_rho_xc.data(), h_Vxc.data(), h_exc.data(), Nd_,
                                 xcfunc.is_gga() ? h_Dxcdgrho.data() : nullptr);
             }
@@ -3952,6 +4074,10 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), Nd_ * Nspin * sizeof(double), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_Vxc, h_Vxc.data(), Nd_ * Nspin * sizeof(double), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            if (xcfunc.is_gga() && ctx.buf.Dxcdgrho) {
+                CUDA_CHECK(cudaMemcpy(ctx.buf.Dxcdgrho, h_Dxcdgrho.data(),
+                                       Nd_ * dxc_ncol_kpt * sizeof(double), cudaMemcpyHostToDevice));
+            }
         };
 
         // Reset mixing state
@@ -4018,11 +4144,15 @@ double GPUSCFRunner::run(
                 for (int s = 0; s < Nspin_local_; s++) {
                     int s_glob = spin_start + s;
 
-                    // Upload all psi_kpt for this spin to device
+                    // Upload all psi_kpt for this spin to device (per-column for ld padding)
                     for (int k = 0; k < Nkpts; k++) {
-                        auto* psi_c = wfn.psi_kpt(s, k).data();
-                        CUDA_CHECK(cudaMemcpy(d_psi_all_k[k], psi_c,
-                            2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                        for (int n = 0; n < Nband; n++) {
+                            CUDA_CHECK(cudaMemcpy(
+                                reinterpret_cast<char*>(d_psi_all_k[k]) + n * col_bytes,
+                                wfn.psi_kpt(s, k).col(n),
+                                col_bytes, cudaMemcpyHostToDevice));
+                        }
                     }
 
                     // Download occupations for each k-point
@@ -4112,13 +4242,19 @@ double GPUSCFRunner::run(
                         double wk = sym_wts[k_glob] / Nkpts_full;
                         int xi_idx = s_glob * Nkpts + k;
 
-                        // Upload psi_kpt to device temporarily
+                        // Upload psi_kpt to device temporarily (per-column for ld padding)
                         cuDoubleComplex* d_psi_tmp = nullptr;
                         CUDA_CHECK(cudaMalloc(&d_psi_tmp,
                             (size_t)Nd_ * Nband * sizeof(cuDoubleComplex)));
-                        auto* psi_c = wfn.psi_kpt(s, k).data();
-                        CUDA_CHECK(cudaMemcpy(d_psi_tmp, psi_c,
-                            2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        {
+                            size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                            for (int n = 0; n < Nband; n++) {
+                                CUDA_CHECK(cudaMemcpy(
+                                    reinterpret_cast<char*>(d_psi_tmp) + n * col_bytes,
+                                    wfn.psi_kpt(s, k).col(n),
+                                    col_bytes, cudaMemcpyHostToDevice));
+                            }
+                        }
 
                         std::vector<double> h_occ(Nband);
                         for (int n = 0; n < Nband; n++)
@@ -4148,6 +4284,12 @@ double GPUSCFRunner::run(
             mix_iter_ = 0;
             CUDA_CHECK(cudaMemset(d_mix_fkm1_, 0, Nd_ * ((Nspin >= 2) ? 2 : 1) * sizeof(double)));
 
+            // Allocate temp buffer for spin-2 per-spin new densities
+            double* d_rho_new_spin = nullptr;
+            if (Nspin == 2) {
+                CUDA_CHECK(cudaMalloc(&d_rho_new_spin, 2 * (size_t)Nd_ * sizeof(double)));
+            }
+
             for (int scf_iter = 0; scf_iter < max_iter; scf_iter++) {
                 int nchefsi = (scf_iter == 0) ? rho_trigger : nchefsi_per_iter;
 
@@ -4169,11 +4311,16 @@ double GPUSCFRunner::run(
                             exx_spin_ = s_glob;
                             exx_kpt_ = k;
 
-                            // Upload psi from CPU wfn
+                            // Upload psi from CPU wfn (per-column to handle ld padding)
                             {
-                                auto* psi_c = wfn.psi_kpt(s, k).data();
-                                CUDA_CHECK(cudaMemcpy(d_psi_z, psi_c,
-                                    2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                                int ld = wfn.psi_kpt(s, k).ld();
+                                size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                                for (int n = 0; n < Nband; n++) {
+                                    CUDA_CHECK(cudaMemcpy(
+                                        reinterpret_cast<char*>(d_psi_z) + n * col_bytes,
+                                        wfn.psi_kpt(s, k).col(n),
+                                        col_bytes, cudaMemcpyHostToDevice));
+                                }
                             }
 
                             gpu::eigensolver_solve_z_gpu(
@@ -4196,12 +4343,15 @@ double GPUSCFRunner::run(
                                 for (int n = 0; n < Nband; n++)
                                     wfn.eigenvalues(s, k)(n) = h_eigs[n];
                             }
+                            // Download psi per-column to handle ld padding
                             {
-                                std::vector<double> h_psi_z_buf(2 * Nd_ * Nband);
-                                CUDA_CHECK(cudaMemcpy(h_psi_z_buf.data(), d_psi_z,
-                                    2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost));
-                                std::memcpy(wfn.psi_kpt(s, k).data(), h_psi_z_buf.data(),
-                                    2 * Nd_ * Nband * sizeof(double));
+                                size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                                for (int n = 0; n < Nband; n++) {
+                                    CUDA_CHECK(cudaMemcpy(
+                                        wfn.psi_kpt(s, k).col(n),
+                                        reinterpret_cast<const char*>(d_psi_z) + n * col_bytes,
+                                        col_bytes, cudaMemcpyDeviceToHost));
+                                }
                             }
                         }
                     }
@@ -4226,84 +4376,157 @@ double GPUSCFRunner::run(
                     }
                 }
 
-                // Density update from complex psi (on device)
-                CUDA_CHECK(cudaMemset(d_rho, 0, Nd_ * Nspin * sizeof(double)));
-                for (int s = 0; s < Nspin_local_; s++) {
-                    int s_glob = spin_start + s;
+                // Density update from complex psi into temp buffer (preserve d_rho for mixing)
+                double* d_rho_new_kpt = d_rho_new;
+                double occfac_kpt = (Nspin == 1) ? 2.0 : 1.0;
+                if (Nspin == 2) {
+                    double* d_rho_new_up = d_rho_new_spin;
+                    double* d_rho_new_dn = d_rho_new_spin + Nd_;
+                    CUDA_CHECK(cudaMemset(d_rho_new_up, 0, Nd_ * sizeof(double)));
+                    CUDA_CHECK(cudaMemset(d_rho_new_dn, 0, Nd_ * sizeof(double)));
+                    for (int s = 0; s < Nspin_local_; s++) {
+                        int s_glob = spin_start + s;
+                        double* d_rho_s = (s_glob == 0) ? d_rho_new_up : d_rho_new_dn;
+                        for (int k = 0; k < Nkpts; k++) {
+                            int k_glob = kpt_start + k;
+                            double wk_dens = kpt_weights_in[k_glob] * occfac_kpt;
+
+                            // Upload psi per-column (ld padding)
+                            {
+                                size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                                for (int n = 0; n < Nband; n++) {
+                                    CUDA_CHECK(cudaMemcpy(
+                                        reinterpret_cast<char*>(d_psi_z) + n * col_bytes,
+                                        wfn.psi_kpt(s, k).col(n),
+                                        col_bytes, cudaMemcpyHostToDevice));
+                                }
+                            }
+
+                            std::vector<double> h_occ(Nband);
+                            for (int n = 0; n < Nband; n++)
+                                h_occ[n] = wfn.occupations(s, k)(n);
+                            CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                                Nband * sizeof(double), cudaMemcpyHostToDevice));
+
+                            gpu::compute_density_z_gpu(
+                                d_psi_z, d_occ_arr[s_glob],
+                                d_rho_s,
+                                Nd_, Nband, wk_dens);
+                        }
+                    }
+                    // Total density for mixing
+                    int bs = 256;
+                    int gs = gpu::ceildiv(Nd_, bs);
+                    add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_rho_new_kpt, Nd_);
+                } else {
+                    CUDA_CHECK(cudaMemset(d_rho_new_kpt, 0, Nd_ * sizeof(double)));
                     for (int k = 0; k < Nkpts; k++) {
                         int k_glob = kpt_start + k;
-                        double wk_dens = kpt_weights_in[k_glob];
+                        double wk_dens = kpt_weights_in[k_glob] * occfac_kpt;
 
-                        auto* psi_c = wfn.psi_kpt(s, k).data();
-                        CUDA_CHECK(cudaMemcpy(d_psi_z, psi_c,
-                            2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        // Upload psi per-column (ld padding)
+                        {
+                            size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                            for (int n = 0; n < Nband; n++) {
+                                CUDA_CHECK(cudaMemcpy(
+                                    reinterpret_cast<char*>(d_psi_z) + n * col_bytes,
+                                    wfn.psi_kpt(0, k).col(n),
+                                    col_bytes, cudaMemcpyHostToDevice));
+                            }
+                        }
 
                         std::vector<double> h_occ(Nband);
                         for (int n = 0; n < Nband; n++)
-                            h_occ[n] = wfn.occupations(s, k)(n);
-                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
+                            h_occ[n] = wfn.occupations(0, k)(n);
+                        CUDA_CHECK(cudaMemcpy(d_occ_arr[0], h_occ.data(),
                             Nband * sizeof(double), cudaMemcpyHostToDevice));
 
                         gpu::compute_density_z_gpu(
-                            d_psi_z, d_occ_arr[s_glob],
-                            d_rho + s_glob * Nd_,
+                            d_psi_z, d_occ_arr[0],
+                            d_rho_new_kpt,
                             Nd_, Nband, wk_dens);
                     }
                 }
 
-                // Compute new density for mixing
-                double* d_rho_new_kpt = d_rho_new;
-                if (Nspin == 2) {
-                    // Total density
-                    int bs = 256;
-                    int gs = gpu::ceildiv(Nd_, bs);
-                    add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new_kpt, Nd_);
-                } else {
-                    CUDA_CHECK(cudaMemcpy(d_rho_new_kpt, d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-                }
-
-                // Poisson solve
-                {
-                    double* d_poi_rhs = ctx.buf.b;
-                    int bs = 256;
-                    int gs = gpu::ceildiv(Nd_, bs);
-                    sub_kernel<<<gs, bs>>>(d_rho_new_kpt, d_pseudocharge_, d_poi_rhs, Nd_);
-                    gpu_poisson_solve(d_poi_rhs, d_phi, ctx.buf.b, Nd_, poisson_tol);
-                }
-
-                // Energy evaluation
+                // Energy evaluation (matching CPU Energy::compute_all formula)
+                // Use phi from recompute_veff_hybrid_kpt (input density), same as gamma path
                 double Eband = 0.0;
+                double spin_fac = (Nspin == 1) ? 2.0 : 1.0;
                 for (int s = 0; s < Nspin_local_; s++) {
                     for (int k = 0; k < Nkpts; k++) {
                         int k_glob = kpt_start + k;
-                        double wk_e = kpt_weights_in[k_glob];
+                        double wk_e = kpt_weights_in[k_glob] * spin_fac;
                         for (int n = 0; n < Nband; n++)
                             Eband += wk_e * wfn.occupations(s, k)(n) * wfn.eigenvalues(s, k)(n);
                     }
                 }
 
-                double Exc_val = 0.0, Eelec_val = 0.0;
-                {
-                    std::vector<double> h_rho_out(Nd_), h_exc_v(Nd_), h_phi_v(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_rho_out.data(), d_rho_new_kpt, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    for (int i = 0; i < Nd_; i++) {
-                        Exc_val += h_rho_out[i] * h_exc_v[i];
-                        Eelec_val += h_rho_out[i] * h_phi_v[i];
-                    }
-                    Exc_val *= dV_;
-                    Eelec_val *= 0.5 * dV_;
+                // Download input density (mixed rho used for Veff)
+                std::vector<double> h_rho_in(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                // For non-spin: h_rho_in = total density from d_rho
+
+                std::vector<double> h_exc_v(Nd_), h_Vxc_v(Nd_ * Nspin), h_phi_v(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_Vxc_v.data(), d_Vxc, Nd_ * Nspin * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpy(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+
+                // Exc = int(rho * exc) dV (with NLCC)
+                double Exc = 0.0;
+                if (has_nlcc_) {
+                    for (int i = 0; i < Nd_; i++)
+                        Exc += (h_rho_in[i] + rho_core[i]) * h_exc_v[i];
+                } else {
+                    for (int i = 0; i < Nd_; i++)
+                        Exc += h_rho_in[i] * h_exc_v[i];
                 }
+                Exc *= dV_;
+
+                // E2 = int(rho * Vxc) dV
+                double E2 = 0.0;
+                if (Nspin == 2) {
+                    std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
+                    CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    for (int i = 0; i < Nd_; i++)
+                        E2 += h_rho_up[i] * h_Vxc_v[i] + h_rho_dn[i] * h_Vxc_v[Nd_ + i];
+                } else {
+                    for (int i = 0; i < Nd_; i++)
+                        E2 += h_rho_in[i] * h_Vxc_v[i];
+                }
+                E2 *= dV_;
+
+                // E3 = int(rho * phi) dV
+                double E3 = 0.0;
+                for (int i = 0; i < Nd_; i++)
+                    E3 += h_rho_in[i] * h_phi_v[i];
+                E3 *= dV_;
+
+                // Ehart = 0.5 * int((rho + rho_b) * phi) dV
+                double Ehart = 0.0;
+                std::vector<double> h_rho_b(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_rho_b.data(), d_pseudocharge_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                for (int i = 0; i < Nd_; i++)
+                    Ehart += (h_rho_in[i] + h_rho_b[i]) * h_phi_v[i];
+                Ehart *= 0.5 * dV_;
+
+                // Entropy
+                double Entropy = Occupation::entropy(wfn, beta_smearing,
+                                                      params.smearing, kpt_weights_in, Ef, 0, Nspin);
+
+                // Standard total energy
+                double Etotal_std = Eband - E2 + Exc - E3 + Ehart + Eself + Ec + Entropy;
 
                 energy_.Eband = Eband;
-                energy_.Exc = Exc_val + Eexx_est;
-                energy_.Ehart = Eelec_val;
+                energy_.Exc = Exc + Eexx_est;
+                energy_.Ehart = Ehart;
+                energy_.Entropy = Entropy;
                 energy_.Eexx = Eexx_est;
-                energy_.Etotal = Eband + Ec + Eself - Eelec_val + Exc_val - Eexx_est;
+                energy_.Etotal = Etotal_std - Eexx_est;
 
-                printf("  Fock %d kpt SCF %3d: Etot = %18.10f Ha, Ef = %.6f\n",
-                       fock_iter + 1, scf_iter + 1, energy_.Etotal, Ef);
+                printf("  Fock %d kpt SCF %3d: Etot = %18.10f Ha, Ef = %.6f  [Eband=%.6f Exc=%.6f Eexx_est=%.6f std=%.6f]\n",
+                       fock_iter + 1, scf_iter + 1, energy_.Etotal, Ef,
+                       Eband, Exc, Eexx_est, Etotal_std);
 
                 if (scf_iter >= params.min_iter && std::fabs(energy_.Etotal - Ef_prev_) / std::max(1, Natom) < params.tol) {
                     converged_ = true;
@@ -4315,8 +4538,8 @@ double GPUSCFRunner::run(
 
                 // Mix density
                 if (Nspin == 2) {
-                    double* d_rho_new_up = ctx.buf.rho_total;
-                    double* d_rho_new_dn = ctx.buf.rho_total + Nd_;
+                    double* d_rho_new_up = d_rho_new_spin;
+                    double* d_rho_new_dn = d_rho_new_spin + Nd_;
                     gpu_pulay_mix(d_rho, d_rho_new_up, Nd_, mixing_history, mixing_param);
                     gpu_pulay_mix(d_rho + Nd_, d_rho_new_dn, Nd_, mixing_history, mixing_param);
                 } else {
@@ -4333,14 +4556,13 @@ double GPUSCFRunner::run(
                         add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
                         d_rho_total_m = d_rho_new;
                     }
-                    double* d_poi_rhs = ctx.buf.b;
-                    int bs = 256;
-                    int gs = gpu::ceildiv(Nd_, bs);
-                    sub_kernel<<<gs, bs>>>(d_rho_total_m, d_pseudocharge_, d_poi_rhs, Nd_);
-                    gpu_poisson_solve(d_poi_rhs, d_phi, ctx.buf.b, Nd_, poisson_tol);
+                    // gpu_poisson_solve internally computes RHS = 4pi*(rho + b)
+                    gpu_poisson_solve(d_rho_total_m, d_phi, ctx.buf.b, Nd_, poisson_tol);
                     recompute_veff_hybrid_kpt();
                 }
             }
+
+            if (d_rho_new_spin) { cudaFree(d_rho_new_spin); d_rho_new_spin = nullptr; }
 
             if (!converged_) {
                 printf("  WARNING: Inner kpt SCF did not converge.\n");
@@ -4370,9 +4592,16 @@ double GPUSCFRunner::run(
                         cuDoubleComplex* d_psi_tmp = nullptr;
                         CUDA_CHECK(cudaMalloc(&d_psi_tmp,
                             (size_t)Nd_ * Nband * sizeof(cuDoubleComplex)));
-                        auto* psi_c = wfn.psi_kpt(s, k).data();
-                        CUDA_CHECK(cudaMemcpy(d_psi_tmp, psi_c,
-                            2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        // Upload psi per-column (ld padding)
+                        {
+                            size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
+                            for (int n = 0; n < Nband; n++) {
+                                CUDA_CHECK(cudaMemcpy(
+                                    reinterpret_cast<char*>(d_psi_tmp) + n * col_bytes,
+                                    wfn.psi_kpt(s, k).col(n),
+                                    col_bytes, cudaMemcpyHostToDevice));
+                            }
+                        }
 
                         std::vector<double> h_occ(Nband);
                         for (int n = 0; n < Nband; n++)
@@ -4411,6 +4640,12 @@ double GPUSCFRunner::run(
 
             mix_iter_ = 0;
             recompute_veff_hybrid_kpt();
+        }
+
+        // Sync Eexx and Nocc to CPU ExactExchange object (needed for stress computation)
+        if (exx_cpu_) {
+            exx_cpu_->set_Eexx(energy_.Eexx);
+            exx_cpu_->set_Nstates_occ(exx_Nocc_);
         }
 
         exx_cleanup();
