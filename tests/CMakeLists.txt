@@ -62,15 +62,18 @@ target_link_libraries(lynx_e2e_tests PRIVATE lynx_core GTest::gtest)
 # Register MPI tests to run with mpirun
 add_test(NAME E2E_BaTiO3_1proc
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_e2e_tests> --gtest_filter=EndToEnd.BaTiO3_SCF)
-set_tests_properties(E2E_BaTiO3_1proc PROPERTIES TIMEOUT 600 LABELS "e2e")
+set_tests_properties(E2E_BaTiO3_1proc PROPERTIES TIMEOUT 600 LABELS "e2e"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(NAME E2E_Si8_1proc
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_e2e_tests> --gtest_filter=EndToEnd.Si8_SCF)
-set_tests_properties(E2E_Si8_1proc PROPERTIES TIMEOUT 600 LABELS "e2e")
+set_tests_properties(E2E_Si8_1proc PROPERTIES TIMEOUT 600 LABELS "e2e"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(NAME E2E_PtAu_SOC
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 $<TARGET_FILE:lynx_e2e_tests> --gtest_filter=EndToEnd.PtAu_SOC)
-set_tests_properties(E2E_PtAu_SOC PROPERTIES TIMEOUT 1800 LABELS "e2e")
+set_tests_properties(E2E_PtAu_SOC PROPERTIES TIMEOUT 1800 LABELS "e2e"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # =============================================================================
 # GPU tests

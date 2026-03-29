@@ -6,7 +6,9 @@
 #include <cassert>
 #include <mpi.h>
 
+#ifdef USE_MKL
 #include <mkl_dfti.h>
+#endif
 
 namespace lynx {
 
@@ -409,6 +411,21 @@ void ExchangePoissonSolver::setup(const FDGrid& grid, const Lattice& lattice,
     }
 }
 
+#ifndef USE_MKL
+// Stub implementations when MKL is not available (EXX requires MKL DFTI for FFT)
+void ExchangePoissonSolver::solve_batch(double*, int, double*) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch requires MKL (build with -DUSE_MKL=ON)");
+}
+void ExchangePoissonSolver::solve_batch_stress(double*, int, double*, int) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch_stress requires MKL");
+}
+void ExchangePoissonSolver::solve_batch_kpt(const Complex*, int, Complex*, int, int) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch_kpt requires MKL");
+}
+void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex*, int, Complex*, int, int, int) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch_kpt_stress requires MKL");
+}
+#else // USE_MKL
 // ---------------------------------------------------------------------------
 // Solve batch — gamma-point (real FFT)
 // ---------------------------------------------------------------------------
@@ -677,5 +694,6 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
 
     apply_phase_factor(sol, ncol, true, kpt_k, kpt_q);
 }
+#endif // USE_MKL
 
 } // namespace lynx
