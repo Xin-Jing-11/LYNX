@@ -478,6 +478,22 @@ int main(int argc, char** argv) {
                              (config.spin_type == lynx::SpinType::NonCollinear) ? 1 : 1;
             const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
             const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
+            // Compute mGGA stress on GPU if available (avoids D2H transfer of psi for stress)
+            const double* gpu_mgga_ptr = nullptr;
+            const double* gpu_dot_ptr = nullptr;
+            std::array<double, 6> gpu_mgga_stress = {};
+            double gpu_tau_vtau_dot = 0.0;
+#ifdef USE_CUDA
+            bool is_mgga = (config.xc == lynx::XCType::MGGA_SCAN ||
+                            config.xc == lynx::XCType::MGGA_RSCAN ||
+                            config.xc == lynx::XCType::MGGA_R2SCAN);
+            if (is_mgga && scf.gpu_runner()) {
+                scf.gpu_runner()->compute_mgga_stress(wfn, domain, grid, Nspin_calc,
+                                                       gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
+                gpu_mgga_ptr = gpu_mgga_stress.data();
+                gpu_dot_ptr = &gpu_tau_vtau_dot;
+            }
+#endif
             auto sigma = stress.compute(wfn, crystal, influence, nloc_influence, vnl,
                                         stencil, gradient, halo, domain, grid,
                                         scf.phi(), scf.density().rho_total().data(),
@@ -493,7 +509,8 @@ int main(int argc, char** argv) {
                                         Nspin_calc,
                                         has_nlcc ? rho_core.data() : nullptr,
                                         kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge, &kpoints, kpt_start, band_start,
-                                        scf.vtau(), scf.tau());
+                                        scf.vtau(), scf.tau(),
+                                        gpu_mgga_ptr, gpu_dot_ptr);
 
             // Add EXX stress for hybrid functionals
             if (lynx::is_hybrid(config.xc) && scf.exx().is_setup()) {

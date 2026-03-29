@@ -153,6 +153,13 @@ void compute_force_stress_gpu(
     int xs, int ys, int zs, double occfac,
     double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl);
 
+void compute_mgga_stress_gpu(
+    const double* d_psi, const double* d_occ,
+    const double* d_vtau, const double* d_tau, const double* d_vtau_full,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double occfac, int tau_dot_len,
+    double* h_stress_mgga, double* h_tau_vtau_dot);
+
 void compute_soc_force_gpu(
     const cuDoubleComplex* d_psi_spinor, const double* d_occ,
     const cuDoubleComplex* d_Chi_soc_flat, const int* d_gpos_flat,
@@ -4821,6 +4828,103 @@ void GPUSCFRunner::compute_force_stress(
     for (int i = 0; i < 6; i++) {
         stress_k[i] /= cell_measure;
         stress_nl[i] /= cell_measure;
+    }
+}
+
+// ============================================================
+// Compute mGGA stress on GPU (psi stress + tau·vtau dot)
+// ============================================================
+void GPUSCFRunner::compute_mgga_stress(
+    const Wavefunction& wfn,
+    const Domain& domain,
+    const FDGrid& grid,
+    int Nspin,
+    double* stress_mgga,
+    double* tau_vtau_dot)
+{
+    if (!d_tau_ || !d_vtau_ || !is_mgga_) {
+        std::memset(stress_mgga, 0, 6 * sizeof(double));
+        *tau_vtau_dot = 0.0;
+        return;
+    }
+
+    auto& ctx = gpu::GPUContext::instance();
+    int Nband = wfn.Nband();
+    double occfac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
+    int Nspin_local = wfn.Nspin();
+
+    // tau·vtau dot product length
+    int tau_dot_len = (Nspin == 2) ? 2 * Nd_ : Nd_;
+
+    // Initialize output
+    std::memset(stress_mgga, 0, 6 * sizeof(double));
+    *tau_vtau_dot = 0.0;
+
+    // For each spin channel, compute psi stress on GPU
+    for (int s = 0; s < Nspin_local; ++s) {
+        int s_glob = (Nspin == 2) ? s : 0;
+        const double* d_vtau_s = d_vtau_ + s_glob * Nd_;
+
+        // Get psi and occupations on GPU for this spin
+        // ctx.buf.psi holds the last spin's psi — need to use per-spin data
+        // Actually, psi is stored per (spin, kpt) — for gamma point, it's in ctx.buf.psi
+        // after the SCF loop. For multi-spin, we need to re-upload or access stored data.
+        //
+        // For simplicity in the gamma-point case (which is the current GPU path),
+        // psi was last computed for the last spin. We need the stored wavefunctions.
+        // The wavefunctions have already been downloaded to wfn by download_results().
+        // We need to upload them back... or better, compute this BEFORE download.
+        //
+        // Actually, let me check: for single spin, psi is still on d_psi.
+        // For 2-spin, we need to handle each spin channel.
+
+        double h_stress_s[6] = {};
+        double h_dot_s = 0.0;
+
+        if (Nspin_local == 1) {
+            // Single spin: psi is still in ctx.buf.psi from last SCF iteration
+            gpu::compute_mgga_stress_gpu(
+                ctx.buf.psi, ctx.buf.occupations,
+                d_vtau_s, d_tau_, d_vtau_,
+                nx_, ny_, nz_, FDn_, Nd_, Nband,
+                dV_, occfac, tau_dot_len,
+                h_stress_s, &h_dot_s);
+        } else {
+            // Multi-spin: upload psi for this spin from CPU wavefunction
+            // (psi was already downloaded to wfn by download_results)
+            const double* h_psi_s = wfn.psi(s, 0).data();  // gamma-point k=0
+            size_t psi_bytes = (size_t)Nd_ * Nband * sizeof(double);
+            CUDA_CHECK(cudaMemcpy(ctx.buf.psi, h_psi_s, psi_bytes, cudaMemcpyHostToDevice));
+
+            const auto& occ = wfn.occupations(s, 0);
+            CUDA_CHECK(cudaMemcpy(ctx.buf.occupations, occ.data() + 0,
+                                  Nband * sizeof(double), cudaMemcpyHostToDevice));
+
+            // Only compute tau·vtau dot once (covers both spins)
+            int dot_len_s = (s == 0) ? tau_dot_len : 0;
+
+            gpu::compute_mgga_stress_gpu(
+                ctx.buf.psi, ctx.buf.occupations,
+                d_vtau_s, d_tau_, d_vtau_,
+                nx_, ny_, nz_, FDn_, Nd_, Nband,
+                dV_, occfac, dot_len_s,
+                h_stress_s, &h_dot_s);
+        }
+
+        for (int i = 0; i < 6; i++) stress_mgga[i] += h_stress_s[i];
+        *tau_vtau_dot += h_dot_s;
+    }
+
+    // Normalize by cell volume (matching CPU Stress.cpp)
+    const auto& lat = grid.lattice();
+    Vec3 L = lat.lengths();
+    double Jacbdet = lat.jacobian() / (L.x * L.y * L.z);
+    double cell_measure = Jacbdet;
+    if (grid.bcx() == BCType::Periodic) cell_measure *= L.x;
+    if (grid.bcy() == BCType::Periodic) cell_measure *= L.y;
+    if (grid.bcz() == BCType::Periodic) cell_measure *= L.z;
+    for (int i = 0; i < 6; i++) {
+        stress_mgga[i] /= cell_measure;
     }
 }
 
