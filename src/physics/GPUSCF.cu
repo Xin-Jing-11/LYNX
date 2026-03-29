@@ -104,6 +104,13 @@ void laplacian_orth_v2_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c, double diag_coeff, int ncol);
 
+void laplacian_nonorth_gpu(
+    const double* d_x_ex, const double* d_V, double* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    double a, double b, double c, double diag_coeff,
+    bool has_xy, bool has_xz, bool has_yz, int ncol);
+
 void gradient_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
@@ -1428,9 +1435,16 @@ void GPUSCFRunner::poisson_op_cb(const double* d_x, double* d_Ax) {
     gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
-    gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
-        s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
-        -1.0, 0.0, 0.0, s->poisson_diag_, 1);
+    if (s->is_orth_) {
+        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, 0.0, s->poisson_diag_, 1);
+    } else {
+        gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, 0.0, s->poisson_diag_,
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1);
+    }
 }
 
 // ============================================================
@@ -1454,9 +1468,16 @@ void GPUSCFRunner::kerker_op_cb(const double* d_x, double* d_Ax) {
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
     constexpr double kTF2 = 1.0;
-    gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
-        s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
-        -1.0, 0.0, kTF2, s->kerker_diag_, 1);
+    if (s->is_orth_) {
+        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, kTF2, s->kerker_diag_, 1);
+    } else {
+        gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+            s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
+            -1.0, 0.0, kTF2, s->kerker_diag_,
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1);
+    }
 }
 
 // ============================================================
@@ -1908,9 +1929,16 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
         int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
         gpu::halo_exchange_gpu(d_f_wavg, ctx.buf.aar_x_ex,
             nx_, ny_, nz_, FDn_, 1, true, true, true);
-        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
-            nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
-            1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
+        if (is_orth_) {
+            gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
+                1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
+        } else {
+            gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
+                1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_,
+                has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_, 1);
+        }
     }
 
     // Kerker step 2: Solve (-Lap + kTF^2)*Pf = Lf via AAR
