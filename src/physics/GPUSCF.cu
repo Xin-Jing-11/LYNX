@@ -158,6 +158,7 @@ void compute_mgga_stress_gpu(
     const double* d_vtau, const double* d_tau, const double* d_vtau_full,
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double occfac, int tau_dot_len,
+    bool is_orth, const double* uvec_inv,
     double* h_stress_mgga, double* h_tau_vtau_dot);
 
 void compute_soc_force_gpu(
@@ -5197,6 +5198,15 @@ void GPUSCFRunner::compute_mgga_stress(
     // tau·vtau dot product length
     int tau_dot_len = (Nspin == 2) ? 2 * Nd_ : Nd_;
 
+    // Non-orthogonal cell support: pass uvec_inv for gradient transformation
+    bool is_orth = grid.lattice().is_orthogonal();
+    const auto& uinv = grid.lattice().lat_uvec_inv();
+    double uvec_inv_flat[9] = {
+        uinv(0,0), uinv(0,1), uinv(0,2),
+        uinv(1,0), uinv(1,1), uinv(1,2),
+        uinv(2,0), uinv(2,1), uinv(2,2)
+    };
+
     // Initialize output
     std::memset(stress_mgga, 0, 6 * sizeof(double));
     *tau_vtau_dot = 0.0;
@@ -5205,19 +5215,6 @@ void GPUSCFRunner::compute_mgga_stress(
     for (int s = 0; s < Nspin_local; ++s) {
         int s_glob = (Nspin == 2) ? s : 0;
         const double* d_vtau_s = d_vtau_ + s_glob * Nd_;
-
-        // Get psi and occupations on GPU for this spin
-        // ctx.buf.psi holds the last spin's psi — need to use per-spin data
-        // Actually, psi is stored per (spin, kpt) — for gamma point, it's in ctx.buf.psi
-        // after the SCF loop. For multi-spin, we need to re-upload or access stored data.
-        //
-        // For simplicity in the gamma-point case (which is the current GPU path),
-        // psi was last computed for the last spin. We need the stored wavefunctions.
-        // The wavefunctions have already been downloaded to wfn by download_results().
-        // We need to upload them back... or better, compute this BEFORE download.
-        //
-        // Actually, let me check: for single spin, psi is still on d_psi.
-        // For 2-spin, we need to handle each spin channel.
 
         double h_stress_s[6] = {};
         double h_dot_s = 0.0;
@@ -5229,13 +5226,25 @@ void GPUSCFRunner::compute_mgga_stress(
                 d_vtau_s, d_tau_, d_vtau_,
                 nx_, ny_, nz_, FDn_, Nd_, Nband,
                 dV_, occfac, tau_dot_len,
+                is_orth, uvec_inv_flat,
                 h_stress_s, &h_dot_s);
         } else {
             // Multi-spin: upload psi for this spin from CPU wavefunction
             // (psi was already downloaded to wfn by download_results)
-            const double* h_psi_s = wfn.psi(s, 0).data();  // gamma-point k=0
-            size_t psi_bytes = (size_t)Nd_ * Nband * sizeof(double);
-            CUDA_CHECK(cudaMemcpy(ctx.buf.psi, h_psi_s, psi_bytes, cudaMemcpyHostToDevice));
+            // CPU NDArray has padded leading dimension (ld >= Nd), so copy band by band
+            const auto& psi_mat = wfn.psi(s, 0);
+            int ld_cpu = psi_mat.ld();
+            if (ld_cpu == Nd_) {
+                CUDA_CHECK(cudaMemcpy(ctx.buf.psi, psi_mat.data(),
+                                      (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+            } else {
+                // Strided copy: CPU stride ld_cpu, GPU stride Nd_
+                CUDA_CHECK(cudaMemcpy2D(
+                    ctx.buf.psi, (size_t)Nd_ * sizeof(double),           // dst, dpitch
+                    psi_mat.data(), (size_t)ld_cpu * sizeof(double),     // src, spitch
+                    (size_t)Nd_ * sizeof(double), Nband,                 // width, height
+                    cudaMemcpyHostToDevice));
+            }
 
             const auto& occ = wfn.occupations(s, 0);
             CUDA_CHECK(cudaMemcpy(ctx.buf.occupations, occ.data() + 0,
@@ -5249,6 +5258,7 @@ void GPUSCFRunner::compute_mgga_stress(
                 d_vtau_s, d_tau_, d_vtau_,
                 nx_, ny_, nz_, FDn_, Nd_, Nband,
                 dV_, occfac, dot_len_s,
+                is_orth, uvec_inv_flat,
                 h_stress_s, &h_dot_s);
         }
 
@@ -5264,9 +5274,11 @@ void GPUSCFRunner::compute_mgga_stress(
     if (grid.bcx() == BCType::Periodic) cell_measure *= L.x;
     if (grid.bcy() == BCType::Periodic) cell_measure *= L.y;
     if (grid.bcz() == BCType::Periodic) cell_measure *= L.z;
+
     for (int i = 0; i < 6; i++) {
         stress_mgga[i] /= cell_measure;
     }
+
 }
 
 // ============================================================

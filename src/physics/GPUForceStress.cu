@@ -1325,6 +1325,72 @@ void compute_soc_stress_gpu(
 // Like kinetic_stress_kernel but weighted by vtau:
 // sk[voigt] = -occfac * dV * sum_n(g_n * sum_i(vtau[i] * dpsi_a[i,n] * dpsi_b[i,n]))
 // ============================================================
+// mGGA psi stress kernel for non-orthogonal cells.
+// Computes all 6 Voigt components in one launch, transforming lattice-frame
+// gradients to Cartesian via uvec_inv.
+// One block per band; threads reduce over grid points.
+__global__ void mgga_psi_stress_kernel_nonorth(
+    const double* __restrict__ d_Dpsi_0,   // (Nd, Nband) gradient along lattice dir 0
+    const double* __restrict__ d_Dpsi_1,   // (Nd, Nband) gradient along lattice dir 1
+    const double* __restrict__ d_Dpsi_2,   // (Nd, Nband) gradient along lattice dir 2
+    const double* __restrict__ d_vtau,     // (Nd) vtau for this spin
+    const double* __restrict__ d_occ,      // (Nband) occupations
+    double* __restrict__ d_stress,         // [6] Voigt stress output (xx,xy,xz,yy,yz,zz)
+    int Nd, int Nband,
+    double neg_occfac_dV,
+    // uvec_inv stored row-major: [a*3+j] = uvec_inv(a,j)
+    double uinv00, double uinv01, double uinv02,
+    double uinv10, double uinv11, double uinv12,
+    double uinv20, double uinv21, double uinv22)
+{
+    int band = blockIdx.x;
+    if (band >= Nband) return;
+
+    double g_n = d_occ[band];
+
+    extern __shared__ double sdata[];
+
+    // Each thread accumulates 6 Voigt sums
+    double s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0;
+
+    const double* p0 = d_Dpsi_0 + band * Nd;
+    const double* p1 = d_Dpsi_1 + band * Nd;
+    const double* p2 = d_Dpsi_2 + band * Nd;
+
+    for (int i = threadIdx.x; i < Nd; i += blockDim.x) {
+        double v = d_vtau[i];
+        double d0 = p0[i], d1 = p1[i], d2 = p2[i];
+
+        // Transform to Cartesian: ga = uvec_inv(a,:) · (d0, d1, d2)
+        double gx = uinv00*d0 + uinv01*d1 + uinv02*d2;
+        double gy = uinv10*d0 + uinv11*d1 + uinv12*d2;
+        double gz = uinv20*d0 + uinv21*d1 + uinv22*d2;
+
+        s0 += v * gx * gx;  // xx
+        s1 += v * gx * gy;  // xy
+        s2 += v * gx * gz;  // xz
+        s3 += v * gy * gy;  // yy
+        s4 += v * gy * gz;  // yz
+        s5 += v * gz * gz;  // zz
+    }
+
+    // Reduce each Voigt component sequentially using shared memory
+    double sums[6] = {s0, s1, s2, s3, s4, s5};
+    for (int v = 0; v < 6; v++) {
+        sdata[threadIdx.x] = sums[v];
+        __syncthreads();
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (threadIdx.x < stride)
+                sdata[threadIdx.x] += sdata[threadIdx.x + stride];
+            __syncthreads();
+        }
+        if (threadIdx.x == 0) {
+            atomicAdd(&d_stress[v], neg_occfac_dV * g_n * sdata[0]);
+        }
+    }
+}
+
+// mGGA psi stress kernel for orthogonal cells (single Voigt pair per launch).
 __global__ void mgga_psi_stress_kernel(
     const double* __restrict__ d_Dpsi_a,   // (Nd, Nband) gradient in direction a
     const double* __restrict__ d_Dpsi_b,   // (Nd, Nband) gradient in direction b
@@ -1406,6 +1472,8 @@ void compute_mgga_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double occfac,
     int tau_dot_len,           // number of elements for tau·vtau dot (Nd for nospin, 2*Nd for spin)
+    bool is_orth,              // true if orthogonal cell
+    const double* uvec_inv,    // [9] row-major uvec_inv matrix (only used if !is_orth)
     // Output (host)
     double* h_stress_mgga,     // [6] mGGA psi stress (Voigt)
     double* h_tau_vtau_dot)    // scalar: ∫ τ·vtau dV
@@ -1446,24 +1514,35 @@ void compute_mgga_stress_gpu(
 
     // Compute mGGA psi stress: 6 Voigt pairs
     {
-        const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
-        int voigt_a[6] = {0, 0, 0, 1, 1, 2};
-        int voigt_b[6] = {0, 1, 2, 1, 2, 2};
-
         int bs = 256;
         size_t smem = bs * sizeof(double);
         double neg_occfac_dV = -occfac * dV;
 
-        for (int v = 0; v < 6; ++v) {
-            mgga_psi_stress_kernel<<<Nband, bs, smem>>>(
-                d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
-                d_vtau, d_occ, d_smgga + v, Nd, Nband, neg_occfac_dV);
+        if (is_orth) {
+            const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
+            int voigt_a[6] = {0, 0, 0, 1, 1, 2};
+            int voigt_b[6] = {0, 1, 2, 1, 2, 2};
+
+            for (int v = 0; v < 6; ++v) {
+                mgga_psi_stress_kernel<<<Nband, bs, smem>>>(
+                    d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
+                    d_vtau, d_occ, d_smgga + v, Nd, Nband, neg_occfac_dV);
+                CUDA_CHECK(cudaGetLastError());
+            }
+        } else {
+            // Non-orthogonal: single kernel computes all 6 Voigt with uvec_inv transform
+            mgga_psi_stress_kernel_nonorth<<<Nband, bs, smem>>>(
+                d_Dpsi_x, d_Dpsi_y, d_Dpsi_z,
+                d_vtau, d_occ, d_smgga, Nd, Nband, neg_occfac_dV,
+                uvec_inv[0], uvec_inv[1], uvec_inv[2],
+                uvec_inv[3], uvec_inv[4], uvec_inv[5],
+                uvec_inv[6], uvec_inv[7], uvec_inv[8]);
             CUDA_CHECK(cudaGetLastError());
         }
     }
 
-    // Compute tau·vtau dot product
-    {
+    // Compute tau·vtau dot product (skip when tau_dot_len==0, e.g. spin channel 1)
+    if (tau_dot_len > 0) {
         int bs = 256;
         int nblocks = std::min((tau_dot_len + bs - 1) / bs, 256);
         size_t smem = bs * sizeof(double);
