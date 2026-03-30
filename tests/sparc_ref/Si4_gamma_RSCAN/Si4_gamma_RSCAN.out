@@ -1,0 +1,151 @@
+***************************************************************************
+*                       SPARC (version Dec 11, 2024)                      *
+*   Copyright (c) 2020 Material Physics & Mechanics Group, Georgia Tech   *
+*           Distributed under GNU General Public License 3 (GPL)          *
+*                   Start time: Sun Mar 29 16:44:15 2026                  *
+***************************************************************************
+                           Input parameters                                
+***************************************************************************
+LATVEC_SCALE: 10 10.26 10.5 
+LATVEC:
+1.000000000000000 0.000000000000000 0.000000000000000 
+0.000000000000000 1.000000000000000 0.000000000000000 
+0.000000000000000 0.000000000000000 1.000000000000000 
+FD_GRID: 25 26 27
+FD_ORDER: 12
+BC: P P P
+KPOINT_GRID: 1 1 1
+KPOINT_SHIFT: 0 0 0
+SPIN_TYP: 0
+ELEC_TEMP_TYPE: Gaussian
+SMEARING: 0.007349864435
+EXCHANGE_CORRELATION: RSCAN
+NSTATES: 15
+CHEB_DEGREE: 20
+CHEFSI_BOUND_FLAG: 0
+CALC_STRESS: 1
+MAXIT_SCF: 100
+MINIT_SCF: 2
+MAXIT_POISSON: 3000
+TOL_SCF: 1.00E-06
+POISSON_SOLVER: AAR
+TOL_POISSON: 1.00E-08
+TOL_LANCZOS: 1.00E-02
+TOL_PSEUDOCHARGE: 1.00E-09
+MIXING_VARIABLE: density
+MIXING_PRECOND: kerker
+TOL_PRECOND: 1.56E-04
+PRECOND_KERKER_KTF: 1
+PRECOND_KERKER_THRESH: 0.1
+MIXING_PARAMETER: 0.3
+MIXING_HISTORY: 7
+PULAY_FREQUENCY: 1
+PULAY_RESTART: 0
+REFERENCE_CUTOFF: 0.5
+RHO_TRIGGER: 4
+NUM_CHEFSI: 1
+FIX_RAND: 0
+VERBOSITY: 1
+PRINT_FORCES: 1
+PRINT_ATOMS: 1
+PRINT_EIGEN: 0
+PRINT_DENSITY: 0
+PRINT_ENERGY_DENSITY: 0
+OUTPUT_FILE: Si4_gamma_RSCAN
+***************************************************************************
+                                Cell                                       
+***************************************************************************
+Lattice vectors (Bohr):
+10.000000000000000 0.000000000000000 0.000000000000000 
+0.000000000000000 10.260000000000000 0.000000000000000 
+0.000000000000000 0.000000000000000 10.500000000000000 
+Volume: 1.0773000000E+03 (Bohr^3)
+Density: 1.0428107305E-01 (amu/Bohr^3), 1.1685604675E+00 (g/cc)
+***************************************************************************
+                           Parallelization                                 
+***************************************************************************
+NP_SPIN_PARAL: 1
+NP_KPOINT_PARAL: 1
+NP_BAND_PARAL: 1
+NP_DOMAIN_PARAL: 1 1 1
+NP_DOMAIN_PHI_PARAL: 1 1 1
+EIG_SERIAL_MAXNS: 1500
+***************************************************************************
+                             Initialization                                
+***************************************************************************
+Number of processors               :  1
+Mesh spacing in x-direction        :  0.4 (Bohr)
+Mesh spacing in y-direction        :  0.394615 (Bohr)
+Mesh spacing in z-direction        :  0.388889 (Bohr)
+Number of symmetry adapted k-points:  1
+Output printed to                  :  Si4_gamma_RSCAN.out
+Total number of atom types         :  1
+Total number of atoms              :  4
+Total number of electrons          :  16
+Atom type 1  (valence electrons)   :  Si 4
+Pseudopotential                    :  /home/xx/Desktop/dev_SPARC_GPU/tests/xc/mgga_tests/Si4_kpt_scan/Si-4-2.4_LDA.psp8
+Atomic mass                        :  28.0855
+Pseudocharge radii of atom type 1  :  8.00 7.89 8.17 (x, y, z dir)
+Number of atoms of type 1          :  4
+Estimated total memory usage       :  19.59 MB
+Estimated memory per processor     :  19.59 MB
+===================================================================
+                    Self Consistent Field (SCF#1)                     
+===================================================================
+Iteration     Free Energy (Ha/atom)   SCF Error        Timing (sec)
+1            -3.8726971344E+00        1.846E-01        1.855
+2            -3.8707100854E+00        1.331E-01        1.130
+3            -3.8735830915E+00        9.868E-02        1.398
+4            -3.8736637551E+00        6.943E-02        1.836
+5            -3.8733398203E+00        3.818E-02        2.256
+6            -3.8734268551E+00        2.164E-02        2.071
+7            -3.8736748265E+00        1.313E-02        2.039
+8            -3.8737803356E+00        5.284E-03        2.296
+9            -3.8738476442E+00        2.934E-03        2.170
+10           -3.8738267914E+00        2.199E-03        2.161
+11           -3.8738010809E+00        1.119E-03        2.262
+12           -3.8738033440E+00        6.341E-04        2.317
+13           -3.8738058295E+00        4.639E-04        2.175
+14           -3.8738035676E+00        2.040E-04        2.143
+15           -3.8738065474E+00        1.306E-04        2.195
+16           -3.8738058628E+00        8.773E-05        2.143
+17           -3.8738058437E+00        4.806E-05        2.163
+18           -3.8738063857E+00        1.741E-05        2.294
+19           -3.8738063395E+00        1.252E-05        1.871
+20           -3.8738063063E+00        6.471E-06        1.794
+21           -3.8738062530E+00        3.304E-06        1.824
+22           -3.8738061899E+00        1.995E-06        1.831
+23           -3.8738061806E+00        1.136E-06        1.798
+24           -3.8738062323E+00        6.599E-07        1.738
+Total number of SCF: 24    
+====================================================================
+                    Energy and force calculation                    
+====================================================================
+Free energy per atom               : -3.8738062323E+00 (Ha/atom)
+Total free energy                  : -1.5495224929E+01 (Ha)
+Band structure energy              : -1.9210589585E+00 (Ha)
+Exchange correlation energy        : -4.4388308687E+00 (Ha)
+Self and correction energy         : -5.7571085724E+01 (Ha)
+-Entropy*kb*T                      : -1.7359319979E-02 (Ha)
+Fermi level                        :  6.1995107778E-03 (Ha)
+RMS force                          :  2.2627608235E-02 (Ha/Bohr)
+Maximum force                      :  2.2640019130E-02 (Ha/Bohr)
+Time for force calculation         :  0.197 (sec)
+Pressure                           :  1.1421580615E-01 (GPa)
+Maximum stress                     :  1.3906236565E+01 (GPa)
+Time for stress calculation        :  0.580 (sec)
+***************************************************************************
+                               Timing info                                 
+***************************************************************************
+Total walltime                     :  48.737 sec
+___________________________________________________________________________
+
+***************************************************************************
+*             Material Physics & Mechanics Group, Georgia Tech            *
+*                       PI: Phanish Suryanarayana                         *
+*               List of contributors: See the documentation               *
+*         Citation: See README.md or the documentation for details        *
+*  Acknowledgements: U.S. DOE SC (DE-SC0019410), U.S. DOE NNSA (ASC)      *
+*      {Preliminary developments: U.S. NSF (1333500,1663244,1553212)}     *
+***************************************************************************
+                                                                           

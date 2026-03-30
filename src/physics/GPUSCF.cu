@@ -404,6 +404,64 @@ __global__ void sigma_kernel(
     }
 }
 
+// sigma = |grad(rho)|^2 with lapcT metric tensor for non-orthogonal cells
+__global__ void sigma_nonorth_kernel(
+    const double* __restrict__ Drho_x,
+    const double* __restrict__ Drho_y,
+    const double* __restrict__ Drho_z,
+    double* __restrict__ sigma, int N,
+    double L00, double L11, double L22, double L01, double L02, double L12)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
+        sigma[i] = L00*dx*dx + L11*dy*dy + L22*dz*dz
+                 + 2.0*L01*dx*dy + 2.0*L02*dx*dz + 2.0*L12*dy*dz;
+    }
+}
+
+// Non-orth GGA flux: fx = v2xc * (lapcT * [dx,dy,dz]) for all 3 directions at once
+// Overwrites Drho_x/y/z in-place with the flux components
+__global__ void lapcT_flux_kernel(
+    double* __restrict__ Drho_x,
+    double* __restrict__ Drho_y,
+    double* __restrict__ Drho_z,
+    const double* __restrict__ v2xc, int N,
+    double L00, double L01, double L02,
+    double L10, double L11, double L12,
+    double L20, double L21, double L22)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
+        double v = v2xc[i];
+        Drho_x[i] = v * (L00*dx + L01*dy + L02*dz);
+        Drho_y[i] = v * (L10*dx + L11*dy + L12*dz);
+        Drho_z[i] = v * (L20*dx + L21*dy + L22*dz);
+    }
+}
+
+// Non-orth GGA flux for 3 columns (spin), overwrites in-place
+__global__ void lapcT_flux_3col_kernel(
+    double* __restrict__ Drho_x,
+    double* __restrict__ Drho_y,
+    double* __restrict__ Drho_z,
+    const double* __restrict__ v2xc, int N, int ncol,
+    double L00, double L01, double L02,
+    double L10, double L11, double L12,
+    double L20, double L21, double L22)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_N = N * ncol;
+    if (idx < total_N) {
+        double dx = Drho_x[idx], dy = Drho_y[idx], dz = Drho_z[idx];
+        double v = v2xc[idx];
+        Drho_x[idx] = v * (L00*dx + L01*dy + L02*dz);
+        Drho_y[idx] = v * (L10*dx + L11*dy + L12*dz);
+        Drho_z[idx] = v * (L20*dx + L21*dy + L22*dz);
+    }
+}
+
 // f[i] *= v2xc[i]
 __global__ void v2xc_scale_kernel(
     double* __restrict__ f,
@@ -449,6 +507,23 @@ __global__ void tau_accumulate_kernel(
     tau[i] += weight * (dpsi_x[i]*dpsi_x[i] + dpsi_y[i]*dpsi_y[i] + dpsi_z[i]*dpsi_z[i]);
 }
 
+// mGGA tau accumulation kernel (real, non-orthogonal) — applies lapcT metric tensor
+__global__ void tau_accumulate_nonorth_kernel(
+    const double* __restrict__ dpsi_x,
+    const double* __restrict__ dpsi_y,
+    const double* __restrict__ dpsi_z,
+    double* __restrict__ tau,
+    double weight, int N,
+    double L00, double L11, double L22, double L01, double L02, double L12)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
+    double val = L00*dx*dx + L11*dy*dy + L22*dz*dz
+               + 2.0*L01*dx*dy + 2.0*L02*dx*dz + 2.0*L12*dy*dz;
+    tau[i] += weight * val;
+}
+
 // mGGA tau accumulation kernel (complex, k-point)
 __global__ void tau_accumulate_z_kernel(
     const cuDoubleComplex* __restrict__ dpsi_x,
@@ -463,6 +538,63 @@ __global__ void tau_accumulate_z_kernel(
     double dy2 = dpsi_y[i].x*dpsi_y[i].x + dpsi_y[i].y*dpsi_y[i].y;
     double dz2 = dpsi_z[i].x*dpsi_z[i].x + dpsi_z[i].y*dpsi_z[i].y;
     tau[i] += weight * (dx2 + dy2 + dz2);
+}
+
+// mGGA tau accumulation kernel (complex, non-orthogonal) — applies lapcT metric tensor
+// tau += weight * Re(conj(∇ψ) · lapcT · ∇ψ)
+__global__ void tau_accumulate_z_nonorth_kernel(
+    const cuDoubleComplex* __restrict__ dpsi_x,
+    const cuDoubleComplex* __restrict__ dpsi_y,
+    const cuDoubleComplex* __restrict__ dpsi_z,
+    double* __restrict__ tau,
+    double weight, int N,
+    double L00, double L11, double L22, double L01, double L02, double L12)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    // |dx|², |dy|², |dz|²
+    double ndx = dpsi_x[i].x*dpsi_x[i].x + dpsi_x[i].y*dpsi_x[i].y;
+    double ndy = dpsi_y[i].x*dpsi_y[i].x + dpsi_y[i].y*dpsi_y[i].y;
+    double ndz = dpsi_z[i].x*dpsi_z[i].x + dpsi_z[i].y*dpsi_z[i].y;
+    // Re(conj(dx)*dy) = dx.re*dy.re + dx.im*dy.im
+    double cdxy = dpsi_x[i].x*dpsi_y[i].x + dpsi_x[i].y*dpsi_y[i].y;
+    double cdxz = dpsi_x[i].x*dpsi_z[i].x + dpsi_x[i].y*dpsi_z[i].y;
+    double cdyz = dpsi_y[i].x*dpsi_z[i].x + dpsi_y[i].y*dpsi_z[i].y;
+    double val = L00*ndx + L11*ndy + L22*ndz + 2.0*L01*cdxy + 2.0*L02*cdxz + 2.0*L12*cdyz;
+    tau[i] += weight * val;
+}
+
+// mGGA Hamiltonian: apply lapcT row and vtau to 3 gradient components (real)
+// out[i] = vtau[i] * (L0*dpsi_x[i] + L1*dpsi_y[i] + L2*dpsi_z[i])
+__global__ void vtau_lapcT_multiply_kernel(
+    const double* __restrict__ dpsi_x,
+    const double* __restrict__ dpsi_y,
+    const double* __restrict__ dpsi_z,
+    const double* __restrict__ vtau,
+    double* __restrict__ out, int N,
+    double L0, double L1, double L2)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) out[i] = vtau[i] * (L0*dpsi_x[i] + L1*dpsi_y[i] + L2*dpsi_z[i]);
+}
+
+// mGGA Hamiltonian: apply lapcT row and vtau to 3 gradient components (complex)
+// out[i] = vtau[i] * (L0*dpsi_x[i] + L1*dpsi_y[i] + L2*dpsi_z[i])
+__global__ void vtau_lapcT_multiply_z_kernel(
+    const cuDoubleComplex* __restrict__ dpsi_x,
+    const cuDoubleComplex* __restrict__ dpsi_y,
+    const cuDoubleComplex* __restrict__ dpsi_z,
+    const double* __restrict__ vtau,
+    cuDoubleComplex* __restrict__ out, int N,
+    double L0, double L1, double L2)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double re = L0*dpsi_x[i].x + L1*dpsi_y[i].x + L2*dpsi_z[i].x;
+        double im = L0*dpsi_x[i].y + L1*dpsi_y[i].y + L2*dpsi_z[i].y;
+        out[i].x = vtau[i] * re;
+        out[i].y = vtau[i] * im;
+    }
 }
 
 // mGGA Hamiltonian: multiply gradient component by vtau (real)
@@ -639,6 +771,23 @@ __global__ void sigma_3col_kernel(
     if (idx < total_N) {
         double dx = Drho_x[idx], dy = Drho_y[idx], dz = Drho_z[idx];
         sigma[idx] = dx*dx + dy*dy + dz*dz;
+    }
+}
+
+// sigma = |grad|^2 with lapcT for 3 columns (non-orthogonal spin)
+__global__ void sigma_3col_nonorth_kernel(
+    const double* __restrict__ Drho_x,
+    const double* __restrict__ Drho_y,
+    const double* __restrict__ Drho_z,
+    double* __restrict__ sigma, int N, int ncol,
+    double L00, double L11, double L22, double L01, double L02, double L12)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_N = N * ncol;
+    if (idx < total_N) {
+        double dx = Drho_x[idx], dy = Drho_y[idx], dz = Drho_z[idx];
+        sigma[idx] = L00*dx*dx + L11*dy*dy + L22*dz*dz
+                   + 2.0*L01*dx*dy + 2.0*L02*dx*dz + 2.0*L12*dy*dz;
     }
 }
 
@@ -1121,7 +1270,7 @@ void GPUSCFRunner::hamiltonian_apply_cb(
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
     }
 
-    // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * grad(psi))
+    // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
     if (s->d_vtau_active_) {
         auto& ctx = gpu::GPUContext::instance();
         int Nd = s->Nd_;
@@ -1129,7 +1278,6 @@ void GPUSCFRunner::hamiltonian_apply_cb(
         int bs = 256;
         int gs = gpu::ceildiv(Nd, bs);
 
-        // Use persistent buffers (not scratch pool) to avoid memory pressure
         double* d_dpsi   = s->d_mgga_dpsi_;
         double* d_vtdpsi = s->d_mgga_vtdpsi_;
         double* d_div    = s->d_mgga_div_;
@@ -1141,17 +1289,38 @@ void GPUSCFRunner::hamiltonian_apply_cb(
 
             CUDA_CHECK(cudaMemset(d_div, 0, Nd * sizeof(double)));
 
-            // For each direction: halo(psi) -> gradient -> multiply by vtau -> halo(product) -> gradient -> accumulate
-            for (int dir = 0; dir < 3; dir++) {
-                // Halo exchange psi (fresh each direction to avoid buffer conflicts)
+            if (s->is_orth_) {
+                // Orthogonal: direction-by-direction (original path)
+                for (int dir = 0; dir < 3; dir++) {
+                    gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                    gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    vtau_multiply_kernel<<<gs, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd);
+                    gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                    gpu::gradient_gpu(d_vt_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    double one = 1.0;
+                    cublasDaxpy(ctx.cublas, Nd, &one, d_dpsi, 1, d_div, 1);
+                }
+            } else {
+                // Non-orthogonal: compute all 3 gradients, then form flux with lapcT
+                double* d_dpsi_x = d_dpsi;  // reuse existing buffer
+                double* d_dpsi_y = s->d_mgga_dpsi_y_;
+                double* d_dpsi_zr = s->d_mgga_dpsi_z_r_;
+                // Compute all 3 gradient components
                 gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                vtau_multiply_kernel<<<gs, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd);
-                gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                gpu::gradient_gpu(d_vt_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                // Accumulate: div += d2(vtau * dpsi)/ddir^2
-                double one = 1.0;
-                cublasDaxpy(ctx.cublas, Nd, &one, d_dpsi, 1, d_div, 1);
+                gpu::gradient_gpu(d_x_ex, d_dpsi_x, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, 1);
+                gpu::gradient_gpu(d_x_ex, d_dpsi_y, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, 1);
+                gpu::gradient_gpu(d_x_ex, d_dpsi_zr, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, 1);
+                // For each direction: flux_dir = vtau * (lapcT[dir] · grad_psi), then divergence
+                // Write divergence to d_vtdpsi to avoid overwriting gradient buffers
+                for (int dir = 0; dir < 3; dir++) {
+                    vtau_lapcT_multiply_kernel<<<gs, bs>>>(d_dpsi_x, d_dpsi_y, d_dpsi_zr,
+                        s->d_vtau_active_, d_vtdpsi, Nd,
+                        s->lapcT_[dir*3+0], s->lapcT_[dir*3+1], s->lapcT_[dir*3+2]);
+                    gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+                    gpu::gradient_gpu(d_vt_ex, d_vtdpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    double one = 1.0;
+                    cublasDaxpy(ctx.cublas, Nd, &one, d_vtdpsi, 1, d_div, 1);
+                }
             }
 
             // Hpsi -= 0.5 * div
@@ -1204,7 +1373,7 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
             s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
     }
 
-    // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * grad(psi))
+    // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
     if (s->d_vtau_active_) {
         auto& ctx = gpu::GPUContext::instance();
         int Nd = s->Nd_;
@@ -1212,7 +1381,6 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
         int bs = 256;
         int gs = gpu::ceildiv(Nd, bs);
 
-        // Use persistent buffers
         cuDoubleComplex* d_dpsi_z   = (cuDoubleComplex*)s->d_mgga_dpsi_z_;
         cuDoubleComplex* d_vtdpsi_z = (cuDoubleComplex*)s->d_mgga_vtdpsi_z_;
         cuDoubleComplex* d_div_z    = (cuDoubleComplex*)s->d_mgga_div_z_;
@@ -1224,18 +1392,42 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
 
             CUDA_CHECK(cudaMemset(d_div_z, 0, Nd * sizeof(cuDoubleComplex)));
 
-            for (int dir = 0; dir < 3; dir++) {
-                // Halo exchange psi (fresh each direction)
+            if (s->is_orth_) {
+                // Orthogonal: direction-by-direction
+                for (int dir = 0; dir < 3; dir++) {
+                    gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                    gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
+                    gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                    gpu::gradient_z_gpu(d_vt_ex_z, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    cuDoubleComplex one = {1.0, 0.0};
+                    cublasZaxpy(ctx.cublas, Nd, &one, d_dpsi_z, 1, d_div_z, 1);
+                }
+            } else {
+                // Non-orthogonal: compute all 3 gradients, then apply lapcT for flux
+                cuDoubleComplex* d_dpsi_xz = (cuDoubleComplex*)s->d_mgga_dpsi_z_;
+                cuDoubleComplex* d_dpsi_yz = (cuDoubleComplex*)s->d_mgga_dpsi_yz_;
+                cuDoubleComplex* d_dpsi_zz = (cuDoubleComplex*)s->d_mgga_dpsi_zz_;
+                // Compute all 3 gradient components
                 gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
                                          true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
-                gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
-                gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
-                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
-                gpu::gradient_z_gpu(d_vt_ex_z, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                // Accumulate: div += d2(vtau * dpsi)/ddir^2
-                cuDoubleComplex one = {1.0, 0.0};
-                cublasZaxpy(ctx.cublas, Nd, &one, d_dpsi_z, 1, d_div_z, 1);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_xz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, 1);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_yz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, 1);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_zz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, 1);
+                // For each direction: flux_dir = vtau * (lapcT[dir] · grad_psi), then divergence
+                for (int dir = 0; dir < 3; dir++) {
+                    vtau_lapcT_multiply_z_kernel<<<gs, bs>>>(d_dpsi_xz, d_dpsi_yz, d_dpsi_zz,
+                        s->d_vtau_active_, d_vtdpsi_z, Nd,
+                        s->lapcT_[dir*3+0], s->lapcT_[dir*3+1], s->lapcT_[dir*3+2]);
+                    gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
+                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                    // Write divergence output to d_vtdpsi_z (flux already consumed by halo exchange)
+                    gpu::gradient_z_gpu(d_vt_ex_z, d_vtdpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    cuDoubleComplex one = {1.0, 0.0};
+                    cublasZaxpy(ctx.cublas, Nd, &one, d_vtdpsi_z, 1, d_div_z, 1);
+                }
             }
 
             // Hpsi -= 0.5 * div
@@ -1541,8 +1733,13 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         gpu::gradient_gpu(d_x_ex, d_Drho_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
         gpu::gradient_gpu(d_x_ex, d_Drho_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
 
-        // sigma = |nabla rho|^2
-        sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
+        // sigma = |nabla rho|^2 (with metric tensor for non-orth cells)
+        if (is_orth_) {
+            sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
+        } else {
+            sigma_nonorth_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd,
+                lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
+        }
 
         if (is_mgga_ && tau_valid_) {
             if (xc_type_ == XCType::MGGA_SCAN) {
@@ -1560,11 +1757,19 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
             gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
         }
 
-        // Divergence correction: Vxc += -div(v2xc * nabla rho)
-        // Scale gradients by v2xc (in place)
-        v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_x, d_v2xc, Nd);
-        v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_y, d_v2xc, Nd);
-        v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_z, d_v2xc, Nd);
+        // Divergence correction: Vxc += -div(v2xc * lapcT * nabla rho)
+        // For orth: flux_dir = v2xc * Drho_dir (identity metric)
+        // For non-orth: flux = v2xc * (lapcT * [dx,dy,dz]) (matrix-vector product)
+        if (is_orth_) {
+            v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_x, d_v2xc, Nd);
+            v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_y, d_v2xc, Nd);
+            v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_z, d_v2xc, Nd);
+        } else {
+            lapcT_flux_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd,
+                lapcT_[0], lapcT_[1], lapcT_[2],
+                lapcT_[3], lapcT_[4], lapcT_[5],
+                lapcT_[6], lapcT_[7], lapcT_[8]);
+        }
 
         // Process each direction: halo -> gradient -> subtract from Vxc
         double* d_DDrho = d_sigma;  // reuse sigma buffer
@@ -1644,9 +1849,14 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
                               nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
         }
 
-        // sigma for 3 columns
+        // sigma for 3 columns (with metric tensor for non-orth)
         int grid3 = gpu::ceildiv(3 * Nd, bs);
-        sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
+        if (is_orth_) {
+            sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
+        } else {
+            sigma_3col_nonorth_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3,
+                lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
+        }
 
         if (is_mgga_ && tau_valid_) {
             if (xc_type_ == XCType::MGGA_SCAN) {
@@ -1677,10 +1887,18 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         }
 
         // Divergence correction for 3 columns
-        // Scale: Drho_dir[col] *= v2xc[col]
-        v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_v2xc, Nd, 3);
-        v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_y, d_v2xc, Nd, 3);
-        v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_z, d_v2xc, Nd, 3);
+        // For orth: flux_dir[col] = v2xc[col] * Drho_dir[col]
+        // For non-orth: flux = v2xc * (lapcT * [dx,dy,dz]) per column
+        if (is_orth_) {
+            v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_v2xc, Nd, 3);
+            v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_y, d_v2xc, Nd, 3);
+            v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_z, d_v2xc, Nd, 3);
+        } else {
+            lapcT_flux_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd, 3,
+                lapcT_[0], lapcT_[1], lapcT_[2],
+                lapcT_[3], lapcT_[4], lapcT_[5],
+                lapcT_[6], lapcT_[7], lapcT_[8]);
+        }
 
         // For each direction and each column, compute divergence and accumulate
         // DDrho accumulates all 3 directions per column
@@ -1830,9 +2048,11 @@ int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
 void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
                                   int Nd, int m_depth, double beta_mix,
                                   int Nd_kerker, double beta_mag) {
-    // Nd_kerker: if > 0, apply Kerker only to first Nd_kerker elements (total density)
-    //            and simple beta_mag mixing to remaining elements (magnetization).
-    //            If 0, apply Kerker to full Nd (non-spin mode).
+    // Nd_kerker: grid size for one Kerker solve (typically Nd_ for the 3D grid).
+    //   If 0, apply Kerker to full Nd (non-spin, single column).
+    //   If Nd_kerker < Nd and beta_mag >= 0: Kerker on first Nd_kerker, simple mix on rest.
+    //   If Nd_kerker < Nd and beta_mag < 0: Kerker on EACH Nd_kerker-sized column (potential mixing).
+    bool kerker_per_col = (beta_mag < 0.0 && Nd_kerker > 0 && Nd_kerker < Nd);
     if (Nd_kerker == 0) Nd_kerker = Nd;
     auto& ctx = gpu::GPUContext::instance();
     int bs = 256;
@@ -1925,55 +2145,62 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
         CUDA_CHECK(cudaMemcpy(d_f_wavg, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
     }
 
-    // Kerker preconditioner: Pf = kerker(f_wavg, beta_mix) for total density
+    // Kerker preconditioner: Pf = kerker(f_wavg, beta_mix)
     double* d_Pf = sp.alloc<double>(Nd);
     CUDA_CHECK(cudaMemset(d_Pf, 0, Nd * sizeof(double)));
 
-    // Kerker step 1: Lf = (Lap - idiemac*kTF^2) * f_wavg (total density only)
-    double* d_Lf = sp.alloc<double>(Nd_kerker);
-    {
-        constexpr double idiemac_kTF2 = 0.1;  // idiemac * kTF^2
-        int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
-        gpu::halo_exchange_gpu(d_f_wavg, ctx.buf.aar_x_ex,
-            nx_, ny_, nz_, FDn_, 1, true, true, true);
-        if (is_orth_) {
-            gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
-                nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
-                1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
-        } else {
-            gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
-                nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
-                1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_,
-                has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_, 1);
+    // Number of columns to apply Kerker to
+    int n_kerker_cols = kerker_per_col ? (Nd / Nd_kerker) : 1;
+
+    for (int col = 0; col < n_kerker_cols; col++) {
+        double* d_f_col = d_f_wavg + col * Nd_kerker;
+        double* d_Pf_col = d_Pf + col * Nd_kerker;
+
+        // Kerker step 1: Lf = (Lap - idiemac*kTF^2) * f_wavg_col
+        double* d_Lf = sp.alloc<double>(Nd_kerker);
+        {
+            constexpr double idiemac_kTF2 = 0.1;
+            int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
+            gpu::halo_exchange_gpu(d_f_col, ctx.buf.aar_x_ex,
+                nx_, ny_, nz_, FDn_, 1, true, true, true);
+            if (is_orth_) {
+                gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                    nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
+                    1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
+            } else {
+                gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                    nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
+                    1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_,
+                    has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_, 1);
+            }
+        }
+
+        // Kerker step 2: Solve (-Lap + kTF^2)*Pf = Lf via AAR
+        {
+            double* d_kr    = sp.alloc<double>(Nd_kerker);
+            double* d_kf    = sp.alloc<double>(Nd_kerker);
+            double* d_kAx   = sp.alloc<double>(Nd_kerker);
+            double* d_kX    = sp.alloc<double>(Nd_kerker * 7);
+            double* d_kF    = sp.alloc<double>(Nd_kerker * 7);
+            double* d_kxold = sp.alloc<double>(Nd_kerker);
+            double* d_kfold = sp.alloc<double>(Nd_kerker);
+
+            gpu::aar_gpu(
+                kerker_op_cb, kerker_precond_cb,
+                d_Lf, d_Pf_col, Nd_kerker,
+                0.6, 0.6, 7, 6, precond_tol_, 1000,
+                d_kr, d_kf, d_kAx, d_kX, d_kF, d_kxold, d_kfold);
+        }
+
+        // Kerker step 3: Pf_col *= -beta_mix
+        {
+            double neg_beta = -beta_mix;
+            cublasDscal(ctx.cublas, Nd_kerker, &neg_beta, d_Pf_col, 1);
         }
     }
 
-    // Kerker step 2: Solve (-Lap + kTF^2)*Pf = Lf via AAR
-    {
-        double* d_kr    = sp.alloc<double>(Nd_kerker);
-        double* d_kf    = sp.alloc<double>(Nd_kerker);
-        double* d_kAx   = sp.alloc<double>(Nd_kerker);
-        double* d_kX    = sp.alloc<double>(Nd_kerker * 7);
-        double* d_kF    = sp.alloc<double>(Nd_kerker * 7);
-        double* d_kxold = sp.alloc<double>(Nd_kerker);
-        double* d_kfold = sp.alloc<double>(Nd_kerker);
-
-        gpu::aar_gpu(
-            kerker_op_cb, kerker_precond_cb,
-            d_Lf, d_Pf, Nd_kerker,
-            0.6, 0.6, 7, 6, precond_tol_, 1000,
-            d_kr, d_kf, d_kAx, d_kX, d_kF, d_kxold, d_kfold);
-    }
-
-    // Kerker step 3: Pf_total *= -beta_mix
-    {
-        double neg_beta = -beta_mix;
-        cublasDscal(ctx.cublas, Nd_kerker, &neg_beta, d_Pf, 1);
-    }
-
-    // For spin: apply simple mixing to magnetization part
-    if (Nd_kerker < Nd) {
-        // Pf_mag = beta_mag * f_wavg_mag
+    // For density mixing spin: apply simple mixing to magnetization part
+    if (!kerker_per_col && Nd_kerker < Nd) {
         double b_mag = (beta_mag > 0.0) ? beta_mag : beta_mix;
         int Nd_mag = Nd - Nd_kerker;
         CUDA_CHECK(cudaMemcpy(d_Pf + Nd_kerker, d_f_wavg + Nd_kerker,
@@ -2054,6 +2281,13 @@ double GPUSCFRunner::run(
     if (is_mgga_) is_gga_ = true;
     is_orth_ = grid.lattice().is_orthogonal();
     has_mixed_deriv_ = !is_orth_;  // non-orth has xy/xz/yz mixed derivatives
+    // Store lapcT metric tensor for mGGA non-orthogonal tau/Hamiltonian
+    {
+        const auto& L = grid.lattice().lapc_T();
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                lapcT_[i*3+j] = L(i,j);
+    }
     has_nlcc_ = (rho_core != nullptr);
     converged_ = false;
     mix_iter_ = 0;
@@ -2142,11 +2376,20 @@ double GPUSCFRunner::run(
         CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_, Nd_ * sizeof(double), 0));
         CUDA_CHECK(cudaMallocAsync(&d_mgga_div_, Nd_ * sizeof(double), 0));
         CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_, nd_ex * sizeof(double), 0));
+        // Extra gradient buffers for non-orthogonal mGGA (need all 3 components simultaneously)
+        if (!is_orth_) {
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_y_, Nd_ * sizeof(double), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_r_, Nd_ * sizeof(double), 0));
+        }
         if (is_kpt) {
             CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
             CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
             CUDA_CHECK(cudaMallocAsync(&d_mgga_div_z_, Nd_ * sizeof(cuDoubleComplex), 0));
             CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_z_, nd_ex * sizeof(cuDoubleComplex), 0));
+            if (!is_orth_) {
+                CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_yz_, Nd_ * sizeof(cuDoubleComplex), 0));
+                CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_zz_, Nd_ * sizeof(cuDoubleComplex), 0));
+            }
         }
     }
 
@@ -2369,15 +2612,6 @@ double GPUSCFRunner::run(
         for (int s = 0; s < Nspin; s++) {
             for (int i = 0; i < Nd_; i++)
                 h_Veff[s * Nd_ + i] = h_Vxc[s * Nd_ + i] + h_phi[i];
-        }
-
-        {
-            double vxc_sum = 0, veff_sum = 0, phi_s = 0, exc_s = 0;
-            for (int i = 0; i < Nd_; i++) { vxc_sum += h_Vxc[i]; veff_sum += h_Veff[i]; phi_s += h_phi[i]; exc_s += h_exc[i]; }
-            printf("GPUSCF init: Vxc_sum=%.6e phi_sum=%.6e Veff_sum=%.6e exc_sum=%.6e\n",
-                   vxc_sum, phi_s, veff_sum, exc_s);
-            printf("GPUSCF init: Veff[0]=%.15e Veff[100]=%.15e Veff[1000]=%.15e\n",
-                   h_Veff[0], h_Veff[std::min(100,Nd_-1)], h_Veff[std::min(1000,Nd_-1)]);
         }
 
         CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), veff_size * sizeof(double), cudaMemcpyHostToDevice));
@@ -2745,6 +2979,28 @@ double GPUSCFRunner::run(
     // For Nspin=1: occfac=2; for Nspin=2: occfac=1 (each spin contributes separately)
     double occfac = (Nspin == 1) ? 2.0 : 1.0;
 
+    // Potential mixing for spin-polarized systems (matching CPU SCF.cpp)
+    bool use_potential_mixing = (params.mixing_var == MixingVariable::Potential) && !has_soc_;
+    double* d_Veff_mixed = nullptr;  // zero-mean Veff for Pulay history (persistent)
+    std::vector<double> Veff_mean(Nspin, 0.0);
+    if (use_potential_mixing && Nspin >= 2) {
+        // Allocate persistent buffer for zero-mean Veff (Pulay mixer state)
+        CUDA_CHECK(cudaMallocAsync(&d_Veff_mixed, 2 * Nd_ * sizeof(double), 0));
+        // Initialize: copy d_Veff, subtract mean per spin channel
+        CUDA_CHECK(cudaMemcpy(d_Veff_mixed, d_Veff, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+        // Compute and subtract mean per spin on host
+        std::vector<double> h_Veff_init(2 * Nd_);
+        CUDA_CHECK(cudaMemcpy(h_Veff_init.data(), d_Veff, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+        for (int s = 0; s < Nspin; s++) {
+            double mean = 0;
+            for (int i = 0; i < Nd_; i++) mean += h_Veff_init[s * Nd_ + i];
+            mean /= grid.Nd();
+            Veff_mean[s] = mean;
+            for (int i = 0; i < Nd_; i++) h_Veff_init[s * Nd_ + i] -= mean;
+        }
+        CUDA_CHECK(cudaMemcpy(d_Veff_mixed, h_Veff_init.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+    }
+
     for (int scf_iter = 0; scf_iter < max_iter; scf_iter++) {
         int nchefsi = (scf_iter == 0) ? rho_trigger : nchefsi_per_iter;
 
@@ -2984,17 +3240,6 @@ double GPUSCFRunner::run(
                                          d_rho_new_soc, d_mag_x_new, d_mag_y_new, d_mag_z_new,
                                          Nd_, Nband, 1.0 * wk);
             }
-            // Debug: check density values and occ/psi norms
-            {
-                double rho_sum = gpu_sum(d_rho_new_soc, Nd_);
-                double occ_sum = gpu_sum(d_occ, Nband);
-                // Check first few psi values
-                std::vector<double> psi_check(20);
-                CUDA_CHECK(cudaMemcpy(psi_check.data(), (double*)d_psi_spinor,
-                    20 * sizeof(double), cudaMemcpyDeviceToHost));
-                printf("  [SOC dbg] rho_sum=%.6e occ_sum=%.6e psi[0..3]=%.3e %.3e %.3e %.3e\n",
-                       rho_sum, occ_sum, psi_check[0], psi_check[1], psi_check[2], psi_check[3]);
-            }
             // Copy total density for SCF error
             CUDA_CHECK(cudaMemcpy(d_rho_new_total, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
         } else if (Nspin >= 2) {
@@ -3103,8 +3348,14 @@ double GPUSCFRunner::run(
                             gpu::gradient_z_gpu(d_xex_z, d_dpsi_x_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
                             gpu::gradient_z_gpu(d_xex_z, d_dpsi_y_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
                             gpu::gradient_z_gpu(d_xex_z, d_dpsi_z_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
-                            tau_accumulate_z_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
-                                                                        d_tau_s, weight, Nd_);
+                            if (is_orth_) {
+                                tau_accumulate_z_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
+                                                                            d_tau_s, weight, Nd_);
+                            } else {
+                                tau_accumulate_z_nonorth_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
+                                    d_tau_s, weight, Nd_,
+                                    lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
+                            }
                         }
                     }
                 }
@@ -3134,8 +3385,14 @@ double GPUSCFRunner::run(
                         gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_x, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
                         gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
                         gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
-                        tau_accumulate_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
-                                                                   d_tau_s, weight, Nd_);
+                        if (is_orth_) {
+                            tau_accumulate_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
+                                                                       d_tau_s, weight, Nd_);
+                        } else {
+                            tau_accumulate_nonorth_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
+                                d_tau_s, weight, Nd_,
+                                lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
+                        }
                     }
                 }
                 sp_tau.restore(sp_tau_cp);
@@ -3145,9 +3402,45 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaDeviceSynchronize());
         }
 
+        // ============================================================
+        // For potential mixing (spin-polarized): compute Veff_new from
+        // unmixed new density BEFORE energy, so we can mix Veff.
+        // ============================================================
+        double* d_Veff_new_tmp = nullptr;
+        if (use_potential_mixing && Nspin >= 2) {
+            d_Veff_new_tmp = ctx.scratch_pool.alloc<double>(2 * Nd_);
+
+            // Save Veff_in (current d_Veff used by eigensolver)
+            // — it's still in d_Veff, untouched
+
+            // Update d_rho to new density for XC/Poisson
+            CUDA_CHECK(cudaMemcpy(d_rho, d_rho_new_up, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpy(d_rho + Nd_, d_rho_new_dn, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+
+            // XC on new density
+            gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
+
+            // Poisson on new total density
+            {
+                int bs = 256;
+                int gs = gpu::ceildiv(Nd_, bs);
+                add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
+            }
+            gpu_poisson_solve(d_rho_new, d_phi, ctx.buf.b, Nd_, poisson_tol);
+
+            // Build Veff_new per spin: Vxc_s + phi
+            {
+                int bs = 256;
+                int gs = gpu::ceildiv(Nd_, bs);
+                for (int s = 0; s < Nspin; s++) {
+                    veff_combine_spin_kernel<<<gs, bs>>>(
+                        d_Vxc + s * Nd_, d_phi, d_Veff_new_tmp + s * Nd_, Nd_);
+                }
+            }
+        }
+
         // Step 3: Compute energy (D2H for energy components)
         {
-            // For SOC energy: use Nspin=2 with d_rho = [up|dn] from collinear conversion
             int Nspin_energy = has_soc_ ? 2 : Nspin;
             int veff_size = Nd_ * Nspin_energy;
             int vxc_size = Nd_ * Nspin_energy;
@@ -3155,10 +3448,10 @@ double GPUSCFRunner::run(
 
             // For energy, use total input density
             if (has_soc_) {
-                // SOC: total density is d_rho_soc
                 CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             } else if (Nspin >= 2) {
-                // Compute total from per-spin
+                // For potential mixing: d_rho already updated to new density
+                // For density mixing: d_rho is still old density
                 auto& sp_e = ctx.scratch_pool;
                 size_t sp_e_cp = sp_e.checkpoint();
                 double* d_rho_in_total = sp_e.alloc<double>(Nd_);
@@ -3171,13 +3464,18 @@ double GPUSCFRunner::run(
             } else {
                 CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             }
-            // Download Veff for energy (for SOC, use d_Veff which holds [Vxc_up|Vxc_dn] from spin XC + phi)
-            CUDA_CHECK(cudaMemcpy(h_Veff_e.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+
+            // For potential mixing, download Veff_new; otherwise download current d_Veff
+            if (use_potential_mixing && Nspin >= 2 && d_Veff_new_tmp) {
+                CUDA_CHECK(cudaMemcpy(h_Veff_e.data(), d_Veff_new_tmp, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+            } else {
+                CUDA_CHECK(cudaMemcpy(h_Veff_e.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+            }
             CUDA_CHECK(cudaMemcpy(h_phi_e.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_exc_e.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
             CUDA_CHECK(cudaMemcpy(h_Vxc_e.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost));
 
-            // Download psi for Eband computation (only spin-0, kpt-0 for gamma)
+            // Download psi for Eband computation
             if (!is_kpt_ && !has_soc_) {
                 for (int s = 0; s < Nspin_local_; s++) {
                     int s_glob = spin_start_ + s;
@@ -3226,17 +3524,45 @@ double GPUSCFRunner::run(
                 nullptr, nullptr, Nspin_energy, nullptr,
                 h_tau_ptr, h_vtau_ptr);
 
-            // SCF error: ||rho_out_total - rho_in_total|| / ||rho_out_total||
-            std::vector<double> h_rho_new(Nd_);
-            CUDA_CHECK(cudaMemcpy(h_rho_new.data(), d_rho_new_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-
-            double sum_sq_diff = 0, sum_sq_out = 0;
-            for (int i = 0; i < Nd_; i++) {
-                double diff = h_rho_new[i] - h_rho_in[i];
-                sum_sq_diff += diff * diff;
-                sum_sq_out += h_rho_new[i] * h_rho_new[i];
+            // For potential mixing: add self-consistency correction Escc
+            if (use_potential_mixing && Nspin >= 2) {
+                std::vector<double> h_Veff_in(veff_size);
+                CUDA_CHECK(cudaMemcpy(h_Veff_in.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+                double Escc = 0.0;
+                for (int s = 0; s < Nspin; s++) {
+                    const double* rho_s = dens_in.rho(s).data();
+                    for (int i = 0; i < Nd_; i++) {
+                        Escc += rho_s[i] * (h_Veff_e[s * Nd_ + i] - h_Veff_in[s * Nd_ + i]);
+                    }
+                }
+                Escc *= dV_;
+                energy_.Etotal += Escc;
             }
-            double scf_error = (sum_sq_out > 0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0;
+
+            // SCF error
+            double scf_error = 0.0;
+            if (use_potential_mixing && Nspin >= 2) {
+                // ||Veff_out - Veff_in|| / ||Veff_out||
+                std::vector<double> h_Veff_in(veff_size);
+                CUDA_CHECK(cudaMemcpy(h_Veff_in.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+                double sum_sq_diff = 0, sum_sq_out = 0;
+                for (int i = 0; i < veff_size; i++) {
+                    double diff = h_Veff_e[i] - h_Veff_in[i];
+                    sum_sq_diff += diff * diff;
+                    sum_sq_out += h_Veff_e[i] * h_Veff_e[i];
+                }
+                scf_error = (sum_sq_out > 0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0;
+            } else {
+                std::vector<double> h_rho_new(Nd_);
+                CUDA_CHECK(cudaMemcpy(h_rho_new.data(), d_rho_new_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                double sum_sq_diff = 0, sum_sq_out = 0;
+                for (int i = 0; i < Nd_; i++) {
+                    double diff = h_rho_new[i] - h_rho_in[i];
+                    sum_sq_diff += diff * diff;
+                    sum_sq_out += h_rho_new[i] * h_rho_new[i];
+                }
+                scf_error = (sum_sq_out > 0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0;
+            }
 
             if (has_soc_) {
                 // SOC: report total |m|
@@ -3286,8 +3612,46 @@ double GPUSCFRunner::run(
             break;
         }
 
-        // Step 4: Mix density
-        if (has_soc_) {
+        // Step 4: Mix
+        if (use_potential_mixing && Nspin >= 2) {
+            // ---- Potential mixing for spin-polarized (matching CPU SCF.cpp) ----
+            // d_Veff_new_tmp holds Veff from new density (computed above).
+            // d_Veff_mixed holds zero-mean Veff from Pulay history.
+            // d_Veff holds old Veff (with mean) used by eigensolver.
+
+            // Step 4a: Shift Veff_new to zero-mean per spin, save mean
+            {
+                std::vector<double> h_Veff_new(2 * Nd_);
+                CUDA_CHECK(cudaMemcpy(h_Veff_new.data(), d_Veff_new_tmp, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                for (int s = 0; s < Nspin; s++) {
+                    double mean = 0;
+                    for (int i = 0; i < Nd_; i++) mean += h_Veff_new[s * Nd_ + i];
+                    mean /= grid.Nd();
+                    Veff_mean[s] = mean;
+                    for (int i = 0; i < Nd_; i++) h_Veff_new[s * Nd_ + i] -= mean;
+                }
+                CUDA_CHECK(cudaMemcpy(d_Veff_new_tmp, h_Veff_new.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            }
+
+            // Step 4b: Pulay mix on zero-mean Veff.
+            // Kerker applied independently to each spin channel (beta_mag < 0 triggers per-col mode).
+            gpu_pulay_mix(d_Veff_mixed, d_Veff_new_tmp, 2 * Nd_, mixing_history, mixing_param,
+                          Nd_, -1.0);
+
+            // Step 4c: d_Veff = d_Veff_mixed + mean (restore mean per spin)
+            {
+                std::vector<double> h_Vm(2 * Nd_);
+                CUDA_CHECK(cudaMemcpy(h_Vm.data(), d_Veff_mixed, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                for (int s = 0; s < Nspin; s++) {
+                    for (int i = 0; i < Nd_; i++) {
+                        h_Vm[s * Nd_ + i] += Veff_mean[s];
+                    }
+                }
+                CUDA_CHECK(cudaMemcpy(d_Veff, h_Vm.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            }
+
+            // d_rho already updated to new density above
+        } else if (has_soc_) {
             // SOC: mix packed [rho | mx | my | mz] (4*Nd)
             auto& sp_mix = ctx.scratch_pool;
             double* d_dens_in  = sp_mix.alloc<double>(4 * Nd_);
@@ -3295,28 +3659,23 @@ double GPUSCFRunner::run(
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
 
-            // Pack input: [rho | mx | my | mz] from current density
             CUDA_CHECK(cudaMemcpy(d_dens_in, d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_dens_in + Nd_, d_mag_x, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_dens_in + 2*Nd_, d_mag_y, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_dens_in + 3*Nd_, d_mag_z, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
 
-            // Pack output: [rho | mx | my | mz] from new density
             CUDA_CHECK(cudaMemcpy(d_dens_out, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_dens_out + Nd_, d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_dens_out + 2*Nd_, d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_dens_out + 3*Nd_, d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
 
-            // Mix on packed 4*Nd array
             gpu_pulay_mix(d_dens_in, d_dens_out, 4 * Nd_, mixing_history, mixing_param);
 
-            // Unpack mixed density back
             CUDA_CHECK(cudaMemcpy(d_rho_soc, d_dens_in, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_mag_x, d_dens_in + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_mag_y, d_dens_in + 2*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_mag_z, d_dens_in + 3*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
 
-            // Clamp rho and renormalize
             clamp_min_kernel<<<gs, bs>>>(d_rho_soc, 0.0, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
             double rho_sum = gpu_sum(d_rho_soc, Nd_);
@@ -3329,16 +3688,12 @@ double GPUSCFRunner::run(
                 scale_kernel<<<gs, bs>>>(d_mag_z, sc, Nd_);
             }
         } else if (Nspin == 1) {
-            // Simple total density mixing
             gpu_pulay_mix(d_rho, d_rho_new_total, Nd_, mixing_history, mixing_param);
-
-            // Clamp + normalize
             {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
                 clamp_min_kernel<<<gs, bs>>>(d_rho, 0.0, Nd_);
                 CUDA_CHECK(cudaDeviceSynchronize());
-
                 double rho_sum = gpu_sum(d_rho, Nd_);
                 double Ne_current = rho_sum * dV_;
                 if (Ne_current > 1e-10) {
@@ -3347,8 +3702,7 @@ double GPUSCFRunner::run(
                 }
             }
         } else {
-            // Spin-polarized: mix total density with Pulay+Kerker,
-            // magnetization with simple linear mixing (small beta_mag).
+            // Spin-polarized density mixing: total with Pulay+Kerker, mag with linear
             auto& sp_mix = ctx.scratch_pool;
             double* d_total_in  = sp_mix.alloc<double>(Nd_);
             double* d_total_out = sp_mix.alloc<double>(Nd_);
@@ -3358,35 +3712,26 @@ double GPUSCFRunner::run(
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
 
-            // Pack: total and mag from current d_rho = [up|dn]
-            add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_total_in, Nd_);  // total = up + dn
-            sub_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_mag_in, Nd_);    // mag = up - dn
+            add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_total_in, Nd_);
+            sub_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_mag_in, Nd_);
+            add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_total_out, Nd_);
+            sub_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_mag_out, Nd_);
 
-            // Pack: total and mag from new density
-            add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_total_out, Nd_);  // total
-            sub_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_mag_out, Nd_);    // mag
-
-            // Mix total density with Pulay+Kerker (Nd_ elements)
             gpu_pulay_mix(d_total_in, d_total_out, Nd_, mixing_history, mixing_param);
 
-            // Mix magnetization with simple linear mixing
-            // mag_mixed = mag_in + beta_mag * (mag_out - mag_in)
             {
                 double neg_one = -1.0;
                 double beta_mag = is_mgga_ ? 0.1 : mixing_param;
-                cublasDaxpy(ctx.cublas, Nd_, &neg_one, d_mag_in, 1, d_mag_out, 1); // mag_out -= mag_in (= residual)
-                cublasDaxpy(ctx.cublas, Nd_, &beta_mag, d_mag_out, 1, d_mag_in, 1); // mag_in += beta_mag*residual
+                cublasDaxpy(ctx.cublas, Nd_, &neg_one, d_mag_in, 1, d_mag_out, 1);
+                cublasDaxpy(ctx.cublas, Nd_, &beta_mag, d_mag_out, 1, d_mag_in, 1);
             }
 
-            // Unpack: rho_up = 0.5*(total + mag), rho_dn = 0.5*(total - mag)
             unpack_spin_kernel<<<gs, bs>>>(d_total_in, d_mag_in, d_rho, d_rho + Nd_, Nd_);
 
-            // Clamp and renormalize
             clamp_min_kernel<<<gs, bs>>>(d_rho, 0.0, Nd_);
             clamp_min_kernel<<<gs, bs>>>(d_rho + Nd_, 0.0, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
 
-            // Renormalize total
             double rho_up_sum = gpu_sum(d_rho, Nd_);
             double rho_dn_sum = gpu_sum(d_rho + Nd_, Nd_);
             double Ne_current = (rho_up_sum + rho_dn_sum) * dV_;
@@ -3400,39 +3745,33 @@ double GPUSCFRunner::run(
         sp_dens.restore(sp_dens_cp);
 
         // Step 5: XC + Step 6: Poisson + Step 7: Veff
-        if (has_soc_) {
+        // (Skip for potential mixing — Veff already mixed above)
+        if (use_potential_mixing && Nspin >= 2) {
+            // Veff already set from mixing step; no recomputation needed.
+        } else if (has_soc_) {
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
 
-            // SOC Step 5a: Convert noncollinear to collinear for XC
-            // d_rho = [rho_up | rho_dn] from (rho, mx, my, mz)
             mag_to_collinear_kernel<<<gs, bs>>>(d_rho_soc, d_mag_x, d_mag_y, d_mag_z,
                                                   d_rho, d_rho + Nd_, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
 
-            // SOC Step 5b: Spin-polarized XC on collinear densities
             gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
-
-            // SOC Step 6: Poisson on total density
             gpu_poisson_solve(d_rho_soc, d_phi, ctx.buf.b, Nd_, poisson_tol);
 
-            // SOC Step 7a: Build Veff for energy = [Vxc_up + phi | Vxc_dn + phi]
             veff_combine_spin_kernel<<<gs, bs>>>(d_Vxc, d_phi, d_Veff, Nd_);
             veff_combine_spin_kernel<<<gs, bs>>>(d_Vxc + Nd_, d_phi, d_Veff + Nd_, Nd_);
 
-            // SOC Step 7b: Build Veff_spinor from XC + magnetization direction
             veff_spinor_from_xc_kernel<<<gs, bs>>>(d_Vxc, d_Vxc + Nd_, d_phi,
                                                      d_mag_x, d_mag_y, d_mag_z,
                                                      d_Veff_spinor, Nd_);
         } else {
-            // Non-SOC XC
             if (Nspin >= 2) {
                 gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
             } else {
                 gpu_xc_evaluate(d_rho, d_exc, d_Vxc, Nd_);
             }
 
-            // Non-SOC Poisson
             if (Nspin >= 2) {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
@@ -3442,7 +3781,6 @@ double GPUSCFRunner::run(
                 gpu_poisson_solve(d_rho, d_phi, ctx.buf.b, Nd_, poisson_tol);
             }
 
-            // Non-SOC Veff
             {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
@@ -4674,6 +5012,9 @@ double GPUSCFRunner::run(
         if (d_mag_z)        cudaFreeAsync(d_mag_z, 0);
     }
 
+    // Free potential mixing buffer
+    if (d_Veff_mixed) { cudaFreeAsync(d_Veff_mixed, 0); d_Veff_mixed = nullptr; }
+
     Ef_ = Ef;
     return energy_.Etotal;
 }
@@ -5387,10 +5728,14 @@ void GPUSCFRunner::cleanup() {
     if (d_vtau_) { cudaFreeAsync(d_vtau_, 0); d_vtau_ = nullptr; }
     d_vtau_active_ = nullptr;
     if (d_mgga_dpsi_) { cudaFreeAsync(d_mgga_dpsi_, 0); d_mgga_dpsi_ = nullptr; }
+    if (d_mgga_dpsi_y_) { cudaFreeAsync(d_mgga_dpsi_y_, 0); d_mgga_dpsi_y_ = nullptr; }
+    if (d_mgga_dpsi_z_r_) { cudaFreeAsync(d_mgga_dpsi_z_r_, 0); d_mgga_dpsi_z_r_ = nullptr; }
     if (d_mgga_vtdpsi_) { cudaFreeAsync(d_mgga_vtdpsi_, 0); d_mgga_vtdpsi_ = nullptr; }
     if (d_mgga_div_) { cudaFreeAsync(d_mgga_div_, 0); d_mgga_div_ = nullptr; }
     if (d_mgga_vt_ex_) { cudaFreeAsync(d_mgga_vt_ex_, 0); d_mgga_vt_ex_ = nullptr; }
     if (d_mgga_dpsi_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_dpsi_z_, 0); d_mgga_dpsi_z_ = nullptr; }
+    if (d_mgga_dpsi_yz_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_dpsi_yz_, 0); d_mgga_dpsi_yz_ = nullptr; }
+    if (d_mgga_dpsi_zz_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_dpsi_zz_, 0); d_mgga_dpsi_zz_ = nullptr; }
     if (d_mgga_vtdpsi_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_vtdpsi_z_, 0); d_mgga_vtdpsi_z_ = nullptr; }
     if (d_mgga_div_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_div_z_, 0); d_mgga_div_z_ = nullptr; }
     if (d_mgga_vt_ex_z_) { cudaFreeAsync((cuDoubleComplex*)d_mgga_vt_ex_z_, 0); d_mgga_vt_ex_z_ = nullptr; }

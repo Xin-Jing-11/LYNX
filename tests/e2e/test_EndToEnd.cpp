@@ -324,7 +324,9 @@ static DFTResult run_single_point(const std::string& json_file) {
             bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
                             config.xc == XCType::MGGA_RSCAN ||
                             config.xc == XCType::MGGA_R2SCAN);
-            if (is_mgga && scf.gpu_runner()) {
+            // GPU mGGA stress only supports gamma-point (real psi).
+            // For k-point mode, let CPU compute it (with correct uvec_inv transformation).
+            if (is_mgga && scf.gpu_runner() && !is_kpt) {
                 scf.gpu_runner()->compute_mgga_stress(wfn, domain, grid, Nspin_calc,
                                                        gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
                 gpu_mgga_ptr = gpu_mgga_stress.data();
@@ -755,6 +757,35 @@ TEST(EndToEnd, Si4_gamma_SCAN) {
 
     EXPECT_TRUE(result.converged) << "SCF did not converge";
     EXPECT_EQ(static_cast<int>(result.forces.size()), 12);
+
+    // SPARC reference values (identical settings: SCAN, gamma, 25x26x27, FD12, Si-4-2.4_LDA.psp8)
+    const double sparc_etotal = -1.547897058550244e+01;
+    EXPECT_NEAR(result.Etotal, sparc_etotal, 1e-6) << "Energy mismatch vs SPARC";
+
+    // SPARC forces (Ha/Bohr)
+    const double sparc_forces[12] = {
+         9.7761202854e-08, -2.3226440262e-07,  2.3343651615e-02,
+         6.5723061424e-04,  6.0597466469e-05, -2.3376315388e-02,
+        -2.0817304686e-07,  1.3096150956e-07,  2.3408742772e-02,
+        -6.5712020240e-04, -6.0496163576e-05, -2.3376078999e-02
+    };
+    for (int i = 0; i < 12; ++i) {
+        EXPECT_NEAR(result.forces[i], sparc_forces[i], 1e-5)
+            << "Force component " << i << " mismatch vs SPARC";
+    }
+
+    // SPARC stress (GPa): xx, xy, xz, yy, yz, zz
+    if (result.stress.size() >= 6) {
+        const double sparc_stress_gpa[6] = {
+            -2.5780587659e-01, -1.3335745767e+01, -7.2527767796e-07,
+             4.6155107133e-01, -6.6517461933e-06, -1.3890567745e+00
+        };
+        const double au_to_gpa = 29421.01569650548;
+        for (int i = 0; i < 6; ++i) {
+            EXPECT_NEAR(result.stress[i] * au_to_gpa, sparc_stress_gpa[i], 0.01)
+                << "Stress component " << i << " mismatch vs SPARC";
+        }
+    }
 }
 
 // ============================================================
@@ -1091,6 +1122,33 @@ TEST(EndToEnd, Si4_gamma_RSCAN) {
 
     EXPECT_TRUE(result.converged) << "SCF did not converge";
     EXPECT_EQ(static_cast<int>(result.forces.size()), 12);
+
+    // SPARC reference values (identical settings: RSCAN, gamma, 25x26x27, FD12, Si-4-2.4_LDA.psp8)
+    const double sparc_etotal = -1.549522492927676e+01;
+    EXPECT_NEAR(result.Etotal, sparc_etotal, 1e-6) << "Energy mismatch vs SPARC";
+
+    const double sparc_forces[12] = {
+        -1.0130720731e-07,  2.7392905354e-07,  2.2640019128e-02,
+         1.2072535649e-04,  3.8588549526e-05, -2.2627412087e-02,
+         1.5665980195e-07,  1.8300826355e-07,  2.2614841843e-02,
+        -1.2078070908e-04, -3.9045486843e-05, -2.2627448885e-02
+    };
+    for (int i = 0; i < 12; ++i) {
+        EXPECT_NEAR(result.forces[i], sparc_forces[i], 1e-5)
+            << "Force component " << i << " mismatch vs SPARC";
+    }
+
+    if (result.stress.size() >= 6) {
+        const double sparc_stress_gpa[6] = {
+            -6.0850761097e-02, -1.3906236565e+01,  1.0279096293e-05,
+             7.7240101463e-01, -1.1400613945e-05, -1.0541976720e+00
+        };
+        const double au_to_gpa = 29421.01569650548;
+        for (int i = 0; i < 6; ++i) {
+            EXPECT_NEAR(result.stress[i] * au_to_gpa, sparc_stress_gpa[i], 0.01)
+                << "Stress component " << i << " mismatch vs SPARC";
+        }
+    }
 }
 
 // ============================================================
@@ -1134,6 +1192,33 @@ TEST(EndToEnd, Si4_gamma_R2SCAN) {
 
     EXPECT_TRUE(result.converged) << "SCF did not converge";
     EXPECT_EQ(static_cast<int>(result.forces.size()), 12);
+
+    // SPARC reference values (identical settings: R2SCAN, gamma, 25x26x27, FD12, Si-4-2.4_LDA.psp8)
+    const double sparc_etotal = -1.547502429017802e+01;
+    EXPECT_NEAR(result.Etotal, sparc_etotal, 1e-6) << "Energy mismatch vs SPARC";
+
+    const double sparc_forces[12] = {
+        -2.3764143650e-07, -4.5204101483e-07,  2.4303036114e-02,
+         3.9094553338e-05,  6.5589879605e-05, -2.4206565367e-02,
+        -5.7796420103e-07, -2.4545625529e-07,  2.4110105271e-02,
+        -3.8278947700e-05, -6.4892382335e-05, -2.4206576018e-02
+    };
+    for (int i = 0; i < 12; ++i) {
+        EXPECT_NEAR(result.forces[i], sparc_forces[i], 1e-5)
+            << "Force component " << i << " mismatch vs SPARC";
+    }
+
+    if (result.stress.size() >= 6) {
+        const double sparc_stress_gpa[6] = {
+            -2.7202336731e-01, -1.3887950386e+01,  1.1905058926e-05,
+             5.2139731574e-01,  1.6815691163e-05, -1.1641930398e+00
+        };
+        const double au_to_gpa = 29421.01569650548;
+        for (int i = 0; i < 6; ++i) {
+            EXPECT_NEAR(result.stress[i] * au_to_gpa, sparc_stress_gpa[i], 0.01)
+                << "Stress component " << i << " mismatch vs SPARC";
+        }
+    }
 }
 
 TEST(EndToEnd, Si2_kpt_PBE) {
@@ -1148,6 +1233,35 @@ TEST(EndToEnd, Si2_kpt_PBE) {
         std::printf("  %10.4f %10.4f %10.4f\n", result.stress[1]*au_to_gpa, result.stress[3]*au_to_gpa, result.stress[4]*au_to_gpa);
         std::printf("  %10.4f %10.4f %10.4f\n", result.stress[2]*au_to_gpa, result.stress[4]*au_to_gpa, result.stress[5]*au_to_gpa);
         std::printf("  Etotal = %.10f Ha\n", result.Etotal);
+    }
+
+    EXPECT_TRUE(result.converged) << "SCF did not converge";
+
+    // SPARC reference values (identical settings: GGA_PBE, 2x2x2 kpt 0.5 shift,
+    // 15x15x15, FD12, 14_Si_4_1.9_1.9_pbe_n_v1.0.psp8, non-ortho FCC)
+    const double sparc_etotal = -7.942424692857852e+00;
+    EXPECT_NEAR(result.Etotal, sparc_etotal, 1e-6) << "Energy mismatch vs SPARC";
+
+    const double sparc_forces[6] = {
+         9.7983599245e-03,  2.7205173194e-01,  1.2053259186e-01,
+        -9.7983599245e-03, -2.7205173194e-01, -1.2053259186e-01
+    };
+    EXPECT_EQ(static_cast<int>(result.forces.size()), 6);
+    for (int i = 0; i < 6; ++i) {
+        EXPECT_NEAR(result.forces[i], sparc_forces[i], 1e-5)
+            << "Force component " << i << " mismatch vs SPARC";
+    }
+
+    if (result.stress.size() >= 6) {
+        const double sparc_stress_gpa[6] = {
+            -2.6051935456e+02,  7.7699826289e+01,  9.2436782407e+01,
+            -3.5474612299e+02,  6.5897658394e+01, -3.0900016710e+02
+        };
+        const double au_to_gpa = 29421.01569650548;
+        for (int i = 0; i < 6; ++i) {
+            EXPECT_NEAR(result.stress[i] * au_to_gpa, sparc_stress_gpa[i], 0.01)
+                << "Stress component " << i << " mismatch vs SPARC";
+        }
     }
 }
 

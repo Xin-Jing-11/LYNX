@@ -1,0 +1,120 @@
+***************************************************************************
+*                       SPARC (version Dec 11, 2024)                      *
+*   Copyright (c) 2020 Material Physics & Mechanics Group, Georgia Tech   *
+*           Distributed under GNU General Public License 3 (GPL)          *
+*                   Start time: Sun Mar 29 17:21:38 2026                  *
+***************************************************************************
+                           Input parameters                                
+***************************************************************************
+LATVEC_SCALE: 2.840052 2.840052 2.840052 
+LATVEC:
+1.000000000000000 0.100000000000000 0.000000000000000 
+0.100000000000000 1.000000000000000 0.000000000000000 
+0.000000000000000 0.000000000000000 1.000000000000000 
+FD_GRID: 29 29 29
+FD_ORDER: 12
+BC: P P P
+KPOINT_GRID: 1 1 1
+KPOINT_SHIFT: 0 0 0
+SPIN_TYP: 1
+ELEC_TEMP_TYPE: Fermi-Dirac
+SMEARING: 0.001000000336
+EXCHANGE_CORRELATION: PBE0
+NSTATES: 30
+CHEB_DEGREE: 51
+CHEFSI_BOUND_FLAG: 0
+EXX_DIVERGENCE: AUXILIARY
+EXX_METHOD: FFT
+EXX_MEM: 20
+EXX_ACE_VALENCE_STATES: 3
+EXX_DOWNSAMPLING: 1 1 1
+CALC_STRESS: 1
+MAXIT_SCF: 100
+MINIT_SCF: 2
+MAXIT_POISSON: 3000
+TOL_SCF: 1.00E-06
+POISSON_SOLVER: AAR
+TOL_POISSON: 1.00E-08
+TOL_LANCZOS: 1.00E-02
+TOL_PSEUDOCHARGE: 1.00E-09
+EXX_ACC: 1
+EXX_FRAC: 0.25
+TOL_FOCK: 2.00E-07
+TOL_SCF_INIT: 1.00E-05
+MAXIT_FOCK: 20
+MINIT_FOCK: 2
+MIXING_VARIABLE: potential
+MIXING_PRECOND: kerker
+MIXING_PRECOND_MAG: none
+TOL_PRECOND: 9.65E-06
+PRECOND_KERKER_KTF: 1
+PRECOND_KERKER_THRESH: 0.1
+MIXING_PARAMETER: 0.3
+MIXING_PARAMETER_MAG: 0.3
+MIXING_HISTORY: 7
+PULAY_FREQUENCY: 1
+PULAY_RESTART: 0
+REFERENCE_CUTOFF: 0.5
+RHO_TRIGGER: 4
+NUM_CHEFSI: 1
+FIX_RAND: 0
+VERBOSITY: 1
+PRINT_FORCES: 1
+PRINT_ATOMS: 1
+PRINT_EIGEN: 0
+PRINT_DENSITY: 0
+PRINT_ENERGY_DENSITY: 0
+OUTPUT_FILE: Fe2_spin_PBE0_gamma
+***************************************************************************
+                                Cell                                       
+***************************************************************************
+Lattice vectors (Bohr):
+2.840052000000000 0.284005200000000 0.000000000000000 
+0.284005200000000 2.840052000000000 0.000000000000000 
+0.000000000000000 0.000000000000000 2.840052000000000 
+Volume: 2.2678486634E+01 (Bohr^3)
+Density: 4.9249318000E+00 (amu/Bohr^3), 5.5188160594E+01 (g/cc)
+***************************************************************************
+                           Parallelization                                 
+***************************************************************************
+NP_SPIN_PARAL: 2
+NP_KPOINT_PARAL: 1
+NP_BAND_PARAL: 1
+NP_DOMAIN_PARAL: 1 1 1
+NP_DOMAIN_PHI_PARAL: 1 1 2
+EIG_SERIAL_MAXNS: 1500
+***************************************************************************
+                             Initialization                                
+***************************************************************************
+Number of processors               :  2
+Mesh spacing in x-direction        :  0.0984213 (Bohr)
+Mesh spacing in y-direction        :  0.0984213 (Bohr)
+Mesh spacing in z-direction        :  0.0979328 (Bohr)
+Number of symmetry adapted k-points:  1
+Output printed to                  :  Fe2_spin_PBE0_gamma.out
+Total number of atom types         :  1
+Total number of atoms              :  2
+Total number of electrons          :  32
+Atom type 1  (valence electrons)   :  Fe 16
+Pseudopotential                    :  /home/xx/Desktop/dev_SPARC_GPU/tests/xc/mgga_tests/Fe2_spin_scan_gamma/Fe_LDA.psp8
+Atomic mass                        :  55.845
+Pseudocharge radii of atom type 1  :  6.59 6.59 6.56 (x, y, z dir)
+Number of atoms of type 1          :  2
+Estimated total memory usage       :  156.20 MB
+Estimated memory per processor     :  78.10 MB
+========================================================================================
+                    Self Consistent Field (SCF#1)                     
+========================================================================================
+Iteration     Free Energy (Ha/atom)    Magnetization     SCF Error        Timing (sec)
+1            -1.1406914388E+02         1.3569E-09        1.022E-01        49.483
+2            -1.1408108967E+02         1.3119E-09        5.897E-02        16.261
+3            -1.1408807004E+02         1.2914E-09        9.720E-03        12.483
+4            -1.1408818421E+02         1.1830E-09        4.644E-03        9.995
+5            -1.1408820664E+02         2.5668E-10        4.344E-04        9.475
+6            -1.1408820696E+02         7.7177E-11        1.036E-04        10.095
+7            -1.1408820698E+02         2.5575E-11        2.961E-05        8.946
+8            -1.1408820698E+02         6.3431E-12        1.122E-05        8.859
+9            -1.1408820698E+02         4.2946E-13        2.296E-06        10.771
+Total number of SCF: 9     
+
+No.1 Exx outer loop. ACE timing: 0.031 (sec)

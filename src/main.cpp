@@ -487,7 +487,9 @@ int main(int argc, char** argv) {
             bool is_mgga = (config.xc == lynx::XCType::MGGA_SCAN ||
                             config.xc == lynx::XCType::MGGA_RSCAN ||
                             config.xc == lynx::XCType::MGGA_R2SCAN);
-            if (is_mgga && scf.gpu_runner()) {
+            // GPU mGGA stress only supports gamma-point (real psi).
+            // For k-point mode, let CPU compute it (with correct uvec_inv transformation).
+            if (is_mgga && scf.gpu_runner() && !is_kpt) {
                 scf.gpu_runner()->compute_mgga_stress(wfn, domain, grid, Nspin_calc,
                                                        gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
                 gpu_mgga_ptr = gpu_mgga_stress.data();

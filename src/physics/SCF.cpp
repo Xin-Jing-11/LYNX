@@ -1426,25 +1426,27 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         xc_type_ = xc_type;
     }
 
-    // Initialize density: use atomic superposition for better GPU SCF convergence
+    // Initialize density: use existing density if set_initial_density was called
+    // (preserves initial magnetization for spin-polarized systems),
+    // otherwise compute from atomic superposition.
     if (density_.Nd_d() == 0) {
         density_.allocate(Nd_d, Nspin);
-    }
-    if (elec_ && influence_) {
-        const_cast<Electrostatics*>(elec_)->compute_atomic_density(
-            *crystal_, *influence_, *domain_, *grid_,
-            density_.rho_total().data(), Nelectron);
-        if (Nspin == 1) {
-            std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
-        } else {
-            // Equal split for initial spin density
-            for (int i = 0; i < Nd_d; i++) {
-                density_.rho(0).data()[i] = 0.5 * density_.rho_total().data()[i];
-                density_.rho(1).data()[i] = 0.5 * density_.rho_total().data()[i];
+        if (elec_ && influence_) {
+            const_cast<Electrostatics*>(elec_)->compute_atomic_density(
+                *crystal_, *influence_, *domain_, *grid_,
+                density_.rho_total().data(), Nelectron);
+            if (Nspin == 1) {
+                std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
+            } else {
+                // Equal split for initial spin density
+                for (int i = 0; i < Nd_d; i++) {
+                    density_.rho(0).data()[i] = 0.5 * density_.rho_total().data()[i];
+                    density_.rho(1).data()[i] = 0.5 * density_.rho_total().data()[i];
+                }
             }
+        } else {
+            init_density(Nd_d, Nelectron);
         }
-    } else {
-        init_density(Nd_d, Nelectron);
     }
 
     // K-point weights
