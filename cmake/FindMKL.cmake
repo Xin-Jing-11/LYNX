@@ -21,10 +21,30 @@ find_library(MKL_CORE_LIB mkl_core
     NO_DEFAULT_PATH
 )
 
-find_library(MKL_SEQUENTIAL_LIB mkl_sequential
-    PATHS ${MKLROOT}/lib/intel64 ${MKLROOT}/lib
-    NO_DEFAULT_PATH
-)
+# Clear cached value so threading mode change takes effect
+unset(MKL_THREAD_LIB CACHE)
+
+# Prefer OpenMP-threaded MKL when MKL_THREADING is set to openmp
+if("${MKL_THREADING}" MATCHES "openmp")
+    find_library(MKL_THREAD_LIB mkl_gnu_thread
+        PATHS ${MKLROOT}/lib/intel64 ${MKLROOT}/lib
+        NO_DEFAULT_PATH
+    )
+    if(NOT MKL_THREAD_LIB)
+        find_library(MKL_THREAD_LIB mkl_intel_thread
+            PATHS ${MKLROOT}/lib/intel64 ${MKLROOT}/lib
+            NO_DEFAULT_PATH
+        )
+    endif()
+else()
+    find_library(MKL_THREAD_LIB mkl_sequential
+        PATHS ${MKLROOT}/lib/intel64 ${MKLROOT}/lib
+        NO_DEFAULT_PATH
+    )
+endif()
+
+# Backward compat alias
+set(MKL_SEQUENTIAL_LIB ${MKL_THREAD_LIB})
 
 find_library(MKL_LP64_LIB mkl_intel_lp64
     PATHS ${MKLROOT}/lib/intel64 ${MKLROOT}/lib
@@ -46,6 +66,10 @@ find_package_handle_standard_args(MKL DEFAULT_MSG
 
 if(MKL_FOUND)
     set(MKL_INCLUDE_DIRS ${MKL_INCLUDE_DIR})
-    set(MKL_LIBRARIES ${MKL_LP64_LIB} ${MKL_SEQUENTIAL_LIB} ${MKL_CORE_LIB} pthread m dl)
-    message(STATUS "MKL found at ${MKLROOT}")
+    if("${MKL_THREADING}" MATCHES "openmp")
+        set(MKL_LIBRARIES ${MKL_LP64_LIB} ${MKL_THREAD_LIB} ${MKL_CORE_LIB} gomp pthread m dl)
+    else()
+        set(MKL_LIBRARIES ${MKL_LP64_LIB} ${MKL_THREAD_LIB} ${MKL_CORE_LIB} pthread m dl)
+    endif()
+    message(STATUS "MKL found at ${MKLROOT} (threading: ${MKL_THREADING})")
 endif()
