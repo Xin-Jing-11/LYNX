@@ -23,12 +23,15 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# OpenMP
+find_package(OpenMP REQUIRED)
+
 # MPI
 find_package(MPI REQUIRED)
 
 # --- Math libraries (BLAS, LAPACK, ScaLAPACK) ---
 if(USE_MKL)
-    set(MKL_THREADING sequential)
+    set(MKL_THREADING openmp)
     set(MKL_INTERFACE lp64)
     find_package(MKL CONFIG QUIET)
     if(MKL_FOUND AND TARGET MKL::MKL)

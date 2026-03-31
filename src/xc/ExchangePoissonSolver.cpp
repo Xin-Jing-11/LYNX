@@ -10,7 +10,7 @@
 #include <cufftw.h>
 #else
 #ifdef USE_MKL
-#include <mkl_dfti.h>
+#include <fftw/fftw3.h>
 #endif
 #endif
 
