@@ -10,6 +10,7 @@ struct ParallelParams {
     int npspin = 1;
     int npkpt = 1;
     int npband = 1;
+    int num_threads = 0;  // 0 = auto-detect based on cores / ranks-per-node
 };
 
 class Parallelization {

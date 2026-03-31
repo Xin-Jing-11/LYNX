@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <mpi.h>
+#include <omp.h>
 
 #ifdef USE_SCALAPACK
 #include "solvers/ScaLAPACK.hpp"
@@ -421,37 +422,46 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
     halo_->execute(X, x_ex.data(), Nband);
     H_->apply(X, Veff, HX.data(), Nband);
 
+    int total = Nd_d * Nband;
     double scale = sigma / e;
-    for (int j = 0; j < Nband; ++j) {
-        for (int i = 0; i < Nd_d; ++i) {
-            int idx = i + j * Nd_d;
-            Y[idx] = scale * (HX[idx] - c * X[idx]);
-        }
+    #pragma omp parallel for schedule(static)
+    for (int idx = 0; idx < total; ++idx) {
+        Y[idx] = scale * (HX[idx] - c * X[idx]);
     }
 
     // Save X as Xold
     std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(double));
+
+    // Use pointer swap instead of memcpy in iteration loop
+    double* pY = Y;
+    double* pXold = Xold.data();
+    double* pXnew = Xnew.data();
 
     for (int k = 2; k <= degree; ++k) {
         sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
         double gamma = 2.0 * sigma_new / e;
 
         // Xnew = gamma * (H*Y - c*Y) - sigma*sigma_new * Xold
-        halo_->execute(Y, x_ex.data(), Nband);
-        H_->apply(Y, Veff, HX.data(), Nband);
+        halo_->execute(pY, x_ex.data(), Nband);
+        H_->apply(pY, Veff, HX.data(), Nband);
 
         double ss = sigma * sigma_new;
-        for (int j = 0; j < Nband; ++j) {
-            for (int i = 0; i < Nd_d; ++i) {
-                int idx = i + j * Nd_d;
-                Xnew[idx] = gamma * (HX[idx] - c * Y[idx]) - ss * Xold[idx];
-            }
+        #pragma omp parallel for schedule(static)
+        for (int idx = 0; idx < total; ++idx) {
+            pXnew[idx] = gamma * (HX[idx] - c * pY[idx]) - ss * pXold[idx];
         }
 
-        // Rotate: Xold <- Y, Y <- Xnew
-        std::memcpy(Xold.data(), Y, Nd_d * Nband * sizeof(double));
-        std::memcpy(Y, Xnew.data(), Nd_d * Nband * sizeof(double));
+        // Pointer swap: Xold <- Y, Y <- Xnew
+        double* tmp = pXold;
+        pXold = pY;
+        pY = pXnew;
+        pXnew = tmp;
         sigma = sigma_new;
+    }
+
+    // Copy result back to caller's Y buffer if needed
+    if (pY != Y) {
+        std::memcpy(Y, pY, Nd_d * Nband * sizeof(double));
     }
 }
 
@@ -740,33 +750,43 @@ void EigenSolver::chebyshev_filter_kpt(const Complex* X, Complex* Y, const doubl
     // Y = (H*X - c*X) * (sigma/e)
     H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
 
+    int total = Nd_d * Nband;
     double scale = sigma / e;
-    for (int j = 0; j < Nband; ++j) {
-        for (int i = 0; i < Nd_d; ++i) {
-            int idx = i + j * Nd_d;
-            Y[idx] = scale * (HX[idx] - c * X[idx]);
-        }
+    #pragma omp parallel for schedule(static)
+    for (int idx = 0; idx < total; ++idx) {
+        Y[idx] = scale * (HX[idx] - c * X[idx]);
     }
 
     std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(Complex));
+
+    // Use pointer swap instead of memcpy in iteration loop
+    Complex* pY = Y;
+    Complex* pXold = Xold.data();
+    Complex* pXnew = Xnew.data();
 
     for (int k = 2; k <= degree; ++k) {
         sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
         double gamma = 2.0 * sigma_new / e;
 
-        H_->apply_kpt(Y, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+        H_->apply_kpt(pY, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
 
         double ss = sigma * sigma_new;
-        for (int j = 0; j < Nband; ++j) {
-            for (int i = 0; i < Nd_d; ++i) {
-                int idx = i + j * Nd_d;
-                Xnew[idx] = gamma * (HX[idx] - c * Y[idx]) - ss * Xold[idx];
-            }
+        #pragma omp parallel for schedule(static)
+        for (int idx = 0; idx < total; ++idx) {
+            pXnew[idx] = gamma * (HX[idx] - c * pY[idx]) - ss * pXold[idx];
         }
 
-        std::memcpy(Xold.data(), Y, Nd_d * Nband * sizeof(Complex));
-        std::memcpy(Y, Xnew.data(), Nd_d * Nband * sizeof(Complex));
+        // Pointer swap
+        Complex* tmp = pXold;
+        pXold = pY;
+        pY = pXnew;
+        pXnew = tmp;
         sigma = sigma_new;
+    }
+
+    // Copy result back to caller's Y buffer if needed
+    if (pY != Y) {
+        std::memcpy(Y, pY, Nd_d * Nband * sizeof(Complex));
     }
 }
 
@@ -1070,35 +1090,45 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
         H_->apply_spinor_kpt(psi_work, Veff_spinor, HX.data(), Nband_loc, Nd_d,
                               kpt_cart, cell_lengths);
 
+        int total_spinor = Nd_d_spinor * Nband_loc;
         double scale = sigma / e;
-        for (int j = 0; j < Nband_loc; ++j) {
-            for (int i = 0; i < Nd_d_spinor; ++i) {
-                int idx = i + j * Nd_d_spinor;
-                Y[idx] = scale * (HX[idx] - c_cheb * psi_work[idx]);
-            }
+        #pragma omp parallel for schedule(static)
+        for (int idx = 0; idx < total_spinor; ++idx) {
+            Y[idx] = scale * (HX[idx] - c_cheb * psi_work[idx]);
         }
 
         std::memcpy(Xold.data(), psi_work, Nd_d_spinor * Nband_loc * sizeof(Complex));
+
+        // Use pointer swap instead of memcpy in iteration loop
+        Complex* pY_s = Y.data();
+        Complex* pXold_s = Xold.data();
+        Complex* pXnew_s = Xnew.data();
 
         for (int k = 2; k <= cheb_degree; ++k) {
             double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
             double gamma = 2.0 * sigma_new / e;
 
-            H_->apply_spinor_kpt(Y.data(), Veff_spinor, HX.data(), Nband_loc, Nd_d,
+            H_->apply_spinor_kpt(pY_s, Veff_spinor, HX.data(), Nband_loc, Nd_d,
                                   kpt_cart, cell_lengths);
 
             double ss = sigma * sigma_new;
-            for (int j = 0; j < Nband_loc; ++j) {
-                for (int i = 0; i < Nd_d_spinor; ++i) {
-                    int idx = i + j * Nd_d_spinor;
-                    Xnew[idx] = gamma * (HX[idx] - c_cheb * Y[idx]) - ss * Xold[idx];
-                }
+            #pragma omp parallel for schedule(static)
+            for (int idx = 0; idx < total_spinor; ++idx) {
+                pXnew_s[idx] = gamma * (HX[idx] - c_cheb * pY_s[idx]) - ss * pXold_s[idx];
             }
 
-            std::memcpy(Xold.data(), Y.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
-            std::memcpy(Y.data(), Xnew.data(), Nd_d_spinor * Nband_loc * sizeof(Complex));
+            // Pointer swap
+            Complex* tmp_s = pXold_s;
+            pXold_s = pY_s;
+            pY_s = pXnew_s;
+            pXnew_s = tmp_s;
             sigma = sigma_new;
 
+        }
+
+        // Copy result back to Y vector if needed
+        if (pY_s != Y.data()) {
+            std::memcpy(Y.data(), pY_s, Nd_d_spinor * Nband_loc * sizeof(Complex));
         }
     }
 

@@ -1,5 +1,6 @@
 #include "operators/Laplacian.hpp"
 #include <cmath>
+#include <omp.h>
 
 namespace lynx {
 
@@ -72,28 +73,34 @@ void Laplacian::apply_orth_impl(const T* x_ex, const double* V, T* y,
 
     double diag_coeff = a * (cx[0] + cy[0] + cz[0]) + c;
 
-    for (int n = 0; n < ncol; ++n) {
+    int nxny = nx * ny;
+    int total_nk = ncol * nz;
+    #pragma omp parallel for schedule(static)
+    for (int nk = 0; nk < total_nk; ++nk) {
+        int n = nk / nz;
+        int k = nk % nz;
         const T* xn = x_ex + n * nd_ex;
         T* yn = y + n * nd;
 
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx = (i + FDn) + (j + FDn) * nx_ex + (k + FDn) * nxny_ex;
-                    int loc = i + j * nx + k * nx * ny;
+        for (int j = 0; j < ny; ++j) {
+            int offset = k * nxny + j * nx;
+            int offset_ex = (k + FDn) * nxny_ex + (j + FDn) * nx_ex + FDn;
+            #pragma omp simd
+            for (int i = 0; i < nx; ++i) {
+                int idx = offset_ex + i;
+                int loc = offset + i;
 
-                    T val = diag_coeff * xn[idx];
+                T val = diag_coeff * xn[idx];
 
-                    for (int p = 1; p <= FDn; ++p) {
-                        val += a * cx[p] * (xn[idx + p] + xn[idx - p]);
-                        val += a * cy[p] * (xn[idx + p * nx_ex] + xn[idx - p * nx_ex]);
-                        val += a * cz[p] * (xn[idx + p * nxny_ex] + xn[idx - p * nxny_ex]);
-                    }
-
-                    if (V) val += b * V[loc] * xn[idx];
-
-                    yn[loc] = val;
+                for (int p = 1; p <= FDn; ++p) {
+                    val += a * cx[p] * (xn[idx + p] + xn[idx - p]);
+                    val += a * cy[p] * (xn[idx + p * nx_ex] + xn[idx - p * nx_ex]);
+                    val += a * cz[p] * (xn[idx + p * nxny_ex] + xn[idx - p * nxny_ex]);
                 }
+
+                if (V) val += b * V[loc] * xn[idx];
+
+                yn[loc] = val;
             }
         }
     }
@@ -128,62 +135,67 @@ void Laplacian::apply_nonorth_impl(const T* x_ex, const double* V, T* y,
     bool has_xz = cxz && std::abs(cxz[1]) > 1e-30;
     bool has_yz = cyz && std::abs(cyz[1]) > 1e-30;
 
-    for (int n = 0; n < ncol; ++n) {
+    int nxny = nx * ny;
+    int total_nk = ncol * nz;
+    #pragma omp parallel for schedule(static)
+    for (int nk = 0; nk < total_nk; ++nk) {
+        int n = nk / nz;
+        int k = nk % nz;
         const T* xn = x_ex + n * nd_ex;
         T* yn = y + n * nd;
 
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx = (i + FDn) + (j + FDn) * nx_ex + (k + FDn) * nxny_ex;
-                    int loc = i + j * nx + k * nx * ny;
+        for (int j = 0; j < ny; ++j) {
+            int offset = k * nxny + j * nx;
+            int offset_ex = (k + FDn) * nxny_ex + (j + FDn) * nx_ex + FDn;
+            for (int i = 0; i < nx; ++i) {
+                int idx = offset_ex + i;
+                int loc = offset + i;
 
-                    T val = diag_coeff * xn[idx];
+                T val = diag_coeff * xn[idx];
 
-                    for (int p = 1; p <= FDn; ++p) {
-                        val += a * cx[p] * (xn[idx + p] + xn[idx - p]);
-                        val += a * cy[p] * (xn[idx + p * nx_ex] + xn[idx - p * nx_ex]);
-                        val += a * cz[p] * (xn[idx + p * nxny_ex] + xn[idx - p * nxny_ex]);
-                    }
-
-                    if (has_xy) {
-                        for (int p = 1; p <= FDn; ++p) {
-                            for (int q = 1; q <= FDn; ++q) {
-                                T mixed = xn[idx + p + q * nx_ex]
-                                        - xn[idx + p - q * nx_ex]
-                                        - xn[idx - p + q * nx_ex]
-                                        + xn[idx - p - q * nx_ex];
-                                val += a * cxy[p] * d1y[q] * mixed;
-                            }
-                        }
-                    }
-                    if (has_xz) {
-                        for (int p = 1; p <= FDn; ++p) {
-                            for (int q = 1; q <= FDn; ++q) {
-                                T mixed = xn[idx + p + q * nxny_ex]
-                                        - xn[idx + p - q * nxny_ex]
-                                        - xn[idx - p + q * nxny_ex]
-                                        + xn[idx - p - q * nxny_ex];
-                                val += a * cxz[p] * d1z[q] * mixed;
-                            }
-                        }
-                    }
-                    if (has_yz) {
-                        for (int p = 1; p <= FDn; ++p) {
-                            for (int q = 1; q <= FDn; ++q) {
-                                T mixed = xn[idx + p * nx_ex + q * nxny_ex]
-                                        - xn[idx + p * nx_ex - q * nxny_ex]
-                                        - xn[idx - p * nx_ex + q * nxny_ex]
-                                        + xn[idx - p * nx_ex - q * nxny_ex];
-                                val += a * cyz[p] * d1z[q] * mixed;
-                            }
-                        }
-                    }
-
-                    if (V) val += b * V[loc] * xn[idx];
-
-                    yn[loc] = val;
+                for (int p = 1; p <= FDn; ++p) {
+                    val += a * cx[p] * (xn[idx + p] + xn[idx - p]);
+                    val += a * cy[p] * (xn[idx + p * nx_ex] + xn[idx - p * nx_ex]);
+                    val += a * cz[p] * (xn[idx + p * nxny_ex] + xn[idx - p * nxny_ex]);
                 }
+
+                if (has_xy) {
+                    for (int p = 1; p <= FDn; ++p) {
+                        for (int q = 1; q <= FDn; ++q) {
+                            T mixed = xn[idx + p + q * nx_ex]
+                                    - xn[idx + p - q * nx_ex]
+                                    - xn[idx - p + q * nx_ex]
+                                    + xn[idx - p - q * nx_ex];
+                            val += a * cxy[p] * d1y[q] * mixed;
+                        }
+                    }
+                }
+                if (has_xz) {
+                    for (int p = 1; p <= FDn; ++p) {
+                        for (int q = 1; q <= FDn; ++q) {
+                            T mixed = xn[idx + p + q * nxny_ex]
+                                    - xn[idx + p - q * nxny_ex]
+                                    - xn[idx - p + q * nxny_ex]
+                                    + xn[idx - p - q * nxny_ex];
+                            val += a * cxz[p] * d1z[q] * mixed;
+                        }
+                    }
+                }
+                if (has_yz) {
+                    for (int p = 1; p <= FDn; ++p) {
+                        for (int q = 1; q <= FDn; ++q) {
+                            T mixed = xn[idx + p * nx_ex + q * nxny_ex]
+                                    - xn[idx + p * nx_ex - q * nxny_ex]
+                                    - xn[idx - p * nx_ex + q * nxny_ex]
+                                    + xn[idx - p * nx_ex - q * nxny_ex];
+                            val += a * cyz[p] * d1z[q] * mixed;
+                        }
+                    }
+                }
+
+                if (V) val += b * V[loc] * xn[idx];
+
+                yn[loc] = val;
             }
         }
     }
