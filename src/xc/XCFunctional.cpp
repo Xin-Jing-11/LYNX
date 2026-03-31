@@ -7,6 +7,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <omp.h>
 #include <xc.h>
 #include <xc_funcs.h>
 
@@ -74,9 +75,11 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
 
         std::vector<double> sigma(Nd_d);
         if (is_orth) {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++)
                 sigma[i] = Drho_x[i]*Drho_x[i] + Drho_y[i]*Drho_y[i] + Drho_z[i]*Drho_z[i];
         } else {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) {
                 double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
                 sigma[i] = lapcT(0,0)*dx*dx + lapcT(1,1)*dy*dy + lapcT(2,2)*dz*dz
@@ -85,29 +88,40 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         }
         // Floor sigma to prevent division by zero in SCAN v2 = d(nε)/d|∇n| / |∇n|
         // Matches SPARC's exchangeCorrelation.c line 170: if (sigma < 1E-14) sigma = 1E-14
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
 
-        // 3. Evaluate mGGA via libxc (SCAN/rSCAN/r2SCAN)
-        xc_func_type mgga_x, mgga_c;
-        xc_func_init(&mgga_x, xc_id, XC_UNPOLARIZED);
-        xc_func_init(&mgga_c, cc_id, XC_UNPOLARIZED);
-
+        // 3. Evaluate mGGA via libxc (SCAN/rSCAN/r2SCAN) — thread-parallel
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0), vsigma_x(Nd_d, 0.0), vlapl_x(Nd_d, 0.0), vtau_x(Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(Nd_d, 0.0), vsigma_c(Nd_d, 0.0), vlapl_c(Nd_d, 0.0), vtau_c(Nd_d, 0.0);
         std::vector<double> lapl(Nd_d, 0.0);
 
-        xc_mgga_exc_vxc(&mgga_x, np, rho, sigma.data(), lapl.data(), tau_in,
-                         zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
-        xc_mgga_exc_vxc(&mgga_c, np, rho, sigma.data(), lapl.data(), tau_in,
-                         zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
-
-        xc_func_end(&mgga_x);
-        xc_func_end(&mgga_c);
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            int chunk = (Nd_d + nt - 1) / nt;
+            int start = tid * chunk;
+            int end = std::min(start + chunk, Nd_d);
+            int np_t = end - start;
+            if (np_t > 0) {
+                xc_func_type mx, mc;
+                xc_func_init(&mx, xc_id, XC_UNPOLARIZED);
+                xc_func_init(&mc, cc_id, XC_UNPOLARIZED);
+                xc_mgga_exc_vxc(&mx, np_t, &rho[start], &sigma[start], &lapl[start], &tau_in[start],
+                                &zk_x[start], &vrho_x[start], &vsigma_x[start], &vlapl_x[start], &vtau_x[start]);
+                xc_mgga_exc_vxc(&mc, np_t, &rho[start], &sigma[start], &lapl[start], &tau_in[start],
+                                &zk_c[start], &vrho_c[start], &vsigma_c[start], &vlapl_c[start], &vtau_c[start]);
+                xc_func_end(&mx);
+                xc_func_end(&mc);
+            }
+        }
 
         // 4. Combine outputs: exc, Vxc, Dxcdgrho = 2*vsigma
         std::vector<double> v2xc(Nd_d);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             exc[i] = zk_x[i] + zk_c[i];
             Vxc[i] = vrho_x[i] + vrho_c[i];
@@ -121,12 +135,14 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         // 6. GGA divergence correction to Vxc (same as GGA)
         std::vector<double> fx(Nd_d), fy(Nd_d), fz(Nd_d);
         if (is_orth) {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) {
                 fx[i] = Drho_x[i] * v2xc[i];
                 fy[i] = Drho_y[i] * v2xc[i];
                 fz[i] = Drho_z[i] * v2xc[i];
             }
         } else {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) {
                 double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
                 fx[i] = (lapcT(0,0)*dx + lapcT(0,1)*dy + lapcT(0,2)*dz) * v2xc[i];
@@ -138,18 +154,22 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         std::vector<double> f_ex(nd_ex), DDf(Nd_d);
         halo_->execute(fx.data(), f_ex.data(), 1);
         gradient_->apply(f_ex.data(), DDf.data(), 0, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
 
         halo_->execute(fy.data(), f_ex.data(), 1);
         gradient_->apply(f_ex.data(), DDf.data(), 1, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
 
         halo_->execute(fz.data(), f_ex.data(), 1);
         gradient_->apply(f_ex.data(), DDf.data(), 2, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
 
         // 7. Output vtau
         if (vtau_out) {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++)
                 vtau_out[i] = vtau_x[i] + vtau_c[i];
         }
@@ -174,9 +194,11 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
 
         std::vector<double> sigma(Nd_d);
         if (is_orth) {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++)
                 sigma[i] = Drho_x[i]*Drho_x[i] + Drho_y[i]*Drho_y[i] + Drho_z[i]*Drho_z[i];
         } else {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) {
                 double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
                 sigma[i] = lapcT(0,0)*dx*dx + lapcT(1,1)*dy*dy + lapcT(2,2)*dz*dz
@@ -184,18 +206,37 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
             }
         }
 
-        // Evaluate exchange and correlation via libxc
+        // Evaluate exchange and correlation via libxc — thread-parallel
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0), vsigma_x(Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(Nd_d, 0.0), vsigma_c(Nd_d, 0.0);
 
-        xc_gga_exc_vxc(&func_x, np, rho, sigma.data(), zk_x.data(), vrho_x.data(), vsigma_x.data());
-        xc_gga_exc_vxc(&func_c, np, rho, sigma.data(), zk_c.data(), vrho_c.data(), vsigma_c.data());
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            int chunk = (Nd_d + nt - 1) / nt;
+            int start = tid * chunk;
+            int end = std::min(start + chunk, Nd_d);
+            int np_t = end - start;
+            if (np_t > 0) {
+                xc_func_type fx, fc;
+                xc_func_init(&fx, xc_id, XC_UNPOLARIZED);
+                xc_func_init(&fc, cc_id, XC_UNPOLARIZED);
+                xc_gga_exc_vxc(&fx, np_t, &rho[start], &sigma[start],
+                               &zk_x[start], &vrho_x[start], &vsigma_x[start]);
+                xc_gga_exc_vxc(&fc, np_t, &rho[start], &sigma[start],
+                               &zk_c[start], &vrho_c[start], &vsigma_c[start]);
+                xc_func_end(&fx);
+                xc_func_end(&fc);
+            }
+        }
 
         // Apply exchange scaling for hybrid functionals (1-exx_frac during Fock loop)
         double xs = exchange_scale_;
 
         // Combine: Dxcdgrho = 2*vsigma (our convention for -div(Dxcdgrho * ∇ρ))
         std::vector<double> v2xc(Nd_d);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             exc[i] = xs * zk_x[i] + zk_c[i];
             Vxc[i] = xs * vrho_x[i] + vrho_c[i];
@@ -208,12 +249,14 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         // GGA divergence correction: Vxc += -div(v2xc * lapcT * ∇ρ)
         std::vector<double> fx(Nd_d), fy(Nd_d), fz(Nd_d);
         if (is_orth) {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) {
                 fx[i] = Drho_x[i] * v2xc[i];
                 fy[i] = Drho_y[i] * v2xc[i];
                 fz[i] = Drho_z[i] * v2xc[i];
             }
         } else {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) {
                 double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
                 fx[i] = (lapcT(0,0)*dx + lapcT(0,1)*dy + lapcT(0,2)*dz) * v2xc[i];
@@ -225,32 +268,54 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
         std::vector<double> f_ex(nd_ex), DDf(Nd_d);
         halo_->execute(fx.data(), f_ex.data(), 1);
         gradient_->apply(f_ex.data(), DDf.data(), 0, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
 
         halo_->execute(fy.data(), f_ex.data(), 1);
         gradient_->apply(f_ex.data(), DDf.data(), 1, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
 
         halo_->execute(fz.data(), f_ex.data(), 1);
         gradient_->apply(f_ex.data(), DDf.data(), 2, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) Vxc[i] -= DDf[i];
 
     } else {
-        // LDA (or GGA fallback when no gradient available)
-        // For GGA without gradient, fall back to LDA_X + LDA_C_PW
+        // LDA (or GGA fallback when no gradient available) — thread-parallel libxc
+        int lda_x_id = xc_id, lda_c_id = cc_id;
         if (is_gga()) {
             xc_func_end(&func_x);
             xc_func_end(&func_c);
-            xc_func_init(&func_x, XC_LDA_X, XC_UNPOLARIZED);
-            xc_func_init(&func_c, XC_LDA_C_PW, XC_UNPOLARIZED);
+            lda_x_id = XC_LDA_X;
+            lda_c_id = XC_LDA_C_PW;
+            xc_func_init(&func_x, lda_x_id, XC_UNPOLARIZED);
+            xc_func_init(&func_c, lda_c_id, XC_UNPOLARIZED);
         }
 
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(Nd_d, 0.0);
 
-        xc_lda_exc_vxc(&func_x, np, rho, zk_x.data(), vrho_x.data());
-        xc_lda_exc_vxc(&func_c, np, rho, zk_c.data(), vrho_c.data());
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            int chunk = (Nd_d + nt - 1) / nt;
+            int start = tid * chunk;
+            int end = std::min(start + chunk, Nd_d);
+            int np_t = end - start;
+            if (np_t > 0) {
+                xc_func_type fx, fc;
+                xc_func_init(&fx, lda_x_id, XC_UNPOLARIZED);
+                xc_func_init(&fc, lda_c_id, XC_UNPOLARIZED);
+                xc_lda_exc_vxc(&fx, np_t, &rho[start], &zk_x[start], &vrho_x[start]);
+                xc_lda_exc_vxc(&fc, np_t, &rho[start], &zk_c[start], &vrho_c[start]);
+                xc_func_end(&fx);
+                xc_func_end(&fc);
+            }
+        }
 
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             exc[i] = zk_x[i] + zk_c[i];
             Vxc[i] = vrho_x[i] + vrho_c[i];
@@ -281,6 +346,7 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
 
     // Convert our [total|up|down] to libxc interleaved [up0,dn0,up1,dn1,...]
     std::vector<double> rho_libxc(2 * Nd_d);
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < Nd_d; i++) {
         rho_libxc[2*i]     = rho[Nd_d + i];
         rho_libxc[2*i + 1] = rho[2*Nd_d + i];
@@ -317,6 +383,7 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
 
         // sigma layout for SPARC: [total(Nd_d) | up(Nd_d) | dn(Nd_d)]
         std::vector<double> sigma(3 * Nd_d);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             sigma[i] = dot_metric(i, i);             // |grad rho_total|^2
             int iu = Nd_d + i, id = 2*Nd_d + i;
@@ -324,6 +391,7 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             sigma[2*Nd_d + i] = dot_metric(id, id);  // |grad rho_dn|^2
         }
         // Floor sigma (matching SPARC)
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < 3 * Nd_d; i++) {
             if (sigma[i] < 1e-14) sigma[i] = 1e-14;
         }
@@ -334,6 +402,7 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         std::vector<double> sigma_libxc(3 * Nd_d);
         std::vector<double> tau_libxc(2 * Nd_d, 0.0);
         std::vector<double> lapl_libxc(2 * Nd_d, 0.0);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             int iu = Nd_d + i, id = 2*Nd_d + i;
             sigma_libxc[3*i]     = sigma[iu];  // σ_uu = |∇ρ_up|²
@@ -346,22 +415,37 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             }
         }
 
-        xc_func_type mgga_x, mgga_c;
-        xc_func_init(&mgga_x, xc_id, XC_POLARIZED);
-        xc_func_init(&mgga_c, cc_id, XC_POLARIZED);
-
+        // Evaluate SCAN via libxc (spin-polarized) — thread-parallel
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0), vsigma_x(3*Nd_d, 0.0), vlapl_x(2*Nd_d, 0.0), vtau_x(2*Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(2*Nd_d, 0.0), vsigma_c(3*Nd_d, 0.0), vlapl_c(2*Nd_d, 0.0), vtau_c(2*Nd_d, 0.0);
 
-        xc_mgga_exc_vxc(&mgga_x, np, rho_libxc.data(), sigma_libxc.data(), lapl_libxc.data(), tau_libxc.data(),
-                         zk_x.data(), vrho_x.data(), vsigma_x.data(), vlapl_x.data(), vtau_x.data());
-        xc_mgga_exc_vxc(&mgga_c, np, rho_libxc.data(), sigma_libxc.data(), lapl_libxc.data(), tau_libxc.data(),
-                         zk_c.data(), vrho_c.data(), vsigma_c.data(), vlapl_c.data(), vtau_c.data());
-
-        xc_func_end(&mgga_x);
-        xc_func_end(&mgga_c);
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            int chunk = (Nd_d + nt - 1) / nt;
+            int start = tid * chunk;
+            int end = std::min(start + chunk, Nd_d);
+            int np_t = end - start;
+            if (np_t > 0) {
+                xc_func_type mx, mc;
+                xc_func_init(&mx, xc_id, XC_POLARIZED);
+                xc_func_init(&mc, cc_id, XC_POLARIZED);
+                xc_mgga_exc_vxc(&mx, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
+                                &lapl_libxc[2*start], &tau_libxc[2*start],
+                                &zk_x[start], &vrho_x[2*start], &vsigma_x[3*start],
+                                &vlapl_x[2*start], &vtau_x[2*start]);
+                xc_mgga_exc_vxc(&mc, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
+                                &lapl_libxc[2*start], &tau_libxc[2*start],
+                                &zk_c[start], &vrho_c[2*start], &vsigma_c[3*start],
+                                &vlapl_c[2*start], &vtau_c[2*start]);
+                xc_func_end(&mx);
+                xc_func_end(&mc);
+            }
+        }
 
         // Combine: exc, Vxc (per-spin, de-interleave from libxc)
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             exc[i] = zk_x[i] + zk_c[i];
             Vxc[i]        = vrho_x[2*i] + vrho_c[2*i];         // up
@@ -397,6 +481,7 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         std::vector<double> fx_up(Nd_d), fy_up(Nd_d), fz_up(Nd_d);
         std::vector<double> fx_dn(Nd_d), fy_dn(Nd_d), fz_dn(Nd_d);
 
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             double vs_uu = vsigma_x[3*i]   + vsigma_c[3*i];
             double vs_ud = vsigma_x[3*i+1] + vsigma_c[3*i+1];
@@ -429,12 +514,15 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         auto apply_div = [&](double* fx, double* fy, double* fz, double* Vxc_s) {
             halo_->execute(fx, f_ex.data(), 1);
             gradient_->apply(f_ex.data(), DDf.data(), 0, 1);
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
             halo_->execute(fy, f_ex.data(), 1);
             gradient_->apply(f_ex.data(), DDf.data(), 1, 1);
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
             halo_->execute(fz, f_ex.data(), 1);
             gradient_->apply(f_ex.data(), DDf.data(), 2, 1);
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
         };
 
@@ -480,14 +568,30 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
             sigma_libxc[3*i + 2] = dot_metric(id, id);
         }
 
-        // Evaluate via libxc
+        // Evaluate via libxc — thread-parallel
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0), vsigma_x(3*Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(2*Nd_d, 0.0), vsigma_c(3*Nd_d, 0.0);
 
-        xc_gga_exc_vxc(&func_x, np, rho_libxc.data(), sigma_libxc.data(),
-                        zk_x.data(), vrho_x.data(), vsigma_x.data());
-        xc_gga_exc_vxc(&func_c, np, rho_libxc.data(), sigma_libxc.data(),
-                        zk_c.data(), vrho_c.data(), vsigma_c.data());
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            int chunk = (Nd_d + nt - 1) / nt;
+            int start = tid * chunk;
+            int end = std::min(start + chunk, Nd_d);
+            int np_t = end - start;
+            if (np_t > 0) {
+                xc_func_type fx, fc;
+                xc_func_init(&fx, xc_id, XC_POLARIZED);
+                xc_func_init(&fc, cc_id, XC_POLARIZED);
+                xc_gga_exc_vxc(&fx, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
+                               &zk_x[start], &vrho_x[2*start], &vsigma_x[3*start]);
+                xc_gga_exc_vxc(&fc, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
+                               &zk_c[start], &vrho_c[2*start], &vsigma_c[3*start]);
+                xc_func_end(&fx);
+                xc_func_end(&fc);
+            }
+        }
 
         // Apply exchange scaling for hybrid functionals
         double xs = exchange_scale_;
@@ -537,12 +641,15 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         auto apply_div = [&](double* fx, double* fy, double* fz, double* Vxc_s) {
             halo_->execute(fx, f_ex.data(), 1);
             gradient_->apply(f_ex.data(), DDf.data(), 0, 1);
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
             halo_->execute(fy, f_ex.data(), 1);
             gradient_->apply(f_ex.data(), DDf.data(), 1, 1);
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
             halo_->execute(fz, f_ex.data(), 1);
             gradient_->apply(f_ex.data(), DDf.data(), 2, 1);
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; i++) Vxc_s[i] -= DDf[i];
         };
 
@@ -559,20 +666,40 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
         }
 
     } else {
-        // LDA spin (or GGA fallback)
+        // LDA spin (or GGA fallback) — thread-parallel libxc
+        int lda_x_id = xc_id, lda_c_id = cc_id;
         if (is_gga()) {
             xc_func_end(&func_x);
             xc_func_end(&func_c);
-            xc_func_init(&func_x, XC_LDA_X, XC_POLARIZED);
-            xc_func_init(&func_c, XC_LDA_C_PW, XC_POLARIZED);
+            lda_x_id = XC_LDA_X;
+            lda_c_id = XC_LDA_C_PW;
+            xc_func_init(&func_x, lda_x_id, XC_POLARIZED);
+            xc_func_init(&func_c, lda_c_id, XC_POLARIZED);
         }
 
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0);
         std::vector<double> zk_c(Nd_d, 0.0), vrho_c(2*Nd_d, 0.0);
 
-        xc_lda_exc_vxc(&func_x, np, rho_libxc.data(), zk_x.data(), vrho_x.data());
-        xc_lda_exc_vxc(&func_c, np, rho_libxc.data(), zk_c.data(), vrho_c.data());
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nt = omp_get_num_threads();
+            int chunk = (Nd_d + nt - 1) / nt;
+            int start = tid * chunk;
+            int end = std::min(start + chunk, Nd_d);
+            int np_t = end - start;
+            if (np_t > 0) {
+                xc_func_type fx, fc;
+                xc_func_init(&fx, lda_x_id, XC_POLARIZED);
+                xc_func_init(&fc, lda_c_id, XC_POLARIZED);
+                xc_lda_exc_vxc(&fx, np_t, &rho_libxc[2*start], &zk_x[start], &vrho_x[2*start]);
+                xc_lda_exc_vxc(&fc, np_t, &rho_libxc[2*start], &zk_c[start], &vrho_c[2*start]);
+                xc_func_end(&fx);
+                xc_func_end(&fc);
+            }
+        }
 
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; i++) {
             exc[i] = zk_x[i] + zk_c[i];
             Vxc[i]        = vrho_x[2*i] + vrho_c[2*i];

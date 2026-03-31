@@ -4,6 +4,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <omp.h>
 
 namespace lynx {
 
@@ -157,6 +158,7 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
             const auto& gpos = inf.grid_pos[iat];
             int a_off = IP_displ_global[global_atom] * ncol;
 
+            #pragma omp parallel for schedule(static)
             for (int n = 0; n < ncol; ++n) {
                 const double* psi_n = psi + n * Nd_d;
                 for (int jp = 0; jp < nproj; ++jp) {
@@ -207,6 +209,7 @@ void NonlocalProjector::apply(const double* psi, double* Hpsi, int ncol, double 
             const auto& gpos = inf.grid_pos[iat];
             int a_off = IP_displ_global[global_atom] * ncol;
 
+            #pragma omp parallel for schedule(static)
             for (int n = 0; n < ncol; ++n) {
                 double* Hpsi_n = Hpsi + n * Nd_d;
                 for (int ig = 0; ig < ndc; ++ig) {
@@ -268,6 +271,7 @@ void NonlocalProjector::apply_kpt(const Complex* psi, Complex* Hpsi, int ncol, d
 
             int a_off = IP_displ_global[global_atom] * ncol;
 
+            #pragma omp parallel for schedule(static)
             for (int n = 0; n < ncol; ++n) {
                 const Complex* psi_n = psi + n * Nd_d;
                 for (int jp = 0; jp < nproj; ++jp) {
@@ -325,6 +329,7 @@ void NonlocalProjector::apply_kpt(const Complex* psi, Complex* Hpsi, int ncol, d
 
             int a_off = IP_displ_global[global_atom] * ncol;
 
+            #pragma omp parallel for schedule(static)
             for (int n = 0; n < ncol; ++n) {
                 Complex* Hpsi_n = Hpsi + n * Nd_d;
                 for (int ig = 0; ig < ndc; ++ig) {

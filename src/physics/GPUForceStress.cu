@@ -26,7 +26,18 @@ void halo_exchange_gpu(
     int nx, int ny, int nz, int FDn, int ncol,
     bool periodic_x, bool periodic_y, bool periodic_z);
 
+void halo_exchange_batched_nomemset_gpu(
+    const double* d_x, double* d_x_ex,
+    int nx, int ny, int nz, int FDn, int ncol,
+    bool periodic_x, bool periodic_y, bool periodic_z);
+
 void gradient_gpu(
+    const double* d_x_ex, double* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    int direction, int ncol);
+
+void gradient_v3_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
@@ -418,14 +429,14 @@ void compute_force_stress_gpu(
     // ----------------------------------------------------------------
     // Step 1: Halo exchange all bands (once)
     // ----------------------------------------------------------------
-    halo_exchange_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
+    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
 
     // ----------------------------------------------------------------
-    // Step 2: Compute 3 gradient directions
+    // Step 2: Compute 3 gradient directions (batched V2 — single launch per direction)
     // ----------------------------------------------------------------
-    gradient_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
-    gradient_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
-    gradient_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
 
     // ----------------------------------------------------------------
     // Step 3: Kinetic stress (6 Voigt pairs)
@@ -458,7 +469,8 @@ void compute_force_stress_gpu(
         int block_size = 256;
         size_t smem_tiled = (NL_TILE_FS + block_size / 32) * sizeof(double);
 
-        fused_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled>>>(
+        dim3 grid_nl(n_influence, Nband);
+        fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled>>>(
             d_psi, d_Chi_flat, d_gpos_flat,
             d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
             d_alpha, Nd, Nband, Nband, 0, dV, n_influence);
@@ -485,7 +497,7 @@ void compute_force_stress_gpu(
             for (int dim = 0; dim < 3; ++dim) {
                 CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
-                fused_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled>>>(
+                fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled>>>(
                     d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
                     d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
                     d_beta, Nd, Nband, Nband, 0, dV, n_influence);
@@ -1505,12 +1517,12 @@ void compute_mgga_stress_gpu(
     double* d_dot = ctx.scratch_pool.alloc<double>(1);
     CUDA_CHECK(cudaMemset(d_dot, 0, sizeof(double)));
 
-    // Halo exchange + gradients
+    // Halo exchange + gradients (batched V2 — single launch per direction)
     double* d_x_ex = ctx.buf.x_ex;
-    halo_exchange_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
-    gradient_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
-    gradient_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
-    gradient_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
+    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
 
     // Compute mGGA psi stress: 6 Voigt pairs
     {

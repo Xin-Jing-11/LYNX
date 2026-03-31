@@ -41,7 +41,7 @@ if(BUILD_PYTHON)
 endif()
 
 target_include_directories(lynx_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(lynx_core PUBLIC MPI::MPI_CXX nlohmann_json::nlohmann_json)
+target_link_libraries(lynx_core PUBLIC MPI::MPI_CXX nlohmann_json::nlohmann_json OpenMP::OpenMP_CXX)
 
 # Math libraries (MKL or OpenBLAS+LAPACK+ScaLAPACK)
 if(MATH_LIBRARIES)

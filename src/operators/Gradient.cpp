@@ -1,4 +1,5 @@
 #include "operators/Gradient.hpp"
+#include <omp.h>
 
 namespace lynx {
 
@@ -31,21 +32,29 @@ void Gradient::apply_impl(const T* x, T* y, int direction, int ncol) const {
         case 2: coeff = stencil_->D1_coeff_z(); stride = nx_ex * ny_ex; break;
     }
 
-    for (int col = 0; col < ncol; ++col) {
-        int nd = nx * ny * nz;
-        const T* xc = x + col * nx_ex * ny_ex * (nz + 2 * FDn);
+    int nd = nx * ny * nz;
+    int nxny = nx * ny;
+    int nxny_ex = nx_ex * ny_ex;
+    int nd_ex = nxny_ex * (nz + 2 * FDn);
+    int total_ck = ncol * nz;
+    #pragma omp parallel for schedule(static)
+    for (int ck = 0; ck < total_ck; ++ck) {
+        int col = ck / nz;
+        int k = ck % nz;
+        const T* xc = x + col * nd_ex;
         T* yc = y + col * nd;
 
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx = (i + FDn) + (j + FDn) * nx_ex + (k + FDn) * nx_ex * ny_ex;
-                    T val = T(0);
-                    for (int p = 1; p <= FDn; ++p) {
-                        val += coeff[p] * (xc[idx + p * stride] - xc[idx - p * stride]);
-                    }
-                    yc[i + j * nx + k * nx * ny] = val;
+        for (int j = 0; j < ny; ++j) {
+            int offset_ex = (k + FDn) * nxny_ex + (j + FDn) * nx_ex + FDn;
+            int offset = k * nxny + j * nx;
+            #pragma omp simd
+            for (int i = 0; i < nx; ++i) {
+                int idx = offset_ex + i;
+                T val = T(0);
+                for (int p = 1; p <= FDn; ++p) {
+                    val += coeff[p] * (xc[idx + p * stride] - xc[idx - p * stride]);
                 }
+                yc[offset + i] = val;
             }
         }
     }
