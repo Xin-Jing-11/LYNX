@@ -19,7 +19,7 @@ void laplacian_orth_gpu(const double* d_x_ex, const double* d_V, double* d_y,
                         double a, double b, double c,
                         double diag_coeff, int ncol);
 
-void laplacian_orth_v2_gpu(const double* d_x_ex, const double* d_V, double* d_y,
+void laplacian_orth_v7_gpu(const double* d_x_ex, const double* d_V, double* d_y,
                             int nx, int ny, int nz, int FDn,
                             int nx_ex, int ny_ex,
                             double a, double b, double c,
@@ -54,7 +54,7 @@ void hamiltonian_apply_local_gpu(
 
     // Step 2: Apply (-0.5*Lap + Veff + c*I) using V2 kernel
     if (is_orthogonal) {
-        laplacian_orth_v2_gpu(d_x_ex, d_Veff, d_Hpsi,
+        laplacian_orth_v7_gpu(d_x_ex, d_Veff, d_Hpsi,
                                nx, ny, nz, FDn, nx_ex, ny_ex,
                                -0.5, 1.0, c, diag_coeff, ncol);
     } else {

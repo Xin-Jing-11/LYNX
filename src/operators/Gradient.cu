@@ -216,6 +216,119 @@ void gradient_v2_gpu(
     CUDA_CHECK(cudaGetLastError());
 }
 
+// ============================================================
+// V3: One column per block — grid.z = nz * ncol (same as Laplacian V7)
+// Eliminates inner loop → ncol× more blocks → much higher occupancy
+// ============================================================
+
+template<int FDN>
+__global__ __launch_bounds__(256, 6)
+void gradient_x_kernel_v3(
+    const double* __restrict__ x_ex,
+    double* __restrict__ y,
+    int nx, int ny, int nz,
+    int nx_ex, int ny_ex, int nxny_ex,
+    int nd, int nd_ex, int ncol)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int flat_z = blockIdx.z;
+    int k = flat_z % nz;
+    int n = flat_z / nz;
+    if (i >= nx || j >= ny) return;
+
+    int idx = (i + FDN) + (j + FDN) * nx_ex + (k + FDN) * nxny_ex + n * nd_ex;
+    int loc = i + j * nx + k * nx * ny + n * nd;
+
+    double val = 0.0;
+    #pragma unroll
+    for (int p = 1; p <= FDN; ++p)
+        val = fma(d_D1x[p], x_ex[idx + p] - x_ex[idx - p], val);
+    y[loc] = val;
+}
+
+template<int FDN>
+__global__ __launch_bounds__(256, 6)
+void gradient_y_kernel_v3(
+    const double* __restrict__ x_ex,
+    double* __restrict__ y,
+    int nx, int ny, int nz,
+    int nx_ex, int ny_ex, int nxny_ex,
+    int nd, int nd_ex, int ncol)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int flat_z = blockIdx.z;
+    int k = flat_z % nz;
+    int n = flat_z / nz;
+    if (i >= nx || j >= ny) return;
+
+    int idx = (i + FDN) + (j + FDN) * nx_ex + (k + FDN) * nxny_ex + n * nd_ex;
+    int loc = i + j * nx + k * nx * ny + n * nd;
+
+    double val = 0.0;
+    #pragma unroll
+    for (int p = 1; p <= FDN; ++p)
+        val = fma(d_D1y[p], x_ex[idx + p * nx_ex] - x_ex[idx - p * nx_ex], val);
+    y[loc] = val;
+}
+
+template<int FDN>
+__global__ __launch_bounds__(256, 6)
+void gradient_z_kernel_v3(
+    const double* __restrict__ x_ex,
+    double* __restrict__ y,
+    int nx, int ny, int nz,
+    int nx_ex, int ny_ex, int nxny_ex,
+    int nd, int nd_ex, int ncol)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int flat_z = blockIdx.z;
+    int k = flat_z % nz;
+    int n = flat_z / nz;
+    if (i >= nx || j >= ny) return;
+
+    int idx = (i + FDN) + (j + FDN) * nx_ex + (k + FDN) * nxny_ex + n * nd_ex;
+    int loc = i + j * nx + k * nx * ny + n * nd;
+
+    double val = 0.0;
+    #pragma unroll
+    for (int p = 1; p <= FDN; ++p)
+        val = fma(d_D1z[p], x_ex[idx + p * nxny_ex] - x_ex[idx - p * nxny_ex], val);
+    y[loc] = val;
+}
+
+void gradient_v3_gpu(
+    const double* d_x_ex, double* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    int direction, int ncol)
+{
+    int nxny_ex = nx_ex * ny_ex;
+    int nd = nx * ny * nz;
+    int nz_ex = nz + 2 * FDn;
+    int nd_ex = nxny_ex * nz_ex;
+
+    dim3 block(32, 8);
+    dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
+
+    if (FDn == 6) {
+        switch (direction) {
+            case 0: gradient_x_kernel_v3<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_kernel_v3<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_kernel_v3<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+        }
+    } else {
+        switch (direction) {
+            case 0: gradient_x_kernel_v3<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_kernel_v3<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_kernel_v3<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+        }
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace gpu
 } // namespace lynx
 #endif // USE_CUDA

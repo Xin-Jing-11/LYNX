@@ -199,13 +199,14 @@ private:
     double* d_tau_ = nullptr;       // [Nd] or [2*Nd] for spin
     double* d_vtau_ = nullptr;      // [Nd] or [2*Nd] for spin
     double* d_vtau_active_ = nullptr;  // points to d_vtau_ or d_vtau_ + Nd_ for per-spin Hamiltonian
-    // Persistent mGGA Hamiltonian work buffers (avoid scratch pool pressure for k-point)
-    double* d_mgga_dpsi_ = nullptr;    // [Nd] gradient of psi (real) — also dpsi_x for non-orth
-    double* d_mgga_dpsi_y_ = nullptr;  // [Nd] gradient y-component (non-orth only)
-    double* d_mgga_dpsi_z_r_ = nullptr; // [Nd] gradient z-component (non-orth only, real)
-    double* d_mgga_vtdpsi_ = nullptr;  // [Nd] vtau * gradient
-    double* d_mgga_div_ = nullptr;     // [Nd] divergence accumulator
-    double* d_mgga_vt_ex_ = nullptr;   // [nd_ex] halo of vtau product (real)
+    // Persistent mGGA Hamiltonian work buffers — sized for Nband columns to enable batching
+    double* d_mgga_dpsi_ = nullptr;    // [Nband*Nd] gradient of psi (real) — also dpsi_x for non-orth
+    double* d_mgga_dpsi_y_ = nullptr;  // [Nband*Nd] gradient y-component (non-orth only)
+    double* d_mgga_dpsi_z_r_ = nullptr; // [Nband*Nd] gradient z-component (non-orth only, real)
+    double* d_mgga_vtdpsi_ = nullptr;  // [Nband*Nd] vtau * gradient
+    double* d_mgga_div_ = nullptr;     // [Nband*Nd] divergence accumulator
+    double* d_mgga_vt_ex_ = nullptr;   // [Nband*nd_ex] halo of vtau product (real)
+    int mgga_nband_ = 0;               // Nband used for mGGA buffer sizing
     void* d_mgga_dpsi_z_ = nullptr;    // [Nd] complex gradient (also dpsi_x for non-orth)
     void* d_mgga_dpsi_yz_ = nullptr;   // [Nd] complex gradient y (non-orth only)
     void* d_mgga_dpsi_zz_ = nullptr;   // [Nd] complex gradient z (non-orth only)

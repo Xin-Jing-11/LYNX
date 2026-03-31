@@ -265,6 +265,11 @@ void upload_precomputed_coefficients(const double* D2x, const double* D2y, const
     CUDA_CHECK(cudaMemcpyToSymbol(d_aD2z, aD2z, (FDn + 1) * sizeof(double)));
 }
 
+// Cached value of 'a' used for precomputed coefficients.
+// Re-uploads only when a changes (avoids redundant cudaMemcpyToSymbol).
+static double s_cached_a = 0.0;
+static bool s_coeffs_initialized = false;
+
 void laplacian_orth_v7_gpu(
     const double* d_x_ex, const double* d_V, double* d_y,
     int nx, int ny, int nz, int FDn,
@@ -273,6 +278,18 @@ void laplacian_orth_v7_gpu(
     double diag_coeff,
     int ncol)
 {
+    // Re-upload precomputed a*D2 coefficients if 'a' changed
+    if (!s_coeffs_initialized || a != s_cached_a) {
+        // Read current D2 from constant memory and re-upload scaled
+        double h_D2x[MAX_FD_COEFF], h_D2y[MAX_FD_COEFF], h_D2z[MAX_FD_COEFF];
+        CUDA_CHECK(cudaMemcpyFromSymbol(h_D2x, d_D2x, (FDn + 1) * sizeof(double)));
+        CUDA_CHECK(cudaMemcpyFromSymbol(h_D2y, d_D2y, (FDn + 1) * sizeof(double)));
+        CUDA_CHECK(cudaMemcpyFromSymbol(h_D2z, d_D2z, (FDn + 1) * sizeof(double)));
+        upload_precomputed_coefficients(h_D2x, h_D2y, h_D2z, a, FDn);
+        s_cached_a = a;
+        s_coeffs_initialized = true;
+    }
+
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
     int nd_ex = nxny_ex * (nz + 2 * FDn);

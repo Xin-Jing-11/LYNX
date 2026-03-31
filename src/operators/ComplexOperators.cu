@@ -645,6 +645,8 @@ __device__ cuDoubleComplex blockReduceSum_z(cuDoubleComplex val, double* smem) {
     return make_cuDoubleComplex(re, im);
 }
 
+// V1 (optimized): One block per (atom, column) — 2D grid
+// blockIdx.x = atom, blockIdx.y = column
 __global__ void fused_gather_chitpsi_z_kernel(
     const cuDoubleComplex* __restrict__ psi,
     const double* __restrict__ Chi_flat,
@@ -662,7 +664,8 @@ __global__ void fused_gather_chitpsi_z_kernel(
     double dV, int n_atoms)
 {
     int iat = blockIdx.x;
-    if (iat >= n_atoms) return;
+    int n = blockIdx.y;
+    if (iat >= n_atoms || n >= ncol_this) return;
 
     int ndc = ndc_arr[iat];
     int np = nproj_arr[iat];
@@ -676,44 +679,39 @@ __global__ void fused_gather_chitpsi_z_kernel(
     double bf_im = bloch_fac[2 * iat + 1];
     cuDoubleComplex bloch = make_cuDoubleComplex(bf_re, bf_im);
 
-    // Shared memory: [NL_TILE_Z complex psi values] [2 * nwarps doubles for reduction]
     extern __shared__ char smem_raw[];
     cuDoubleComplex* psi_tile = reinterpret_cast<cuDoubleComplex*>(smem_raw);
     double* reduce_buf = reinterpret_cast<double*>(smem_raw + NL_TILE_Z * sizeof(cuDoubleComplex));
 
-    for (int n = 0; n < ncol_this; n++) {
-        // Per-thread complex accumulators for each projector
-        cuDoubleComplex dots[NL_MAX_NP_Z];
-        #pragma unroll 4
-        for (int jp = 0; jp < NL_MAX_NP_Z; jp++)
-            dots[jp] = make_cuDoubleComplex(0.0, 0.0);
+    cuDoubleComplex dots[NL_MAX_NP_Z];
+    #pragma unroll 4
+    for (int jp = 0; jp < NL_MAX_NP_Z; jp++)
+        dots[jp] = make_cuDoubleComplex(0.0, 0.0);
 
-        for (int tile = 0; tile < ndc; tile += NL_TILE_Z) {
-            int tile_len = min(NL_TILE_Z, ndc - tile);
+    for (int tile = 0; tile < ndc; tile += NL_TILE_Z) {
+        int tile_len = min(NL_TILE_Z, ndc - tile);
 
-            for (int i = threadIdx.x; i < tile_len; i += blockDim.x)
-                psi_tile[i] = psi[gpos_flat[goff + tile + i] + (col_start + n) * Nd];
-            __syncthreads();
+        for (int i = threadIdx.x; i < tile_len; i += blockDim.x)
+            psi_tile[i] = psi[gpos_flat[goff + tile + i] + (col_start + n) * Nd];
+        __syncthreads();
 
-            // Chi is REAL, psi is COMPLEX
-            for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
-                cuDoubleComplex pv = psi_tile[i];
-                const double* chi_base = Chi_flat + coff + tile + i;
-                for (int jp = 0; jp < np; jp++) {
-                    double c = chi_base[jp * ndc];
-                    dots[jp].x += c * pv.x;
-                    dots[jp].y += c * pv.y;
-                }
+        for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            cuDoubleComplex pv = psi_tile[i];
+            const double* chi_base = Chi_flat + coff + tile + i;
+            for (int jp = 0; jp < np; jp++) {
+                double c = chi_base[jp * ndc];
+                dots[jp].x += c * pv.x;
+                dots[jp].y += c * pv.y;
             }
-            __syncthreads();
         }
+        __syncthreads();
+    }
 
-        for (int jp = 0; jp < np; jp++) {
-            cuDoubleComplex val = blockReduceSum_z(dots[jp], reduce_buf);
-            if (threadIdx.x == 0) {
-                cuDoubleComplex contrib = cuCmul(bloch, rcmul(dV, val));
-                atomicAddZ(&alpha[(abase + jp) * ncol_stride + (col_start + n)], contrib);
-            }
+    for (int jp = 0; jp < np; jp++) {
+        cuDoubleComplex val = blockReduceSum_z(dots[jp], reduce_buf);
+        if (threadIdx.x == 0) {
+            cuDoubleComplex contrib = cuCmul(bloch, rcmul(dV, val));
+            atomicAddZ(&alpha[(abase + jp) * ncol_stride + (col_start + n)], contrib);
         }
     }
 }
@@ -731,7 +729,8 @@ __global__ void gamma_scale_z_kernel(
     alpha[idx] = rcmul(Gamma[ip], alpha[idx]);
 }
 
-// Fused Chi * alpha + scatter-add for complex
+// V1 (optimized): Chi * alpha + scatter-add for complex — 2D grid
+// blockIdx.x = atom, blockIdx.y = column
 // Hpsi += conj(bloch) * Chi * alpha_z
 __global__ void fused_chialpha_scatter_z_kernel(
     cuDoubleComplex* __restrict__ Hpsi,
@@ -742,7 +741,7 @@ __global__ void fused_chialpha_scatter_z_kernel(
     const int* __restrict__ ndc_arr,
     const int* __restrict__ nproj_arr,
     const int* __restrict__ IP_displ,
-    const double* __restrict__ bloch_fac,  // same (cos,sin) as gather — will conjugate
+    const double* __restrict__ bloch_fac,
     const cuDoubleComplex* __restrict__ alpha,
     int Nd, int ncol_this,
     int ncol_stride,
@@ -750,7 +749,8 @@ __global__ void fused_chialpha_scatter_z_kernel(
     int n_atoms)
 {
     int iat = blockIdx.x;
-    if (iat >= n_atoms) return;
+    int n = blockIdx.y;
+    if (iat >= n_atoms || n >= ncol_this) return;
 
     int ndc = ndc_arr[iat];
     int np = nproj_arr[iat];
@@ -760,36 +760,24 @@ __global__ void fused_chialpha_scatter_z_kernel(
     int coff = chi_offsets[iat];
     int abase = IP_displ[iat];
 
-    // Conjugate Bloch phase: e^{+ik.R_image} = conj(e^{-ik.R_image})
     double bf_re = bloch_fac[2 * iat];
     double bf_im = bloch_fac[2 * iat + 1];
     cuDoubleComplex bloch_conj = make_cuDoubleComplex(bf_re, -bf_im);
 
-    // Load alpha tile into shared memory
+    // Load alpha for this column into shared memory
     extern __shared__ char smem_raw[];
     cuDoubleComplex* alpha_sh = reinterpret_cast<cuDoubleComplex*>(smem_raw);
-    int alpha_size = np * ncol_this;
-    for (int idx = threadIdx.x; idx < alpha_size; idx += blockDim.x) {
-        int jp = idx / ncol_this;
-        int n = idx % ncol_this;
-        alpha_sh[idx] = alpha[(abase + jp) * ncol_stride + (col_start + n)];
-    }
+    if (threadIdx.x < np)
+        alpha_sh[threadIdx.x] = alpha[(abase + threadIdx.x) * ncol_stride + (col_start + n)];
     __syncthreads();
 
-    // Compute Chi * alpha and scatter-add with conjugate Bloch phase
-    int total_out = ndc * ncol_this;
-    for (int idx = threadIdx.x; idx < total_out; idx += blockDim.x) {
-        int ig = idx % ndc;
-        int n = idx / ndc;
-
-        // Chi is REAL, alpha is COMPLEX => val is complex
+    for (int ig = threadIdx.x; ig < ndc; ig += blockDim.x) {
         cuDoubleComplex val = make_cuDoubleComplex(0.0, 0.0);
         const double* chi_row_base = Chi_flat + coff + ig;
-        const cuDoubleComplex* alpha_col = alpha_sh + n;
+        #pragma unroll 4
         for (int jp = 0; jp < np; ++jp)
-            val = cuCadd(val, rcmul(chi_row_base[jp * ndc], alpha_col[jp * ncol_this]));
+            val = cuCadd(val, rcmul(chi_row_base[jp * ndc], alpha_sh[jp]));
 
-        // Apply conjugate Bloch phase
         val = cuCmul(bloch_conj, val);
         atomicAddZ(&Hpsi[gpos_flat[goff + ig] + (col_start + n) * Nd], val);
     }
@@ -821,10 +809,10 @@ void nonlocal_projector_apply_z_gpu(
     int block_size = 256;
     int nwarps = block_size / 32;
 
-    // Step 1: Tiled gather + Chi^T * psi → alpha (with Bloch phases)
-    // Fixed shared memory: tile buffer + complex reduction buffer
+    // Step 1: Tiled gather + Chi^T * psi → alpha (2D grid: atoms × columns)
     size_t smem1 = NL_TILE_Z * sizeof(cuDoubleComplex) + 2 * nwarps * sizeof(double);
-    fused_gather_chitpsi_z_kernel<<<n_atoms, block_size, smem1>>>(
+    dim3 grid_gather(n_atoms, ncol);
+    fused_gather_chitpsi_z_kernel<<<grid_gather, block_size, smem1>>>(
         d_psi, d_Chi_flat, d_gpos_flat,
         d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
         d_bloch_fac, d_alpha, Nd, ncol, ncol, 0, dV, n_atoms);
@@ -838,33 +826,14 @@ void nonlocal_projector_apply_z_gpu(
         CUDA_CHECK(cudaGetLastError());
     }
 
-    // Step 3: Fused Chi * alpha + scatter -> Hpsi (with conjugate Bloch phase)
-    // Shared memory: max_nproj * ncol_batch * sizeof(cuDoubleComplex) — typically tiny
-    int device;
-    cudaGetDevice(&device);
-    int max_smem;
-    cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
-
-    size_t smem_per_col3 = (size_t)max_nproj * sizeof(cuDoubleComplex);
-    int ncol_batch3 = ncol;
-    if (smem_per_col3 * ncol > (size_t)max_smem)
-        ncol_batch3 = std::max(1, (int)(max_smem / smem_per_col3));
-
-    for (int col_start = 0; col_start < ncol; col_start += ncol_batch3) {
-        int cols_this = std::min(ncol_batch3, ncol - col_start);
-        size_t smem3 = (size_t)max_nproj * cols_this * sizeof(cuDoubleComplex);
-
-        if (smem3 > 48 * 1024) {
-            cudaFuncSetAttribute(fused_chialpha_scatter_z_kernel,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem3);
-        }
-
-        fused_chialpha_scatter_z_kernel<<<n_atoms, block_size, smem3>>>(
-            d_Hpsi, d_Chi_flat, d_gpos_flat,
-            d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-            d_bloch_fac, d_alpha, Nd, cols_this, ncol, col_start, n_atoms);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    // Step 3: Fused Chi * alpha + scatter → Hpsi (2D grid: atoms × columns)
+    size_t smem3 = (size_t)max_nproj * sizeof(cuDoubleComplex);
+    dim3 grid_scatter(n_atoms, ncol);
+    fused_chialpha_scatter_z_kernel<<<grid_scatter, block_size, smem3>>>(
+        d_Hpsi, d_Chi_flat, d_gpos_flat,
+        d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+        d_bloch_fac, d_alpha, Nd, ncol, ncol, 0, n_atoms);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 // Convenience wrapper: takes host-side metadata, uploads to device

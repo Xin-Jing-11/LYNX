@@ -98,11 +98,14 @@ void nonlocal_projector_apply_gpu(
 void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho,
                           int Nd, int Ns, double weight);
 
-void laplacian_orth_v2_gpu(
+void laplacian_orth_v7_gpu(
     const double* d_x_ex, const double* d_V, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
     double a, double b, double c, double diag_coeff, int ncol);
+
+void upload_precomputed_coefficients(const double* D2x, const double* D2y, const double* D2z,
+                                      double a, int FDn);
 
 void laplacian_nonorth_gpu(
     const double* d_x_ex, const double* d_V, double* d_y,
@@ -112,6 +115,12 @@ void laplacian_nonorth_gpu(
     bool has_xy, bool has_xz, bool has_yz, int ncol);
 
 void gradient_gpu(
+    const double* d_x_ex, double* d_y,
+    int nx, int ny, int nz, int FDn,
+    int nx_ex, int ny_ex,
+    int direction, int ncol);
+
+void gradient_v3_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
@@ -607,6 +616,16 @@ __global__ void vtau_multiply_kernel(
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N) out[i] = vtau[i] * dpsi[i];
+}
+
+// Batched vtau multiply: out[n*Nd + i] = vtau[i] * dpsi[n*Nd + i], broadcasting vtau across ncol bands
+__global__ void vtau_multiply_batched_kernel(
+    const double* __restrict__ dpsi,
+    const double* __restrict__ vtau,
+    double* __restrict__ out, int Nd, int total)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < total) out[idx] = vtau[idx % Nd] * dpsi[idx];
 }
 
 // mGGA Hamiltonian: multiply gradient component by vtau (complex)
@@ -1272,61 +1291,71 @@ void GPUSCFRunner::hamiltonian_apply_cb(
     }
 
     // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
+    // Batched over all ncol bands to minimize kernel launch overhead
     if (s->d_vtau_active_) {
         auto& ctx = gpu::GPUContext::instance();
         int Nd = s->Nd_;
         int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
         int bs = 256;
-        int gs = gpu::ceildiv(Nd, bs);
+        int total = Nd * ncol;
+        int gs_total = gpu::ceildiv(total, bs);
 
         double* d_dpsi   = s->d_mgga_dpsi_;
         double* d_vtdpsi = s->d_mgga_vtdpsi_;
         double* d_div    = s->d_mgga_div_;
         double* d_vt_ex  = s->d_mgga_vt_ex_;
 
-        for (int n = 0; n < ncol; n++) {
-            const double* d_psi_n = d_psi + (size_t)n * Nd;
-            double* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
+        CUDA_CHECK(cudaMemset(d_div, 0, (size_t)total * sizeof(double)));
 
-            CUDA_CHECK(cudaMemset(d_div, 0, Nd * sizeof(double)));
-
-            if (s->is_orth_) {
-                // Orthogonal: direction-by-direction (original path)
-                for (int dir = 0; dir < 3; dir++) {
-                    gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                    gpu::gradient_gpu(d_x_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                    vtau_multiply_kernel<<<gs, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd);
-                    gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                    gpu::gradient_gpu(d_vt_ex, d_dpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                    double one = 1.0;
-                    cublasDaxpy(ctx.cublas, Nd, &one, d_dpsi, 1, d_div, 1);
-                }
-            } else {
-                // Non-orthogonal: compute all 3 gradients, then form flux with lapcT
-                double* d_dpsi_x = d_dpsi;  // reuse existing buffer
-                double* d_dpsi_y = s->d_mgga_dpsi_y_;
-                double* d_dpsi_zr = s->d_mgga_dpsi_z_r_;
-                // Compute all 3 gradient components
-                gpu::halo_exchange_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                gpu::gradient_gpu(d_x_ex, d_dpsi_x, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, 1);
-                gpu::gradient_gpu(d_x_ex, d_dpsi_y, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, 1);
-                gpu::gradient_gpu(d_x_ex, d_dpsi_zr, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, 1);
-                // For each direction: flux_dir = vtau * (lapcT[dir] · grad_psi), then divergence
-                // Write divergence to d_vtdpsi to avoid overwriting gradient buffers
-                for (int dir = 0; dir < 3; dir++) {
-                    vtau_lapcT_multiply_kernel<<<gs, bs>>>(d_dpsi_x, d_dpsi_y, d_dpsi_zr,
-                        s->d_vtau_active_, d_vtdpsi, Nd,
-                        s->lapcT_[dir*3+0], s->lapcT_[dir*3+1], s->lapcT_[dir*3+2]);
-                    gpu::halo_exchange_gpu(d_vtdpsi, d_vt_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
-                    gpu::gradient_gpu(d_vt_ex, d_vtdpsi, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                    double one = 1.0;
-                    cublasDaxpy(ctx.cublas, Nd, &one, d_vtdpsi, 1, d_div, 1);
-                }
+        if (s->is_orth_) {
+            // Batched orthogonal: halo all bands once, then direction-by-direction
+            gpu::halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex,
+                s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+            for (int dir = 0; dir < 3; dir++) {
+                gpu::gradient_v3_gpu(d_x_ex, d_dpsi,
+                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol);
+                vtau_multiply_batched_kernel<<<gs_total, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd, total);
+                gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
+                    s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+                gpu::gradient_v3_gpu(d_vt_ex, d_dpsi,
+                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol);
+                double one = 1.0;
+                cublasDaxpy(ctx.cublas, total, &one, d_dpsi, 1, d_div, 1);
             }
-
-            // Hpsi -= 0.5 * div
-            mgga_ham_sub_kernel<<<gs, bs>>>(d_Hpsi_n, d_div, Nd);
+        } else {
+            // Non-orthogonal batched: halo all bands, compute all 3 gradients, then form flux
+            double* d_dpsi_x = d_dpsi;
+            double* d_dpsi_y = s->d_mgga_dpsi_y_;
+            double* d_dpsi_zr = s->d_mgga_dpsi_z_r_;
+            gpu::halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex,
+                s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+            gpu::gradient_v3_gpu(d_x_ex, d_dpsi_x,
+                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, ncol);
+            gpu::gradient_v3_gpu(d_x_ex, d_dpsi_y,
+                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, ncol);
+            gpu::gradient_v3_gpu(d_x_ex, d_dpsi_zr,
+                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, ncol);
+            int gs = gpu::ceildiv(Nd, bs);
+            for (int dir = 0; dir < 3; dir++) {
+                // Per-band vtau_lapcT because vtau is 1×Nd broadcast
+                for (int n = 0; n < ncol; n++) {
+                    vtau_lapcT_multiply_kernel<<<gs, bs>>>(
+                        d_dpsi_x + (size_t)n * Nd, d_dpsi_y + (size_t)n * Nd,
+                        d_dpsi_zr + (size_t)n * Nd,
+                        s->d_vtau_active_, d_vtdpsi + (size_t)n * Nd, Nd,
+                        s->lapcT_[dir*3+0], s->lapcT_[dir*3+1], s->lapcT_[dir*3+2]);
+                }
+                gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
+                    s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+                gpu::gradient_v3_gpu(d_vt_ex, d_vtdpsi,
+                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol);
+                double one = 1.0;
+                cublasDaxpy(ctx.cublas, total, &one, d_vtdpsi, 1, d_div, 1);
+            }
         }
+
+        // Hpsi -= 0.5 * div (all bands at once)
+        mgga_ham_sub_kernel<<<gs_total, bs>>>(d_Hpsi, d_div, total);
     }
 
     // GPU exact exchange: Hx -= exx_frac * Xi * (Xi^T * X)
@@ -1636,7 +1665,7 @@ void GPUSCFRunner::poisson_op_cb(const double* d_x, double* d_Ax) {
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
     if (s->is_orth_) {
-        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+        gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
             s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
             -1.0, 0.0, 0.0, s->poisson_diag_, 1);
     } else {
@@ -1669,7 +1698,7 @@ void GPUSCFRunner::kerker_op_cb(const double* d_x, double* d_Ax) {
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
     constexpr double kTF2 = 1.0;
     if (s->is_orth_) {
-        gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+        gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
             s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
             -1.0, 0.0, kTF2, s->kerker_diag_, 1);
     } else {
@@ -2165,7 +2194,7 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
             gpu::halo_exchange_gpu(d_f_col, ctx.buf.aar_x_ex,
                 nx_, ny_, nz_, FDn_, 1, true, true, true);
             if (is_orth_) {
-                gpu::laplacian_orth_v2_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
+                gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
                     nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
                     1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
             } else {
@@ -2370,17 +2399,18 @@ double GPUSCFRunner::run(
         CUDA_CHECK(cudaMemset(d_tau_, 0, tau_size * sizeof(double)));
         CUDA_CHECK(cudaMemset(d_vtau_, 0, tau_size * sizeof(double)));
         d_vtau_active_ = nullptr;
-        // Persistent Hamiltonian work buffers (avoid scratch pool pressure)
+        // Persistent Hamiltonian work buffers — sized for Nband columns for batched mGGA
         int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_, nz_ex = nz_ + 2 * FDn_;
         int nd_ex = nx_ex * ny_ex * nz_ex;
-        CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_, Nd_ * sizeof(double), 0));
-        CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_, Nd_ * sizeof(double), 0));
-        CUDA_CHECK(cudaMallocAsync(&d_mgga_div_, Nd_ * sizeof(double), 0));
-        CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_, nd_ex * sizeof(double), 0));
+        mgga_nband_ = Nband;
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_, (size_t)Nd_ * Nband * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_vtdpsi_, (size_t)Nd_ * Nband * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_div_, (size_t)Nd_ * Nband * sizeof(double), 0));
+        CUDA_CHECK(cudaMallocAsync(&d_mgga_vt_ex_, (size_t)nd_ex * Nband * sizeof(double), 0));
         // Extra gradient buffers for non-orthogonal mGGA (need all 3 components simultaneously)
         if (!is_orth_) {
-            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_y_, Nd_ * sizeof(double), 0));
-            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_r_, Nd_ * sizeof(double), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_y_, (size_t)Nd_ * Nband * sizeof(double), 0));
+            CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_r_, (size_t)Nd_ * Nband * sizeof(double), 0));
         }
         if (is_kpt) {
             CUDA_CHECK(cudaMallocAsync(&d_mgga_dpsi_z_, Nd_ * sizeof(cuDoubleComplex), 0));
