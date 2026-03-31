@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstring>
 #include <cmath>
+#include <omp.h>
 
 namespace lynx {
 
@@ -101,27 +102,34 @@ void Hamiltonian::lap_plus_diag_orth_impl(const T* x_ex, const double* Veff,
     const double* cy = stencil_->D2_coeff_y();
     const double* cz = stencil_->D2_coeff_z();
 
-    for (int n = 0; n < ncol; ++n) {
+    int nxny = nx * ny;
+    double diag_lap = cx[0] + cy[0] + cz[0];
+    int total_nk = ncol * nz;
+    #pragma omp parallel for schedule(static)
+    for (int nk = 0; nk < total_nk; ++nk) {
+        int n = nk / nz;
+        int k = nk % nz;
         const T* xn = x_ex + n * nd_ex;
         T* yn = y + n * nd;
 
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx_ex = (i + FDn) + (j + FDn) * nx_ex + (k + FDn) * nxny_ex;
-                    int idx_loc = i + j * nx + k * nx * ny;
+        for (int j = 0; j < ny; ++j) {
+            int offset = k * nxny + j * nx;
+            int offset_ex = (k + FDn) * nxny_ex + (j + FDn) * nx_ex + FDn;
+            #pragma omp simd
+            for (int i = 0; i < nx; ++i) {
+                int idx_ex = offset_ex + i;
+                int idx_loc = offset + i;
 
-                    T lap = (cx[0] + cy[0] + cz[0]) * xn[idx_ex];
+                T lap = diag_lap * xn[idx_ex];
 
-                    for (int p = 1; p <= FDn; ++p) {
-                        lap += cx[p] * (xn[idx_ex + p] + xn[idx_ex - p]);
-                        lap += cy[p] * (xn[idx_ex + p * nx_ex] + xn[idx_ex - p * nx_ex]);
-                        lap += cz[p] * (xn[idx_ex + p * nxny_ex] + xn[idx_ex - p * nxny_ex]);
-                    }
-
-                    double veff_val = Veff ? Veff[idx_loc] : 0.0;
-                    yn[idx_loc] = -0.5 * lap + (veff_val + c) * xn[idx_ex];
+                for (int p = 1; p <= FDn; ++p) {
+                    lap += cx[p] * (xn[idx_ex + p] + xn[idx_ex - p]);
+                    lap += cy[p] * (xn[idx_ex + p * nx_ex] + xn[idx_ex - p * nx_ex]);
+                    lap += cz[p] * (xn[idx_ex + p * nxny_ex] + xn[idx_ex - p * nxny_ex]);
                 }
+
+                double veff_val = Veff ? Veff[idx_loc] : 0.0;
+                yn[idx_loc] = -0.5 * lap + (veff_val + c) * xn[idx_ex];
             }
         }
     }
@@ -154,61 +162,67 @@ void Hamiltonian::lap_plus_diag_nonorth_impl(const T* x_ex, const double* Veff,
     bool has_xz = cxz && std::abs(cxz[1]) > 1e-30;
     bool has_yz = cyz && std::abs(cyz[1]) > 1e-30;
 
-    for (int n = 0; n < ncol; ++n) {
+    int nxny = nx * ny;
+    double diag_lap = cx[0] + cy[0] + cz[0];
+    int total_nk = ncol * nz;
+    #pragma omp parallel for schedule(static)
+    for (int nk = 0; nk < total_nk; ++nk) {
+        int n = nk / nz;
+        int k = nk % nz;
         const T* xn = x_ex + n * nd_ex;
         T* yn = y + n * nd;
 
-        for (int k = 0; k < nz; ++k) {
-            for (int j = 0; j < ny; ++j) {
-                for (int i = 0; i < nx; ++i) {
-                    int idx = (i + FDn) + (j + FDn) * nx_ex + (k + FDn) * nxny_ex;
-                    int loc = i + j * nx + k * nx * ny;
+        for (int j = 0; j < ny; ++j) {
+            int offset = k * nxny + j * nx;
+            int offset_ex = (k + FDn) * nxny_ex + (j + FDn) * nx_ex + FDn;
+            for (int i = 0; i < nx; ++i) {
+                int idx = offset_ex + i;
+                int loc = offset + i;
 
-                    T lap = (cx[0] + cy[0] + cz[0]) * xn[idx];
+                T lap = diag_lap * xn[idx];
 
-                    for (int p = 1; p <= FDn; ++p) {
-                        lap += cx[p] * (xn[idx + p] + xn[idx - p]);
-                        lap += cy[p] * (xn[idx + p * nx_ex] + xn[idx - p * nx_ex]);
-                        lap += cz[p] * (xn[idx + p * nxny_ex] + xn[idx - p * nxny_ex]);
-                    }
-
-                    if (has_xy) {
-                        for (int p = 1; p <= FDn; ++p) {
-                            for (int q = 1; q <= FDn; ++q) {
-                                T mixed = xn[idx + p + q * nx_ex]
-                                        - xn[idx + p - q * nx_ex]
-                                        - xn[idx - p + q * nx_ex]
-                                        + xn[idx - p - q * nx_ex];
-                                lap += cxy[p] * d1y[q] * mixed;
-                            }
-                        }
-                    }
-                    if (has_xz) {
-                        for (int p = 1; p <= FDn; ++p) {
-                            for (int q = 1; q <= FDn; ++q) {
-                                T mixed = xn[idx + p + q * nxny_ex]
-                                        - xn[idx + p - q * nxny_ex]
-                                        - xn[idx - p + q * nxny_ex]
-                                        + xn[idx - p - q * nxny_ex];
-                                lap += cxz[p] * d1z[q] * mixed;
-                            }
-                        }
-                    }
-                    if (has_yz) {
-                        for (int p = 1; p <= FDn; ++p) {
-                            for (int q = 1; q <= FDn; ++q) {
-                                T mixed = xn[idx + p * nx_ex + q * nxny_ex]
-                                        - xn[idx + p * nx_ex - q * nxny_ex]
-                                        - xn[idx - p * nx_ex + q * nxny_ex]
-                                        + xn[idx - p * nx_ex - q * nxny_ex];
-                                lap += cyz[p] * d1z[q] * mixed;
-                            }
-                        }
-                    }
-
-                    double veff_val = Veff ? Veff[loc] : 0.0;
-                    yn[loc] = -0.5 * lap + (veff_val + c) * xn[idx];
+                for (int p = 1; p <= FDn; ++p) {
+                    lap += cx[p] * (xn[idx + p] + xn[idx - p]);
+                    lap += cy[p] * (xn[idx + p * nx_ex] + xn[idx - p * nx_ex]);
+                    lap += cz[p] * (xn[idx + p * nxny_ex] + xn[idx - p * nxny_ex]);
                 }
+
+                if (has_xy) {
+                    for (int p = 1; p <= FDn; ++p) {
+                        for (int q = 1; q <= FDn; ++q) {
+                            T mixed = xn[idx + p + q * nx_ex]
+                                    - xn[idx + p - q * nx_ex]
+                                    - xn[idx - p + q * nx_ex]
+                                    + xn[idx - p - q * nx_ex];
+                            lap += cxy[p] * d1y[q] * mixed;
+                        }
+                    }
+                }
+                if (has_xz) {
+                    for (int p = 1; p <= FDn; ++p) {
+                        for (int q = 1; q <= FDn; ++q) {
+                            T mixed = xn[idx + p + q * nxny_ex]
+                                    - xn[idx + p - q * nxny_ex]
+                                    - xn[idx - p + q * nxny_ex]
+                                    + xn[idx - p - q * nxny_ex];
+                            lap += cxz[p] * d1z[q] * mixed;
+                        }
+                    }
+                }
+                if (has_yz) {
+                    for (int p = 1; p <= FDn; ++p) {
+                        for (int q = 1; q <= FDn; ++q) {
+                            T mixed = xn[idx + p * nx_ex + q * nxny_ex]
+                                    - xn[idx + p * nx_ex - q * nxny_ex]
+                                    - xn[idx - p * nx_ex + q * nxny_ex]
+                                    + xn[idx - p * nx_ex - q * nxny_ex];
+                            lap += cyz[p] * d1z[q] * mixed;
+                        }
+                    }
+                }
+
+                double veff_val = Veff ? Veff[loc] : 0.0;
+                yn[loc] = -0.5 * lap + (veff_val + c) * xn[idx];
             }
         }
     }
@@ -252,12 +266,14 @@ void Hamiltonian::apply_mgga(const double* psi, double* y, int ncol) const {
         // 2. Apply metric tensor for non-orthogonal cells, then multiply by vtau
         std::vector<double> fx(Nd_d), fy(Nd_d), fz(Nd_d);
         if (is_orth) {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; ++i) {
                 fx[i] = vtau_[i] * dpsi_x[i];
                 fy[i] = vtau_[i] * dpsi_y[i];
                 fz[i] = vtau_[i] * dpsi_z[i];
             }
         } else {
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < Nd_d; ++i) {
                 double dx = dpsi_x[i], dy = dpsi_y[i], dz = dpsi_z[i];
                 fx[i] = vtau_[i] * (lapcT(0,0)*dx + lapcT(0,1)*dy + lapcT(0,2)*dz);
@@ -271,14 +287,17 @@ void Hamiltonian::apply_mgga(const double* psi, double* y, int ncol) const {
 
         halo_->execute(fx.data(), f_ex.data(), 1);
         grad.apply(f_ex.data(), div_comp.data(), 0, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
 
         halo_->execute(fy.data(), f_ex.data(), 1);
         grad.apply(f_ex.data(), div_comp.data(), 1, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
 
         halo_->execute(fz.data(), f_ex.data(), 1);
         grad.apply(f_ex.data(), div_comp.data(), 2, 1);
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < Nd_d; ++i) yn[i] -= 0.5 * div_comp[i];
     }
 }

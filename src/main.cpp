@@ -1,9 +1,11 @@
 #include <mpi.h>
+#include <omp.h>
 #include <cstdio>
 #include <cmath>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <thread>
 
 #include "io/InputParser.hpp"
 #include "io/OutputWriter.hpp"
@@ -50,6 +52,23 @@ int main(int argc, char** argv) {
         auto config = lynx::InputParser::parse(input_file);
         lynx::InputParser::resolve_pseudopotentials(config);
         lynx::InputParser::validate(config);
+
+        // ===== Configure OpenMP threads =====
+        {
+            int num_threads = config.parallel.num_threads;
+            if (num_threads <= 0) {
+                MPI_Comm node_comm;
+                MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &node_comm);
+                int nranks_node;
+                MPI_Comm_size(node_comm, &nranks_node);
+                num_threads = std::thread::hardware_concurrency() / nranks_node;
+                if (num_threads < 1) num_threads = 1;
+                MPI_Comm_free(&node_comm);
+            }
+            omp_set_num_threads(num_threads);
+            if (rank == 0)
+                std::printf("Using %d OpenMP threads per MPI rank\n", num_threads);
+        }
 
         // ===== Create lattice and grid =====
         lynx::Lattice lattice(config.latvec, config.cell_type);

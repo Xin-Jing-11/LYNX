@@ -208,6 +208,7 @@ SystemConfig InputParser::parse(const std::string& json_file) {
         if (par.contains("npspin")) config.parallel.npspin = par["npspin"].get<int>();
         if (par.contains("npkpt")) config.parallel.npkpt = par["npkpt"].get<int>();
         if (par.contains("npband")) config.parallel.npband = par["npband"].get<int>();
+        if (par.contains("num_threads")) config.parallel.num_threads = par["num_threads"].get<int>();
         // npNdx/y/z removed (no domain decomposition)
     }
 

@@ -3,11 +3,13 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <omp.h>
 
 namespace lynx {
 
 double LinearSolver::dot(const double* a, const double* b, int N, const MPIComm& comm) {
     double local_dot = 0.0;
+    #pragma omp parallel for reduction(+:local_dot) schedule(static)
     for (int i = 0; i < N; ++i) {
         local_dot += a[i] * b[i];
     }
