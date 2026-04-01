@@ -16,6 +16,10 @@ def _find_psp(element):
     for xc_dir in ['ONCVPSP-PBE-PDv0.4', 'ONCVPSP-LDA-PDv0.4']:
         elem_dir = os.path.join(PSPS_DIR, xc_dir, element)
         if os.path.isdir(elem_dir):
+            # Prefer standard (Element.psp8) over semicore (Element-sp.psp8)
+            standard = os.path.join(elem_dir, f'{element}.psp8')
+            if os.path.isfile(standard):
+                return standard
             for f in sorted(os.listdir(elem_dir)):
                 if f.endswith('.psp8'):
                     return os.path.join(elem_dir, f)
@@ -53,7 +57,7 @@ def _make_si2_config():
             "spin": "none",
             "temperature": 300,
             "smearing": "gaussian",
-            "Nstates": 10
+            "Nstates": 20
         },
         "scf": {
             "max_iter": 50,

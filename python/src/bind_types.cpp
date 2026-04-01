@@ -44,7 +44,12 @@ void bind_types(py::module_& m) {
         .value("LDA_PW", XCType::LDA_PW)
         .value("GGA_PBE", XCType::GGA_PBE)
         .value("GGA_PBEsol", XCType::GGA_PBEsol)
-        .value("GGA_RPBE", XCType::GGA_RPBE);
+        .value("GGA_RPBE", XCType::GGA_RPBE)
+        .value("MGGA_SCAN", XCType::MGGA_SCAN)
+        .value("MGGA_RSCAN", XCType::MGGA_RSCAN)
+        .value("MGGA_R2SCAN", XCType::MGGA_R2SCAN)
+        .value("HYB_PBE0", XCType::HYB_PBE0)
+        .value("HYB_HSE", XCType::HYB_HSE);
 
     // Vec3
     py::class_<Vec3>(m, "Vec3")

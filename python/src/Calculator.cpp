@@ -157,6 +157,19 @@ void Calculator::setup(MPI_Comm comm) {
                Nspin_, Nspin_local, spin_start, &kpoints_, kpt_start,
                Nstates_, band_start);
 
+    // GPU acceleration
+#ifdef USE_CUDA
+    if (use_gpu_) {
+        scf_.set_gpu_data(crystal_, nloc_influence_, influence_, elec_);
+    }
+#else
+    if (use_gpu_) {
+        throw std::runtime_error(
+            "GPU acceleration requested but LYNX was built without CUDA support. "
+            "Rebuild with -DUSE_CUDA=ON to enable GPU.");
+    }
+#endif
+
     // Wavefunctions
     wfn_.allocate(Nd_d_val, Nband_local, Nstates_, Nspin_local, Nkpts_local, is_kpt);
 
