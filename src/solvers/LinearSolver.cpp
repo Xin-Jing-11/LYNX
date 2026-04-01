@@ -1,4 +1,5 @@
 #include "solvers/LinearSolver.hpp"
+#include "core/NumericalMethods.hpp"
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -104,34 +105,10 @@ int LinearSolver::aar(const OpFunc& op,
                 }
             }
 
-            // Solve via Gaussian elimination
+            // Solve via Gaussian elimination with partial pivoting
             {
-                std::vector<double> A(FTF);
-                for (int k = 0; k < cols; ++k) {
-                    int pivot = k;
-                    for (int ii = k + 1; ii < cols; ++ii)
-                        if (std::abs(A[ii * cols + k]) > std::abs(A[pivot * cols + k]))
-                            pivot = ii;
-                    if (pivot != k) {
-                        for (int j = 0; j < cols; ++j)
-                            std::swap(A[k * cols + j], A[pivot * cols + j]);
-                        std::swap(gamma[k], gamma[pivot]);
-                    }
-                    double d = A[k * cols + k];
-                    if (std::abs(d) < 1e-14) continue;
-                    for (int ii = k + 1; ii < cols; ++ii) {
-                        double factor = A[ii * cols + k] / d;
-                        for (int j = k + 1; j < cols; ++j)
-                            A[ii * cols + j] -= factor * A[k * cols + j];
-                        gamma[ii] -= factor * gamma[k];
-                    }
-                }
-                for (int k = cols - 1; k >= 0; --k) {
-                    if (std::abs(A[k * cols + k]) < 1e-14) continue;
-                    for (int j = k + 1; j < cols; ++j)
-                        gamma[k] -= A[k * cols + j] * gamma[j];
-                    gamma[k] /= A[k * cols + k];
-                }
+                std::vector<double> rhs(gamma);
+                gauss_solve(FTF.data(), rhs.data(), gamma.data(), cols);
             }
 
             // Reference: AndersonExtrapolation(N, m, x, x_old, f, X, F, beta, comm)

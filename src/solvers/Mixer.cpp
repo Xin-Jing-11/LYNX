@@ -1,5 +1,6 @@
 #include "solvers/Mixer.hpp"
 #include "parallel/MPIComm.hpp"
+#include "core/NumericalMethods.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -210,39 +211,9 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
             }
         }
 
-        // Solve FtF * Gamma = Ftf via least squares (Gaussian elimination)
+        // Solve FtF * Gamma = Ftf via Gaussian elimination with partial pivoting
         std::vector<double> Gamma(cols, 0.0);
-        {
-            std::vector<double> A(FtF);
-            std::vector<double> b(Ftf);
-            for (int k = 0; k < cols; ++k) {
-                int pivot = k;
-                for (int i = k + 1; i < cols; ++i) {
-                    if (std::abs(A[i * cols + k]) > std::abs(A[pivot * cols + k]))
-                        pivot = i;
-                }
-                if (pivot != k) {
-                    for (int j = 0; j < cols; ++j)
-                        std::swap(A[k * cols + j], A[pivot * cols + j]);
-                    std::swap(b[k], b[pivot]);
-                }
-                double diag = A[k * cols + k];
-                if (std::abs(diag) < 1e-14) continue;
-                for (int i = k + 1; i < cols; ++i) {
-                    double factor = A[i * cols + k] / diag;
-                    for (int j = k + 1; j < cols; ++j)
-                        A[i * cols + j] -= factor * A[k * cols + j];
-                    b[i] -= factor * b[k];
-                }
-            }
-            for (int k = cols - 1; k >= 0; --k) {
-                if (std::abs(A[k * cols + k]) < 1e-14) continue;
-                Gamma[k] = b[k];
-                for (int j = k + 1; j < cols; ++j)
-                    Gamma[k] -= A[k * cols + j] * Gamma[j];
-                Gamma[k] /= A[k * cols + k];
-            }
-        }
+        gauss_solve(FtF.data(), Ftf.data(), Gamma.data(), cols);
 
         // x_wavg = x_k - R * Gamma
         std::memcpy(x_wavg.data(), x_k, N * sizeof(double));
