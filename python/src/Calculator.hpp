@@ -86,6 +86,19 @@ public:
     int Nelectron() const { return Nelectron_; }
     int Natom() const { return Natom_; }
     int Nspin() const { return Nspin_; }
+    bool use_gpu() const { return use_gpu_; }
+
+    /// Enable GPU acceleration (must call before setup())
+    void set_use_gpu(bool use_gpu) { use_gpu_ = use_gpu; }
+
+    /// Check if CUDA support is compiled in
+    static bool cuda_available() {
+#ifdef USE_CUDA
+        return true;
+#else
+        return false;
+#endif
+    }
 
     const double* Vloc_data() const { return Vloc_.data(); }
     int Vloc_size() const { return static_cast<int>(Vloc_.size()); }
@@ -125,6 +138,7 @@ private:
     bool has_nlcc_ = false;
     bool setup_done_ = false;
     bool scf_converged_ = false;
+    bool use_gpu_ = false;
 };
 
 } // namespace pylynx

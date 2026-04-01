@@ -77,21 +77,24 @@ void bind_calculator(py::module_& m) {
     // Calculator
     py::class_<Calculator>(m, "Calculator")
         .def(py::init<>())
-        .def(py::init([](const std::string& json_file, bool auto_run) {
+        .def(py::init([](const std::string& json_file, bool auto_run, bool use_gpu) {
             auto calc = std::make_unique<Calculator>();
             calc->load_config(json_file);
+            calc->set_use_gpu(use_gpu);
             calc->setup(MPI_COMM_SELF);
             if (auto_run) {
                 py::gil_scoped_release release;
                 calc->run();
             }
             return calc;
-        }), py::arg("json_file"), py::arg("auto_run") = true,
+        }), py::arg("json_file"), py::arg("auto_run") = true, py::arg("use_gpu") = false,
            "Create Calculator from JSON config file. If auto_run=True, runs SCF immediately.")
 
         .def("load_config", &Calculator::load_config, py::arg("json_file"))
         .def("set_config", &Calculator::set_config, py::arg("config"),
              "Set configuration directly from a SystemConfig object (no JSON file needed)")
+        .def("set_use_gpu", &Calculator::set_use_gpu, py::arg("use_gpu"),
+             "Enable or disable GPU acceleration (must call before setup())")
         .def("setup", [](Calculator& c) { c.setup(MPI_COMM_SELF); },
              "Set up all internal objects (single-process mode)")
         .def("run", &Calculator::run,
@@ -116,6 +119,9 @@ void bind_calculator(py::module_& m) {
         // Property accessors
         .def_property_readonly("is_setup", &Calculator::is_setup)
         .def_property_readonly("converged", &Calculator::is_converged)
+        .def_property_readonly("use_gpu", &Calculator::use_gpu)
+        .def_static("cuda_available", &Calculator::cuda_available,
+             "Check if LYNX was built with CUDA support")
         .def_property_readonly("Nd_d", &Calculator::Nd_d)
         .def_property_readonly("Nelectron", &Calculator::Nelectron)
         .def_property_readonly("Natom", &Calculator::Natom)

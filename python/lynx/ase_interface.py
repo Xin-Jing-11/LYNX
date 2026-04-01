@@ -80,6 +80,7 @@ class LynxCalculator(ASECalculator):
         'smearing': 'gaussian',
         'pseudo_files': None,
         'psp_dir': None,
+        'use_gpu': False,
     }
 
     def __init__(self, **kwargs):
@@ -109,7 +110,7 @@ class LynxCalculator(ASECalculator):
             mixing_param=p['mixing_param'],
         )
 
-        calc = dft_config.create_calculator(auto_run=True)
+        calc = dft_config.create_calculator(auto_run=True, use_gpu=p['use_gpu'])
 
         # Energy: Hartree -> eV
         self.results['energy'] = calc.total_energy * HA_TO_EV

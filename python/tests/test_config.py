@@ -12,6 +12,10 @@ def _find_psp(element):
     for xc_dir in ['ONCVPSP-PBE-PDv0.4', 'ONCVPSP-LDA-PDv0.4']:
         elem_dir = os.path.join(PSPS_DIR, xc_dir, element)
         if os.path.isdir(elem_dir):
+            # Prefer standard (Element.psp8) over semicore (Element-sp.psp8)
+            standard = os.path.join(elem_dir, f'{element}.psp8')
+            if os.path.isfile(standard):
+                return standard
             for f in sorted(os.listdir(elem_dir)):
                 if f.endswith('.psp8'):
                     return os.path.join(elem_dir, f)
@@ -37,7 +41,7 @@ def test_dft_config_fractional():
         symbols=['Si', 'Si'],
         pseudo_files={'Si': _find_psp('Si')},
         Nx=20, Ny=20, Nz=20,
-        Nstates=10,
+        Nstates=20,
     )
 
     calc = config.create_calculator(auto_run=True)
@@ -62,7 +66,7 @@ def test_dft_config_cartesian():
         symbols=['Si', 'Si'],
         pseudo_files={'Si': _find_psp('Si')},
         Nx=20, Ny=20, Nz=20,
-        Nstates=10,
+        Nstates=20,
     )
 
     calc = config.create_calculator(auto_run=True)
@@ -118,7 +122,7 @@ def test_from_ase():
         atoms,
         pseudo_files={'Si': _find_psp('Si')},
         mesh_spacing=0.5,
-        Nstates=10,
+        Nstates=20,
         max_scf_iter=50,
         scf_tol=1e-4,
     )
@@ -151,7 +155,7 @@ def test_ase_calculator():
     calc = LynxCalculator(
         pseudo_files={'Si': _find_psp('Si')},
         mesh_spacing=0.5,
-        Nstates=10,
+        Nstates=20,
         max_scf_iter=50,
         scf_tol=1e-4,
     )

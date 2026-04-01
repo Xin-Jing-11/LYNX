@@ -31,6 +31,11 @@ _XC_TO_PSP_DIR = {
     'GGA_RPBE':   'ONCVPSP-PBE-PDv0.4',   # RPBE uses PBE pseudopotentials
     'LDA_PZ':     'ONCVPSP-LDA-PDv0.4',
     'LDA_PW':     'ONCVPSP-LDA-PDv0.4',
+    'MGGA_SCAN':  'ONCVPSP-PBE-PDv0.4',   # mGGA uses PBE pseudopotentials
+    'MGGA_RSCAN': 'ONCVPSP-PBE-PDv0.4',
+    'MGGA_R2SCAN':'ONCVPSP-PBE-PDv0.4',
+    'HYB_PBE0':   'ONCVPSP-PBE-PDv0.4',   # Hybrids use PBE pseudopotentials
+    'HYB_HSE':    'ONCVPSP-PBE-PDv0.4',
 }
 
 # Preferred .psp8 file for each element (shortest name = standard, no semicore).
@@ -245,6 +250,11 @@ class DFTConfig:
             'LDA_PW': _core.XCType.LDA_PW,
             'GGA_PBEsol': _core.XCType.GGA_PBEsol,
             'GGA_RPBE': _core.XCType.GGA_RPBE,
+            'MGGA_SCAN': _core.XCType.MGGA_SCAN,
+            'MGGA_RSCAN': _core.XCType.MGGA_RSCAN,
+            'MGGA_R2SCAN': _core.XCType.MGGA_R2SCAN,
+            'HYB_PBE0': _core.XCType.HYB_PBE0,
+            'HYB_HSE': _core.XCType.HYB_HSE,
         }
         if xc not in xc_map:
             raise ValueError(f"Unknown xc '{xc}'. Options: {list(xc_map.keys())}")
@@ -377,13 +387,15 @@ class DFTConfig:
         """Return the underlying SystemConfig C++ object."""
         return self._config
 
-    def create_calculator(self, auto_run=False):
+    def create_calculator(self, auto_run=False, use_gpu=False):
         """Create a LYNX Calculator from this config.
 
         Parameters
         ----------
         auto_run : bool
             If True, run SCF immediately after setup.
+        use_gpu : bool
+            If True, use GPU acceleration (requires CUDA build).
 
         Returns
         -------
@@ -392,6 +404,7 @@ class DFTConfig:
         _core._ensure_mpi()
         calc = _core.Calculator()
         calc.set_config(self._config)
+        calc.set_use_gpu(use_gpu)
         calc.setup()
         if auto_run:
             calc.run()
