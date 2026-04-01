@@ -18,6 +18,7 @@
 #include "solvers/PoissonSolver.hpp"
 #include "solvers/Mixer.hpp"
 #include "physics/Energy.hpp"
+#include "physics/EffectivePotential.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "io/InputParser.hpp"
@@ -100,19 +101,20 @@ public:
     bool converged() const { return converged_; }
 
     // Access internal potentials (needed for Forces/Stress post-SCF)
-    const double* phi() const { return phi_.data(); }
-    const double* Vxc() const { return Vxc_.data(); }
-    const double* exc() const { return exc_.data(); }
-    const double* Veff() const { return Veff_.data(); }
-    const double* Dxcdgrho() const { return Dxcdgrho_.data(); }
-    const double* vtau() const { return vtau_.data(); }
-    const double* tau() const { return tau_.data(); }
+    const double* phi() const { return arrays_.phi.data(); }
+    const double* Vxc() const { return arrays_.Vxc.data(); }
+    const double* exc() const { return arrays_.exc.data(); }
+    const double* Veff() const { return arrays_.Veff.data(); }
+    const double* Dxcdgrho() const { return arrays_.Dxcdgrho.data(); }
+    const double* vtau() const { return arrays_.vtau.data(); }
+    const double* tau() const { return arrays_.tau.data(); }
 
 #ifdef USE_CUDA
     GPUSCFRunner* gpu_runner() { return gpu_runner_.get(); }
 #endif
 
 private:
+    // Operator references (non-owning)
     const FDGrid* grid_ = nullptr;
     const Domain* domain_ = nullptr;
     const FDStencil* stencil_ = nullptr;
@@ -125,28 +127,43 @@ private:
     const MPIComm* kptcomm_ = nullptr;
     const MPIComm* spincomm_ = nullptr;
 
+    // Parameters and results
     SCFParams params_;
     EnergyComponents energy_;
     ElectronDensity density_;
     double Ef_ = 0.0;
     bool converged_ = false;
 
-    // Work arrays
-    NDArray<double> Veff_;      // effective potential
-    NDArray<double> Vxc_;       // XC potential
-    NDArray<double> exc_;       // XC energy density
-    NDArray<double> phi_;       // electrostatic potential
-    NDArray<double> Dxcdgrho_;  // GGA: dExc/d(|∇ρ|²) = v2x + v2c (stored like reference)
-    NDArray<double> tau_;       // kinetic energy density (mGGA)
-    NDArray<double> vtau_;      // d(nε)/dτ potential (mGGA)
-    bool tau_valid_ = false;    // true after first compute_tau() call
+    // Work arrays (owned by VeffArrays)
+    VeffArrays arrays_;
 
-    // Potential mixing state: Veff mean for each spin (removed before mixing, added for Hamiltonian)
-    std::vector<double> Veff_mean_;  // per-spin Veff mean (for potential mixing)
-
+    // XC and external potential state
     XCType xc_type_ = XCType::GGA_PBE;
-    const double* Vloc_ = nullptr;
-    const double* rho_core_ = nullptr;  // NLCC core density (non-owning)
+    const double* rho_core_ = nullptr;
+
+    // Parallel decomposition
+    int Nspin_global_ = 1;
+    int Nspin_local_ = 1;
+    int spin_start_ = 0;
+    const KPoints* kpoints_ = nullptr;
+    bool is_kpt_ = false;
+    int kpt_start_ = 0;
+    int Nband_global_ = 0;
+    int band_start_ = 0;
+
+    // SOC / noncollinear
+    bool is_soc_ = false;
+
+    // Exact exchange (hybrid functionals)
+    ExactExchange* exx_ = nullptr;
+
+    // Components
+    EffectivePotential veff_builder_;
+
+    // Compute kinetic energy density tau from wavefunctions
+    void compute_tau(const Wavefunction& wfn,
+                     const std::vector<double>& kpt_weights,
+                     int kpt_start, int band_start);
 
 #ifdef USE_CUDA
     std::unique_ptr<GPUSCFRunner> gpu_runner_;
@@ -175,39 +192,6 @@ public:
     }
 private:
 #endif
-
-    int Nspin_global_ = 1;  // global number of spin channels (1 or 2)
-    int Nspin_local_ = 1;   // spin channels on this process (1 or Nspin_global)
-    int spin_start_ = 0;    // global spin index of first local spin channel
-    const KPoints* kpoints_ = nullptr;  // k-point info (null = gamma-only)
-    bool is_kpt_ = false;               // true if using k-points (complex wavefunctions)
-    int kpt_start_ = 0;                 // global index of first local k-point
-    int Nband_global_ = 0;  // total bands across all band-parallel procs (0 = use Nband)
-    int band_start_ = 0;    // global index of first local band
-
-    // SOC / noncollinear
-    bool is_soc_ = false;
-
-    // Exact exchange (hybrid functionals)
-    ExactExchange* exx_ = nullptr;
-    bool in_fock_loop_ = false;
-    NDArray<double> Veff_spinor_;  // [V_uu | V_dd | Re(V_ud) | Im(V_ud)], 4*Nd_d
-
-    // Compute kinetic energy density tau from wavefunctions
-    void compute_tau(const Wavefunction& wfn,
-                     const std::vector<double>& kpt_weights,
-                     int kpt_start, int band_start);
-
-    // Compute effective potential: Veff = Vxc + phi + Vloc
-    // For spin-polarized: Veff has Nspin columns, Vxc has Nspin columns
-    void compute_Veff(const double* rho, const double* rho_b, const double* Vloc);
-
-    // Compute spinor Veff from noncollinear density (rho, mx, my, mz)
-    void compute_Veff_spinor(const ElectronDensity& density,
-                              const double* rho_b, const double* Vloc);
-
-    // Initialize density from superposition of atomic densities (simplified)
-    void init_density(int Nd_d, int Nelectron);
 
 public:
     // Set initial density from external source (e.g., atomic superposition)

@@ -29,6 +29,9 @@ add_library(lynx_core
     solvers/Mixer.cpp
     solvers/EigenSolver.cpp
     physics/Energy.cpp
+    physics/EffectivePotential.cpp
+    physics/SCFInitializer.cpp
+    physics/HybridSCF.cpp
     physics/SCF.cpp
     physics/Forces.cpp
     physics/Stress.cpp
