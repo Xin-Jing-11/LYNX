@@ -204,7 +204,7 @@ int main(int argc, char** argv) {
         // ===== Resolve all auto-default parameters =====
         // This is the ONE place where sentinel values (-1) get replaced with
         // computed defaults. After this call, every parameter is valid.
-        lynx::ParameterDefaults::resolve_all(config, grid, Nelectron,
+        lynx::ParameterDefaults::update_default(config, grid, Nelectron,
                                               (Nspin == 2), is_soc);
         if (rank == 0) {
             double h_eff = lynx::ParameterDefaults::compute_h_eff(grid.dx(), grid.dy(), grid.dz());
@@ -296,7 +296,7 @@ int main(int argc, char** argv) {
         hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
         // ===== Setup SCF =====
-        int Nstates = config.Nstates;  // already resolved by resolve_all
+        int Nstates = config.Nstates;  // already resolved by update_default
 
         lynx::SCFParams scf_params;
         scf_params.max_iter = config.max_scf_iter;

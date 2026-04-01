@@ -35,7 +35,7 @@ int compute_nstates(int Nelectron, bool is_spin, bool is_soc);
 /// Must be called ONCE from main.cpp after parsing and grid creation.
 /// After this call, all parameters (elec_temp, cheb_degree, poisson_tol,
 /// precond_tol, Nstates) are guaranteed valid — no sentinel values remain.
-void resolve_all(SystemConfig& config, const FDGrid& grid,
+void update_default(SystemConfig& config, const FDGrid& grid,
                  int Nelectron, bool is_spin, bool is_soc);
 
 }  // namespace ParameterDefaults

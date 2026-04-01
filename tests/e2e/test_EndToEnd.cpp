@@ -142,7 +142,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     result.Nelectron = Nelectron;
 
     // Resolve all auto-default parameters once
-    ParameterDefaults::resolve_all(config, grid, Nelectron, (Nspin == 2), is_soc);
+    ParameterDefaults::update_default(config, grid, Nelectron, (Nspin == 2), is_soc);
 
     Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
 
@@ -183,7 +183,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     Hamiltonian hamiltonian;
     hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
-    // SCF — all parameters already resolved by resolve_all above
+    // SCF — all parameters already resolved by update_default above
     int Nstates = config.Nstates;
 
     SCFParams scf_params;

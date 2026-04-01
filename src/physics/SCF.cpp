@@ -525,7 +525,7 @@ double SCF::run(Wavefunction& wfn,
     }
 #endif
 
-    // All parameters are pre-resolved by ParameterDefaults::resolve_all() in main.cpp.
+    // All parameters are pre-resolved by ParameterDefaults::update_default() in main.cpp.
 
     // K-point weights
     std::vector<double> kpt_weights;

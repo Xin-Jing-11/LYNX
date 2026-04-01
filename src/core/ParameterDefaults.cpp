@@ -55,7 +55,7 @@ int compute_nstates(int Nelectron, bool is_spin, bool is_soc) {
     }
 }
 
-void resolve_all(SystemConfig& config, const FDGrid& grid,
+void update_default(SystemConfig& config, const FDGrid& grid,
                  int Nelectron, bool is_spin, bool is_soc) {
     double h_eff = compute_h_eff(grid.dx(), grid.dy(), grid.dz());
 

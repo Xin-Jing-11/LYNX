@@ -36,7 +36,7 @@ namespace lynx {
 class ExactExchange;  // forward declaration
 
 /// All fields must be fully resolved before passing to SCF.
-/// Call ParameterDefaults::resolve_all() in main.cpp after parsing to fill auto-defaults.
+/// Call ParameterDefaults::update_default() in main.cpp after parsing to fill auto-defaults.
 struct SCFParams {
     int max_iter = 100;
     int min_iter = 2;
