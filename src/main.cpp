@@ -22,6 +22,7 @@
 #include "atoms/AtomType.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "physics/SCF.hpp"
+#include "core/ParameterDefaults.hpp"
 #include "physics/Energy.hpp"
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
@@ -284,12 +285,7 @@ int main(int argc, char** argv) {
         // ===== Setup SCF =====
         int Nstates = config.Nstates;
         if (Nstates <= 0) {
-            if (is_soc) {
-                // SOC: spinor holds both spin components, no /2
-                Nstates = Nelectron + 20;
-            } else {
-                Nstates = Nelectron / 2 + 10;
-            }
+            Nstates = lynx::ParameterDefaults::compute_nstates(Nelectron, (Nspin == 2), is_soc);
         }
 
         lynx::SCFParams scf_params;

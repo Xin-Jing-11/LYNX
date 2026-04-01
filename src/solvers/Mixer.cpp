@@ -1,4 +1,5 @@
 #include "solvers/Mixer.hpp"
+#include "core/ParameterDefaults.hpp"
 #include "parallel/MPIComm.hpp"
 #include "core/NumericalMethods.hpp"
 #include <cmath>
@@ -16,7 +17,8 @@ void Mixer::setup(int Nd_d,
                    double mixing_param,
                    const Laplacian* laplacian,
                    const HaloExchange* halo,
-                   const FDGrid* grid) {
+                   const FDGrid* grid,
+                   double precond_tol) {
     Nd_d_ = Nd_d;
     var_ = var;
     precond_type_ = precond_type;
@@ -27,19 +29,12 @@ void Mixer::setup(int Nd_d,
     grid_ = grid;
     if (grid) Nd_ = grid->Nd();
 
-    // Compute TOL_PRECOND = h_eff^2 * 1e-3 (reference: initialization.c:2655-2664)
-    if (grid) {
-        double dx = grid->dx(), dy = grid->dy(), dz = grid->dz();
-        double h_eff;
-        if (std::abs(dx - dy) < 1e-12 && std::abs(dy - dz) < 1e-12) {
-            h_eff = dx;
-        } else {
-            double dx2_inv = 1.0 / (dx * dx);
-            double dy2_inv = 1.0 / (dy * dy);
-            double dz2_inv = 1.0 / (dz * dz);
-            h_eff = std::sqrt(3.0 / (dx2_inv + dy2_inv + dz2_inv));
-        }
-        precond_tol_ = h_eff * h_eff * 1e-3;
+    // Use pre-computed precond_tol if provided, otherwise auto-compute
+    if (precond_tol >= 0.0) {
+        precond_tol_ = precond_tol;
+    } else if (grid) {
+        double h_eff = ParameterDefaults::compute_h_eff(grid->dx(), grid->dy(), grid->dz());
+        precond_tol_ = ParameterDefaults::compute_precond_tol(h_eff);
     }
 
     reset();

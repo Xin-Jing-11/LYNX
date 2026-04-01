@@ -1,6 +1,7 @@
 #include "physics/SCF.hpp"
 #include "xc/ExactExchange.hpp"
 #include "core/constants.hpp"
+#include "core/ParameterDefaults.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -525,37 +526,11 @@ double SCF::run(Wavefunction& wfn,
     }
 #endif
 
-    // Compute default tolerances (reference: initialization.c:2655-2681)
-    if (params_.poisson_tol < 0.0)
-        params_.poisson_tol = params_.tol * 0.01;
-
-    // Auto-compute electronic temperature (reference: initialization.c:1914-1923)
-    if (params_.elec_temp < 0.0) {
-        double smearing_eV = (params_.smearing == SmearingType::GaussianSmearing) ? 0.2 : 0.1;
-        double beta_au = constants::EH / smearing_eV;
-        params_.elec_temp = 1.0 / (constants::KB * beta_au);
-    }
-
-    // Auto-compute Chebyshev degree from mesh spacing
-    if (params_.cheb_degree < 0) {
-        double dx = grid_->dx(), dy = grid_->dy(), dz = grid_->dz();
-        double h_eff;
-        if (std::abs(dx - dy) < 1e-12 && std::abs(dy - dz) < 1e-12) {
-            h_eff = dx;
-        } else {
-            double dx2i = 1.0/(dx*dx), dy2i = 1.0/(dy*dy), dz2i = 1.0/(dz*dz);
-            h_eff = std::sqrt(3.0 / (dx2i + dy2i + dz2i));
-        }
-        double p3 = -700.0 / 3.0, p2 = 1240.0 / 3.0, p1 = -773.0 / 3.0, p0 = 1078.0 / 15.0;
-        double npl;
-        if (h_eff > 0.7) {
-            npl = 14.0;
-        } else {
-            npl = ((p3 * h_eff + p2) * h_eff + p1) * h_eff + p0;
-        }
-        params_.cheb_degree = static_cast<int>(std::round(npl));
-        if (rank_world == 0)
-            std::printf("Auto Chebyshev degree: %d (h_eff=%.6f)\n", params_.cheb_degree, h_eff);
+    // Auto-compute default tolerances, temperature, Chebyshev degree
+    ParameterDefaults::complete_params(params_, *grid_);
+    if (rank_world == 0 && params_.cheb_degree > 0) {
+        double h_eff = ParameterDefaults::compute_h_eff(grid_->dx(), grid_->dy(), grid_->dz());
+        std::printf("Auto Chebyshev degree: %d (h_eff=%.6f)\n", params_.cheb_degree, h_eff);
     }
 
     // K-point weights
