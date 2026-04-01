@@ -4,6 +4,7 @@ add_library(lynx_core
     core/FDGrid.cpp
     core/Domain.cpp
     core/KPoints.cpp
+    core/NumericalMethods.cpp
     parallel/MPIComm.cpp
     parallel/Parallelization.cpp
     parallel/HaloExchange.cpp
