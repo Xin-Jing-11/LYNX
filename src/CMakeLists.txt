@@ -29,6 +29,7 @@ add_library(lynx_core
     solvers/LinearSolver.cpp
     solvers/PoissonSolver.cpp
     solvers/Mixer.cpp
+    solvers/KerkerPreconditioner.cpp
     solvers/EigenSolver.cpp
     physics/Energy.cpp
     physics/SCF.cpp
