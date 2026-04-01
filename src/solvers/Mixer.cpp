@@ -1,5 +1,4 @@
 #include "solvers/Mixer.hpp"
-#include "core/ParameterDefaults.hpp"
 #include "parallel/MPIComm.hpp"
 #include "core/NumericalMethods.hpp"
 #include <cmath>
@@ -29,13 +28,7 @@ void Mixer::setup(int Nd_d,
     grid_ = grid;
     if (grid) Nd_ = grid->Nd();
 
-    // Use pre-computed precond_tol if provided, otherwise auto-compute
-    if (precond_tol >= 0.0) {
-        precond_tol_ = precond_tol;
-    } else if (grid) {
-        double h_eff = ParameterDefaults::compute_h_eff(grid->dx(), grid->dy(), grid->dz());
-        precond_tol_ = ParameterDefaults::compute_precond_tol(h_eff);
-    }
+    precond_tol_ = precond_tol;
 
     reset();
 }

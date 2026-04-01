@@ -2631,8 +2631,7 @@ double GPUSCFRunner::run(
         poisson_init.setup(laplacian, stencil, domain, grid, halo);
         std::fill(h_phi.begin(), h_phi.end(), 0.0);
 
-        double poisson_tol = (params.poisson_tol > 0) ? params.poisson_tol : params.tol * 0.01;
-        poisson_init.solve(rhs.data(), h_phi.data(), poisson_tol);
+        poisson_init.solve(rhs.data(), h_phi.data(), params.poisson_tol);
 
         double phi_sum = 0;
         for (int i = 0; i < Nd_; i++) phi_sum += h_phi[i];
@@ -2778,7 +2777,7 @@ double GPUSCFRunner::run(
     int nchefsi_per_iter = params.nchefsi;
     double mixing_param = params.mixing_param;
     int mixing_history = params.mixing_history;
-    double poisson_tol = (params.poisson_tol > 0) ? params.poisson_tol : scf_tol * 0.01;
+    double poisson_tol = params.poisson_tol;
 
     // ============================================================
     // Set static callback state

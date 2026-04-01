@@ -1,7 +1,6 @@
 #include "physics/SCF.hpp"
 #include "xc/ExactExchange.hpp"
 #include "core/constants.hpp"
-#include "core/ParameterDefaults.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -526,12 +525,7 @@ double SCF::run(Wavefunction& wfn,
     }
 #endif
 
-    // Auto-compute default tolerances, temperature, Chebyshev degree
-    ParameterDefaults::complete_params(params_, *grid_);
-    if (rank_world == 0 && params_.cheb_degree > 0) {
-        double h_eff = ParameterDefaults::compute_h_eff(grid_->dx(), grid_->dy(), grid_->dz());
-        std::printf("Auto Chebyshev degree: %d (h_eff=%.6f)\n", params_.cheb_degree, h_eff);
-    }
+    // All parameters are pre-resolved by ParameterDefaults::resolve_all() in main.cpp.
 
     // K-point weights
     std::vector<double> kpt_weights;
@@ -597,7 +591,7 @@ double SCF::run(Wavefunction& wfn,
     Mixer mixer;
     mixer.setup(Nd_d, params_.mixing_var, params_.mixing_precond,
                 params_.mixing_history, params_.mixing_param,
-                laplacian_, halo_, grid_);
+                laplacian_, halo_, grid_, params_.precond_tol);
 
     // Setup eigensolver
     EigenSolver eigsolver;

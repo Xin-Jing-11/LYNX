@@ -33,7 +33,7 @@ struct SystemConfig {
     // Electronic
     int Nstates = 0;
     SpinType spin_type = SpinType::None;
-    double elec_temp = -1.0;         // Default: auto (0.2 eV for Gaussian, 0.1 eV for FD)
+    double elec_temp = -1.0;         // -1 = auto (resolved by ParameterDefaults::resolve_all)
     SmearingType smearing = SmearingType::GaussianSmearing;
     XCType xc = XCType::GGA_PBE;
     EXXParams exx_params;    // exact exchange params (hybrid functionals)
@@ -51,8 +51,10 @@ struct SystemConfig {
     MixingPrecond mixing_precond = MixingPrecond::Kerker;
     int mixing_history = 7;
     double mixing_param = 0.3;
-    int cheb_degree = -1;            // Default: auto from Mesh2ChebDegree(h_eff)
+    int cheb_degree = -1;            // -1 = auto (resolved by ParameterDefaults::resolve_all)
     int rho_trigger = 4;
+    double poisson_tol = -1.0;       // -1 = auto (resolved by ParameterDefaults::resolve_all)
+    double precond_tol = -1.0;       // -1 = auto (resolved by ParameterDefaults::resolve_all)
 
     // Parallelization
     ParallelParams parallel;

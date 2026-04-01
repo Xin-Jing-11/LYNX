@@ -34,6 +34,7 @@
 #include "parallel/HaloExchange.hpp"
 #include "parallel/Parallelization.hpp"
 #include "core/KPoints.hpp"
+#include "core/ParameterDefaults.hpp"
 
 using namespace lynx;
 
@@ -140,6 +141,9 @@ static DFTResult run_single_point(const std::string& json_file) {
     result.Natom = Natom;
     result.Nelectron = Nelectron;
 
+    // Resolve all auto-default parameters once
+    ParameterDefaults::resolve_all(config, grid, Nelectron, (Nspin == 2), is_soc);
+
     Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
 
     // Atom influence
@@ -179,11 +183,8 @@ static DFTResult run_single_point(const std::string& json_file) {
     Hamiltonian hamiltonian;
     hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
-    // SCF
+    // SCF — all parameters already resolved by resolve_all above
     int Nstates = config.Nstates;
-    if (Nstates <= 0) {
-        Nstates = is_soc ? (Nelectron + 20) : (Nelectron / 2 + 10);
-    }
 
     SCFParams scf_params;
     scf_params.max_iter = config.max_scf_iter;
@@ -196,6 +197,8 @@ static DFTResult run_single_point(const std::string& json_file) {
     scf_params.smearing = config.smearing;
     scf_params.elec_temp = config.elec_temp;
     scf_params.cheb_degree = config.cheb_degree;
+    scf_params.poisson_tol = config.poisson_tol;
+    scf_params.precond_tol = config.precond_tol;
 
     int Nspin_local = parallel.Nspin_local();
     int Nkpts_local = parallel.Nkpts_local();

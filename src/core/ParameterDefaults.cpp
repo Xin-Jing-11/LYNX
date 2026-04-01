@@ -1,8 +1,9 @@
 #include "core/ParameterDefaults.hpp"
 #include "core/constants.hpp"
 #include "core/FDGrid.hpp"
-#include "physics/SCF.hpp"
+#include "io/InputParser.hpp"
 #include <cmath>
+#include <cstdio>
 
 namespace lynx::ParameterDefaults {
 
@@ -54,17 +55,29 @@ int compute_nstates(int Nelectron, bool is_spin, bool is_soc) {
     }
 }
 
-void complete_params(SCFParams& params, const FDGrid& grid) {
-    if (params.poisson_tol < 0.0)
-        params.poisson_tol = compute_poisson_tol(params.tol);
+void resolve_all(SystemConfig& config, const FDGrid& grid,
+                 int Nelectron, bool is_spin, bool is_soc) {
+    double h_eff = compute_h_eff(grid.dx(), grid.dy(), grid.dz());
 
-    if (params.elec_temp < 0.0)
-        params.elec_temp = compute_elec_temp(params.smearing);
+    // Electronic temperature
+    if (config.elec_temp < 0.0)
+        config.elec_temp = compute_elec_temp(config.smearing);
 
-    if (params.cheb_degree < 0) {
-        double h_eff = compute_h_eff(grid.dx(), grid.dy(), grid.dz());
-        params.cheb_degree = compute_cheb_degree(h_eff);
-    }
+    // Chebyshev polynomial degree
+    if (config.cheb_degree < 0)
+        config.cheb_degree = compute_cheb_degree(h_eff);
+
+    // Poisson solver tolerance
+    if (config.poisson_tol < 0.0)
+        config.poisson_tol = compute_poisson_tol(config.scf_tol);
+
+    // Kerker preconditioner tolerance
+    if (config.precond_tol < 0.0)
+        config.precond_tol = compute_precond_tol(h_eff);
+
+    // Number of states
+    if (config.Nstates <= 0)
+        config.Nstates = compute_nstates(Nelectron, is_spin, is_soc);
 }
 
 }  // namespace lynx::ParameterDefaults

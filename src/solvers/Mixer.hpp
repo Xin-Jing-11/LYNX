@@ -26,7 +26,7 @@ public:
                const Laplacian* laplacian = nullptr,
                const HaloExchange* halo = nullptr,
                const FDGrid* grid = nullptr,
-               double precond_tol = -1.0);  // <0 means auto-compute from h_eff
+               double precond_tol = 0.0);  // must be set before use when Kerker is enabled
 
     // Mix density: x_k is the current input, g_k is the output from SCF.
     // After mixing, x_k is updated in-place with the new mixed density.
