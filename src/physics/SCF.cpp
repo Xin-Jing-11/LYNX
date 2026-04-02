@@ -233,7 +233,6 @@ double SCF::run(Wavefunction& wfn,
                  XCType xc_type,
                  const double* rho_core) {
     int Nd_d = domain_->Nd_d();
-    int Nspin = Nspin_global_;
     int rank_world = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
 
@@ -271,358 +270,22 @@ double SCF::run(Wavefunction& wfn,
         kpoints_, kpt_start_, band_start_,
         xc_type, rho_b, rho_core, is_kpt_, is_soc_);
 
-    int Nband = state.Nband;
-    int Nband_loc = state.Nband_loc;
-    int Nspin_local = state.Nspin_local;
-    int Nkpts = state.Nkpts;
-    Vec3 cell_lengths = grid_->lattice().lengths();
-
+    state.Nelectron = Nelectron;
     if (Natom <= 0) Natom = std::max(1, Nelectron / 4);
     converged_ = false;
 
     // ===== 2. SCF Iteration Loop =====
+    ElectronDensity rho_new;
     for (int scf_iter = 0; scf_iter < params_.max_iter; ++scf_iter) {
-        int nchefsi = (scf_iter == 0) ? params_.rho_trigger : params_.nchefsi;
-
-        if (rank_world == 0 && scf_iter == 0 && nchefsi > 1)
-            std::printf("SCF iter 1: %d CheFSI passes (rhoTrigger)\n", nchefsi);
-
-        // 2a. Chebyshev-filtered subspace iteration
-        for (int chefsi_pass = 0; chefsi_pass < nchefsi; ++chefsi_pass) {
-            if (is_soc_) {
-                for (int k = 0; k < Nkpts; ++k) {
-                    double* eig = wfn.eigenvalues(0, k).data();
-                    Complex* psi_c = wfn.psi_kpt(0, k).data();
-                    int k_glob = kpt_start_ + k;
-                    Vec3 kpt = kpoints_->kpts_cart()[k_glob];
-
-                    if (vnl_ && vnl_->is_setup()) {
-                        const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
-                        const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
-                    }
-
-                    eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
-                                                Nd_d, Nband_loc,
-                                                state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
-                                                kpt, cell_lengths,
-                                                params_.cheb_degree,
-                                                wfn.psi_kpt(0, k).ld());
-                }
-            } else {
-                for (int s = 0; s < Nspin_local; ++s) {
-                    int s_glob = spin_start_ + s;
-                    double* Veff_s = arrays_.Veff.data() + s_glob * Nd_d;
-                    if (is_mgga_type(xc_type_) && Nspin_global_ == 2) {
-                        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(arrays_.vtau.data() + s_glob * Nd_d);
-                    }
-                    for (int k = 0; k < Nkpts; ++k) {
-                        double* eig = wfn.eigenvalues(s, k).data();
-
-                        if (is_kpt_) {
-                            Complex* psi_c = wfn.psi_kpt(s, k).data();
-                            int k_glob = kpt_start_ + k;
-                            Vec3 kpt = kpoints_->kpts_cart()[k_glob];
-
-                            if (vnl_ && vnl_->is_setup()) {
-                                const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
-                                const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
-                            }
-
-                            eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband_loc,
-                                                state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
-                                                kpt, cell_lengths,
-                                                params_.cheb_degree,
-                                                wfn.psi_kpt(s, k).ld());
-                        } else {
-                            double* psi = wfn.psi(s, k).data();
-                            eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
-                                            state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
-                                            params_.cheb_degree,
-                                            wfn.psi(s, k).ld());
-                        }
-                    }
-                }
-            }
-
-            // Update spectral bounds
-            {
-                double eig_last_max = -1e30;
-                int n_spin_loop = is_soc_ ? 1 : Nspin_local;
-                for (int s = 0; s < n_spin_loop; ++s) {
-                    const double* eigs = wfn.eigenvalues(s, 0).data();
-                    if (scf_iter > 0) {
-                        state.eigval_min[s] = eigs[0];
-                    }
-                    if (eigs[Nband - 1] > eig_last_max)
-                        eig_last_max = eigs[Nband - 1];
-                }
-                state.lambda_cutoff = eig_last_max + 0.1;
-            }
-
-            // 2b. Compute occupations
-            Ef_ = Occupation::compute(wfn, Nelectron, state.beta, params_.smearing,
-                                      state.kpt_weights, *kptcomm_, *spincomm_, kpt_start_);
-        }
-
-        // Compute tau for mGGA after CheFSI solve
-        if (is_mgga_type(xc_type_)) {
-            compute_tau(wfn, state.kpt_weights, kpt_start_, band_start_);
-            arrays_.tau_valid = true;
-        }
-
-        // 2c. Compute new electron density
-        ElectronDensity rho_new;
-        if (is_soc_) {
-            rho_new.allocate_noncollinear(Nd_d);
-            rho_new.compute_spinor(wfn, state.kpt_weights, grid_->dV(),
-                                    *bandcomm_, *kptcomm_, kpt_start_, band_start_);
-        } else {
-            rho_new.allocate(Nd_d, Nspin);
-            rho_new.compute(wfn, state.kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
-                            Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
-        }
-
-        // 2d. Compute energy
-        NDArray<double> Veff_out;
-        if (state.use_potential_mixing) {
-            // Save Veff_in, update density to rho_out, compute Veff_out
-            NDArray<double> Veff_in(Nd_d * Nspin);
-            std::memcpy(Veff_in.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
-
-            std::memcpy(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
-            for (int s = 0; s < Nspin; ++s)
-                std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
-
-            veff_builder_.compute(density_, rho_b, rho_core, xc_type, 0.0, params_.poisson_tol, arrays_);
-            Veff_out = NDArray<double>(Nd_d * Nspin);
-            std::memcpy(Veff_out.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
-
-            energy_ = Energy::compute_all(wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
-                                           arrays_.exc.data(), arrays_.Vxc.data(), rho_b,
-                                           Eself, Ec, state.beta, params_.smearing,
-                                           state.kpt_weights, Nd_d, grid_->dV(),
-                                           rho_core, Ef_, kpt_start_,
-                                           kptcomm_, spincomm_, Nspin, nullptr,
-                                           is_mgga_type(xc_type_) ? arrays_.tau.data() : nullptr,
-                                           is_mgga_type(xc_type_) ? arrays_.vtau.data() : nullptr);
-
-            // Self-consistency correction
-            double Escc = 0.0;
-            if (Nspin == 2) {
-                for (int s = 0; s < Nspin; ++s) {
-                    const double* rho_s = density_.rho(s).data();
-                    for (int i = 0; i < Nd_d; ++i) {
-                        Escc += rho_s[i] * (Veff_out.data()[s*Nd_d + i] - Veff_in.data()[s*Nd_d + i]);
-                    }
-                }
-            } else {
-                const double* rho_tot = density_.rho_total().data();
-                for (int i = 0; i < Nd_d; ++i) {
-                    Escc += rho_tot[i] * (Veff_out.data()[i] - Veff_in.data()[i]);
-                }
-            }
-            Escc *= grid_->dV();
-            energy_.Etotal += Escc;
-
-            // Restore Veff_in for mixer
-            std::memcpy(arrays_.Veff.data(), Veff_in.data(), Nd_d * Nspin * sizeof(double));
-        } else {
-            energy_ = Energy::compute_all(wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
-                                           arrays_.exc.data(), arrays_.Vxc.data(), rho_b,
-                                           Eself, Ec, state.beta, params_.smearing,
-                                           state.kpt_weights, Nd_d, grid_->dV(),
-                                           rho_core, Ef_, kpt_start_,
-                                           kptcomm_, spincomm_, Nspin, nullptr,
-                                           is_mgga_type(xc_type_) ? arrays_.tau.data() : nullptr,
-                                           is_mgga_type(xc_type_) ? arrays_.vtau.data() : nullptr);
-        }
-
-        // 2e. Evaluate SCF error and check convergence
-        double scf_error = 0.0;
-        if (state.use_potential_mixing) {
-            double sum_sq_out = 0.0, sum_sq_diff = 0.0;
-            for (int i = 0; i < Nd_d * Nspin; ++i) {
-                double diff = Veff_out.data()[i] - arrays_.Veff.data()[i];
-                sum_sq_out += Veff_out.data()[i] * Veff_out.data()[i];
-                sum_sq_diff += diff * diff;
-            }
-            scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
-        } else {
-            const double* rho_in = density_.rho_total().data();
-            const double* rho_out = rho_new.rho_total().data();
-            double sum_sq_out = 0.0, sum_sq_diff = 0.0;
-            for (int i = 0; i < Nd_d; ++i) {
-                double diff = rho_out[i] - rho_in[i];
-                sum_sq_out += rho_out[i] * rho_out[i];
-                sum_sq_diff += diff * diff;
-            }
-            scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
-        }
-
-        if (rank_world == 0) {
-            if (Nspin == 2) {
-                double mag_sum = 0.0;
-                const double* ru = rho_new.rho(0).data();
-                const double* rd = rho_new.rho(1).data();
-                for (int i = 0; i < Nd_d; ++i) mag_sum += ru[i] - rd[i];
-                mag_sum *= grid_->dV();
-                std::printf("SCF iter %3d: Etot = %18.10f Ha, SCF error = %10.3e, Ef = %10.5f, mag = %8.4f\n",
-                            scf_iter + 1, energy_.Etotal, scf_error, Ef_, mag_sum);
-            } else {
-                std::printf("SCF iter %3d: Etot = %18.10f Ha, SCF error = %10.3e, Ef = %10.5f\n",
-                            scf_iter + 1, energy_.Etotal, scf_error, Ef_);
-            }
-        }
-
-        if (rank_world == 0 && scf_error < params_.tol && scf_iter >= params_.min_iter) {
-            std::printf("\nFinal eigenvalues (Ha) and occupations:\n");
-            for (int s = 0; s < Nspin_local; ++s) {
-                if (Nspin > 1) std::printf("  Spin %d:\n", spin_start_ + s);
-                for (int n = 0; n < Nband; ++n) {
-                    std::printf("  %3d  %20.12e  %16.12f\n",
-                                n+1, wfn.eigenvalues(s, 0)(n), wfn.occupations(s, 0)(n));
-                }
-            }
-        }
-
-        if (scf_iter >= params_.min_iter && scf_error < params_.tol) {
-            converged_ = true;
-            if (rank_world == 0) {
-                std::printf("SCF converged after %d iterations.\n", scf_iter + 1);
-            }
-            break;
-        }
-
-        // 2f. Mix and update Veff
-        if (state.use_potential_mixing) {
-            for (int s = 0; s < Nspin; ++s) {
-                double mean = 0;
-                for (int i = 0; i < Nd_d; ++i) mean += Veff_out.data()[s*Nd_d + i];
-                mean /= grid_->Nd();
-                state.Veff_mean[s] = mean;
-                for (int i = 0; i < Nd_d; ++i) Veff_out.data()[s*Nd_d + i] -= mean;
-            }
-
-            mixer.mix(state.Veff_mixed.data(), Veff_out.data(), Nd_d, Nspin);
-
-            for (int s = 0; s < Nspin; ++s) {
-                for (int i = 0; i < Nd_d; ++i) {
-                    arrays_.Veff.data()[s*Nd_d + i] = state.Veff_mixed.data()[s*Nd_d + i] + state.Veff_mean[s];
-                }
-            }
-        } else if (is_soc_) {
-            // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
-            std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);
-            std::memcpy(dens_in.data(), density_.rho_total().data(), Nd_d * sizeof(double));
-            std::memcpy(dens_in.data() + Nd_d, density_.mag_x().data(), Nd_d * sizeof(double));
-            std::memcpy(dens_in.data() + 2*Nd_d, density_.mag_y().data(), Nd_d * sizeof(double));
-            std::memcpy(dens_in.data() + 3*Nd_d, density_.mag_z().data(), Nd_d * sizeof(double));
-
-            std::memcpy(dens_out.data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
-            std::memcpy(dens_out.data() + Nd_d, rho_new.mag_x().data(), Nd_d * sizeof(double));
-            std::memcpy(dens_out.data() + 2*Nd_d, rho_new.mag_y().data(), Nd_d * sizeof(double));
-            std::memcpy(dens_out.data() + 3*Nd_d, rho_new.mag_z().data(), Nd_d * sizeof(double));
-
-            mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4);
-
-            double* rho_mix = density_.rho_total().data();
-            for (int i = 0; i < Nd_d; ++i) {
-                rho_mix[i] = dens_in[i];
-                if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
-            }
-            {
-                double rho_sum = 0.0;
-                for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
-                double Ne_current = rho_sum * grid_->dV();
-                if (Ne_current > 1e-10) {
-                    double scale = static_cast<double>(Nelectron) / Ne_current;
-                    for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
-                }
-            }
-            std::memcpy(density_.rho(0).data(), rho_mix, Nd_d * sizeof(double));
-            std::memcpy(density_.mag_x().data(), dens_in.data() + Nd_d, Nd_d * sizeof(double));
-            std::memcpy(density_.mag_y().data(), dens_in.data() + 2*Nd_d, Nd_d * sizeof(double));
-            std::memcpy(density_.mag_z().data(), dens_in.data() + 3*Nd_d, Nd_d * sizeof(double));
-        } else if (Nspin == 1) {
-            mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d);
-
-            double* rho_mix = density_.rho_total().data();
-            for (int i = 0; i < Nd_d; ++i) {
-                if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
-            }
-            {
-                double rho_sum = 0.0;
-                for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
-                double Ne_current = rho_sum * grid_->dV();
-                if (Ne_current > 1e-10) {
-                    double scale = static_cast<double>(Nelectron) / Ne_current;
-                    for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
-                }
-            }
-            std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
-        } else {
-            // Spin-polarized density mixing
-            std::vector<double> dens_in(2 * Nd_d), dens_out(2 * Nd_d);
-
-            const double* rho_up_in = density_.rho(0).data();
-            const double* rho_dn_in = density_.rho(1).data();
-            for (int i = 0; i < Nd_d; ++i) {
-                dens_in[i] = density_.rho_total().data()[i];
-                dens_in[Nd_d + i] = rho_up_in[i] - rho_dn_in[i];
-            }
-
-            const double* rho_up_out = rho_new.rho(0).data();
-            const double* rho_dn_out = rho_new.rho(1).data();
-            for (int i = 0; i < Nd_d; ++i) {
-                dens_out[i] = rho_new.rho_total().data()[i];
-                dens_out[Nd_d + i] = rho_up_out[i] - rho_dn_out[i];
-            }
-
-            mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
-
-            double* rho_tot = density_.rho_total().data();
-            double* rho_up = density_.rho(0).data();
-            double* rho_dn = density_.rho(1).data();
-            for (int i = 0; i < Nd_d; ++i) {
-                rho_tot[i] = dens_in[i];
-                double mag = dens_in[Nd_d + i];
-                rho_up[i] = 0.5 * (rho_tot[i] + mag);
-                rho_dn[i] = 0.5 * (rho_tot[i] - mag);
-            }
-
-            for (int i = 0; i < Nd_d; ++i) {
-                if (rho_up[i] < 0.0) rho_up[i] = 0.0;
-                if (rho_dn[i] < 0.0) rho_dn[i] = 0.0;
-                rho_tot[i] = rho_up[i] + rho_dn[i];
-            }
-            {
-                double rho_sum = 0.0;
-                for (int i = 0; i < Nd_d; ++i) rho_sum += rho_tot[i];
-                double Ne_current = rho_sum * grid_->dV();
-                if (Ne_current > 1e-10) {
-                    double scale = static_cast<double>(Nelectron) / Ne_current;
-                    for (int i = 0; i < Nd_d; ++i) {
-                        rho_up[i] *= scale;
-                        rho_dn[i] *= scale;
-                        rho_tot[i] *= scale;
-                    }
-                }
-            }
-        }
-
-        // For density mixing: recompute Veff from mixed density
-        if (!state.use_potential_mixing) {
-            if (is_soc_) {
-                veff_builder_.compute_spinor(density_, rho_b, rho_core, xc_type, params_.poisson_tol, arrays_);
-            } else {
-                veff_builder_.compute(density_, rho_b, rho_core, xc_type, 0.0, params_.poisson_tol, arrays_);
-            }
-        }
+        solve_eigenproblem(wfn, eigsolver, state, scf_iter);
+        compute_new_density(wfn, state, rho_new);
+        compute_scf_energy(wfn, rho_new, rho_b, Eself, Ec, state);
+        if (check_convergence(wfn, rho_new, state, scf_iter)) break;
+        mix_and_update(rho_new, mixer, rho_b, rho_core, Nelectron, state);
     }
 
-    if (!converged_ && rank_world == 0) {
+    if (!converged_ && rank_world == 0)
         std::printf("WARNING: SCF did not converge within %d iterations.\n", params_.max_iter);
-    }
 
     // ===== 3. Outer Fock Loop for hybrid functionals =====
     if (exx_ && is_hybrid(xc_type_)) {
@@ -640,6 +303,379 @@ double SCF::run(Wavefunction& wfn,
     }
 
     return energy_.Etotal;
+}
+
+// ===== Extracted SCF sub-steps =====
+
+void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
+                              SCFState& state, int scf_iter) {
+    int Nd_d = domain_->Nd_d();
+    int Nband = state.Nband;
+    int Nband_loc = state.Nband_loc;
+    int Nspin_local = state.Nspin_local;
+    int Nkpts = state.Nkpts;
+    int Nelectron = state.Nelectron;
+    Vec3 cell_lengths = grid_->lattice().lengths();
+
+    int nchefsi = (scf_iter == 0) ? params_.rho_trigger : params_.nchefsi;
+
+    int rank_world = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
+    if (rank_world == 0 && scf_iter == 0 && nchefsi > 1)
+        std::printf("SCF iter 1: %d CheFSI passes (rhoTrigger)\n", nchefsi);
+
+    for (int chefsi_pass = 0; chefsi_pass < nchefsi; ++chefsi_pass) {
+        if (is_soc_) {
+            for (int k = 0; k < Nkpts; ++k) {
+                double* eig = wfn.eigenvalues(0, k).data();
+                Complex* psi_c = wfn.psi_kpt(0, k).data();
+                int k_glob = kpt_start_ + k;
+                Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+
+                if (vnl_ && vnl_->is_setup()) {
+                    const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
+                    const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
+                }
+
+                eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
+                                            Nd_d, Nband_loc,
+                                            state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
+                                            kpt, cell_lengths,
+                                            params_.cheb_degree,
+                                            wfn.psi_kpt(0, k).ld());
+            }
+        } else {
+            for (int s = 0; s < Nspin_local; ++s) {
+                int s_glob = spin_start_ + s;
+                double* Veff_s = arrays_.Veff.data() + s_glob * Nd_d;
+                if (is_mgga_type(xc_type_) && Nspin_global_ == 2) {
+                    const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(arrays_.vtau.data() + s_glob * Nd_d);
+                }
+                for (int k = 0; k < Nkpts; ++k) {
+                    double* eig = wfn.eigenvalues(s, k).data();
+
+                    if (is_kpt_) {
+                        Complex* psi_c = wfn.psi_kpt(s, k).data();
+                        int k_glob = kpt_start_ + k;
+                        Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+
+                        if (vnl_ && vnl_->is_setup()) {
+                            const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
+                            const_cast<Hamiltonian*>(hamiltonian_)->set_vnl_kpt(vnl_);
+                        }
+
+                        eigsolver.solve_kpt(psi_c, eig, Veff_s, Nd_d, Nband_loc,
+                                            state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
+                                            kpt, cell_lengths,
+                                            params_.cheb_degree,
+                                            wfn.psi_kpt(s, k).ld());
+                    } else {
+                        double* psi = wfn.psi(s, k).data();
+                        eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
+                                        state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
+                                        params_.cheb_degree,
+                                        wfn.psi(s, k).ld());
+                    }
+                }
+            }
+        }
+
+        // Update spectral bounds
+        {
+            double eig_last_max = -1e30;
+            int n_spin_loop = is_soc_ ? 1 : Nspin_local;
+            for (int s = 0; s < n_spin_loop; ++s) {
+                const double* eigs = wfn.eigenvalues(s, 0).data();
+                if (scf_iter > 0) {
+                    state.eigval_min[s] = eigs[0];
+                }
+                if (eigs[Nband - 1] > eig_last_max)
+                    eig_last_max = eigs[Nband - 1];
+            }
+            state.lambda_cutoff = eig_last_max + 0.1;
+        }
+
+        // Compute occupations
+        Ef_ = Occupation::compute(wfn, Nelectron, state.beta, params_.smearing,
+                                  state.kpt_weights, *kptcomm_, *spincomm_, kpt_start_);
+    }
+
+    // Compute tau for mGGA after CheFSI solve
+    if (is_mgga_type(xc_type_)) {
+        compute_tau(wfn, state.kpt_weights, kpt_start_, band_start_);
+        arrays_.tau_valid = true;
+    }
+}
+
+void SCF::compute_new_density(const Wavefunction& wfn, const SCFState& state,
+                               ElectronDensity& rho_new) {
+    int Nd_d = domain_->Nd_d();
+    int Nspin = Nspin_global_;
+
+    if (is_soc_) {
+        rho_new.allocate_noncollinear(Nd_d);
+        rho_new.compute_spinor(wfn, state.kpt_weights, grid_->dV(),
+                                *bandcomm_, *kptcomm_, kpt_start_, band_start_);
+    } else {
+        rho_new.allocate(Nd_d, Nspin);
+        rho_new.compute(wfn, state.kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
+                        Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
+    }
+}
+
+void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho_new,
+                              const double* rho_b, double Eself, double Ec, SCFState& state) {
+    int Nd_d = domain_->Nd_d();
+    int Nspin = Nspin_global_;
+
+    if (state.use_potential_mixing) {
+        // Save Veff_in, update density to rho_out, compute Veff_out
+        NDArray<double> Veff_in(Nd_d * Nspin);
+        std::memcpy(Veff_in.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
+
+        std::memcpy(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
+        for (int s = 0; s < Nspin; ++s)
+            std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
+
+        veff_builder_.compute(density_, rho_b, rho_core_, xc_type_, 0.0, params_.poisson_tol, arrays_);
+        state.Veff_out = NDArray<double>(Nd_d * Nspin);
+        std::memcpy(state.Veff_out.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
+
+        energy_ = Energy::compute_all(wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
+                                       arrays_.exc.data(), arrays_.Vxc.data(), rho_b,
+                                       Eself, Ec, state.beta, params_.smearing,
+                                       state.kpt_weights, Nd_d, grid_->dV(),
+                                       rho_core_, Ef_, kpt_start_,
+                                       kptcomm_, spincomm_, Nspin, nullptr,
+                                       is_mgga_type(xc_type_) ? arrays_.tau.data() : nullptr,
+                                       is_mgga_type(xc_type_) ? arrays_.vtau.data() : nullptr);
+
+        // Self-consistency correction
+        double Escc = 0.0;
+        if (Nspin == 2) {
+            for (int s = 0; s < Nspin; ++s) {
+                const double* rho_s = density_.rho(s).data();
+                for (int i = 0; i < Nd_d; ++i) {
+                    Escc += rho_s[i] * (state.Veff_out.data()[s*Nd_d + i] - Veff_in.data()[s*Nd_d + i]);
+                }
+            }
+        } else {
+            const double* rho_tot = density_.rho_total().data();
+            for (int i = 0; i < Nd_d; ++i) {
+                Escc += rho_tot[i] * (state.Veff_out.data()[i] - Veff_in.data()[i]);
+            }
+        }
+        Escc *= grid_->dV();
+        energy_.Etotal += Escc;
+
+        // Restore Veff_in for mixer
+        std::memcpy(arrays_.Veff.data(), Veff_in.data(), Nd_d * Nspin * sizeof(double));
+    } else {
+        energy_ = Energy::compute_all(wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
+                                       arrays_.exc.data(), arrays_.Vxc.data(), rho_b,
+                                       Eself, Ec, state.beta, params_.smearing,
+                                       state.kpt_weights, Nd_d, grid_->dV(),
+                                       rho_core_, Ef_, kpt_start_,
+                                       kptcomm_, spincomm_, Nspin, nullptr,
+                                       is_mgga_type(xc_type_) ? arrays_.tau.data() : nullptr,
+                                       is_mgga_type(xc_type_) ? arrays_.vtau.data() : nullptr);
+    }
+}
+
+bool SCF::check_convergence(const Wavefunction& wfn, const ElectronDensity& rho_new,
+                             const SCFState& state, int scf_iter) {
+    int Nd_d = domain_->Nd_d();
+    int Nspin = Nspin_global_;
+    int rank_world = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
+
+    double scf_error = 0.0;
+    if (state.use_potential_mixing) {
+        double sum_sq_out = 0.0, sum_sq_diff = 0.0;
+        for (int i = 0; i < Nd_d * Nspin; ++i) {
+            double diff = state.Veff_out.data()[i] - arrays_.Veff.data()[i];
+            sum_sq_out += state.Veff_out.data()[i] * state.Veff_out.data()[i];
+            sum_sq_diff += diff * diff;
+        }
+        scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
+    } else {
+        const double* rho_in = density_.rho_total().data();
+        const double* rho_out = rho_new.rho_total().data();
+        double sum_sq_out = 0.0, sum_sq_diff = 0.0;
+        for (int i = 0; i < Nd_d; ++i) {
+            double diff = rho_out[i] - rho_in[i];
+            sum_sq_out += rho_out[i] * rho_out[i];
+            sum_sq_diff += diff * diff;
+        }
+        scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
+    }
+
+    if (rank_world == 0) {
+        if (Nspin == 2) {
+            double mag_sum = 0.0;
+            const double* ru = rho_new.rho(0).data();
+            const double* rd = rho_new.rho(1).data();
+            for (int i = 0; i < Nd_d; ++i) mag_sum += ru[i] - rd[i];
+            mag_sum *= grid_->dV();
+            std::printf("SCF iter %3d: Etot = %18.10f Ha, SCF error = %10.3e, Ef = %10.5f, mag = %8.4f\n",
+                        scf_iter + 1, energy_.Etotal, scf_error, Ef_, mag_sum);
+        } else {
+            std::printf("SCF iter %3d: Etot = %18.10f Ha, SCF error = %10.3e, Ef = %10.5f\n",
+                        scf_iter + 1, energy_.Etotal, scf_error, Ef_);
+        }
+    }
+
+    if (rank_world == 0 && scf_error < params_.tol && scf_iter >= params_.min_iter) {
+        std::printf("\nFinal eigenvalues (Ha) and occupations:\n");
+        for (int s = 0; s < Nspin_local_; ++s) {
+            if (Nspin > 1) std::printf("  Spin %d:\n", spin_start_ + s);
+            for (int n = 0; n < state.Nband; ++n) {
+                std::printf("  %3d  %20.12e  %16.12f\n",
+                            n+1, wfn.eigenvalues(s, 0)(n), wfn.occupations(s, 0)(n));
+            }
+        }
+    }
+
+    if (scf_iter >= params_.min_iter && scf_error < params_.tol) {
+        converged_ = true;
+        if (rank_world == 0) {
+            std::printf("SCF converged after %d iterations.\n", scf_iter + 1);
+        }
+        return true;
+    }
+    return false;
+}
+
+void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
+                          const double* rho_b, const double* rho_core,
+                          int Nelectron, SCFState& state) {
+    int Nd_d = domain_->Nd_d();
+    int Nspin = Nspin_global_;
+
+    if (state.use_potential_mixing) {
+        for (int s = 0; s < Nspin; ++s) {
+            double mean = 0;
+            for (int i = 0; i < Nd_d; ++i) mean += state.Veff_out.data()[s*Nd_d + i];
+            mean /= grid_->Nd();
+            state.Veff_mean[s] = mean;
+            for (int i = 0; i < Nd_d; ++i) state.Veff_out.data()[s*Nd_d + i] -= mean;
+        }
+
+        mixer.mix(state.Veff_mixed.data(), state.Veff_out.data(), Nd_d, Nspin);
+
+        for (int s = 0; s < Nspin; ++s) {
+            for (int i = 0; i < Nd_d; ++i) {
+                arrays_.Veff.data()[s*Nd_d + i] = state.Veff_mixed.data()[s*Nd_d + i] + state.Veff_mean[s];
+            }
+        }
+    } else if (is_soc_) {
+        // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
+        std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);
+        std::memcpy(dens_in.data(), density_.rho_total().data(), Nd_d * sizeof(double));
+        std::memcpy(dens_in.data() + Nd_d, density_.mag_x().data(), Nd_d * sizeof(double));
+        std::memcpy(dens_in.data() + 2*Nd_d, density_.mag_y().data(), Nd_d * sizeof(double));
+        std::memcpy(dens_in.data() + 3*Nd_d, density_.mag_z().data(), Nd_d * sizeof(double));
+
+        std::memcpy(dens_out.data(), rho_new.rho_total().data(), Nd_d * sizeof(double));
+        std::memcpy(dens_out.data() + Nd_d, rho_new.mag_x().data(), Nd_d * sizeof(double));
+        std::memcpy(dens_out.data() + 2*Nd_d, rho_new.mag_y().data(), Nd_d * sizeof(double));
+        std::memcpy(dens_out.data() + 3*Nd_d, rho_new.mag_z().data(), Nd_d * sizeof(double));
+
+        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4);
+
+        double* rho_mix = density_.rho_total().data();
+        for (int i = 0; i < Nd_d; ++i) {
+            rho_mix[i] = dens_in[i];
+            if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
+        }
+        {
+            double rho_sum = 0.0;
+            for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
+            double Ne_current = rho_sum * grid_->dV();
+            if (Ne_current > 1e-10) {
+                double scale = static_cast<double>(Nelectron) / Ne_current;
+                for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
+            }
+        }
+        std::memcpy(density_.rho(0).data(), rho_mix, Nd_d * sizeof(double));
+        std::memcpy(density_.mag_x().data(), dens_in.data() + Nd_d, Nd_d * sizeof(double));
+        std::memcpy(density_.mag_y().data(), dens_in.data() + 2*Nd_d, Nd_d * sizeof(double));
+        std::memcpy(density_.mag_z().data(), dens_in.data() + 3*Nd_d, Nd_d * sizeof(double));
+    } else if (Nspin == 1) {
+        mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d);
+
+        double* rho_mix = density_.rho_total().data();
+        for (int i = 0; i < Nd_d; ++i) {
+            if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
+        }
+        {
+            double rho_sum = 0.0;
+            for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
+            double Ne_current = rho_sum * grid_->dV();
+            if (Ne_current > 1e-10) {
+                double scale = static_cast<double>(Nelectron) / Ne_current;
+                for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
+            }
+        }
+        std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
+    } else {
+        // Spin-polarized density mixing
+        std::vector<double> dens_in(2 * Nd_d), dens_out(2 * Nd_d);
+
+        const double* rho_up_in = density_.rho(0).data();
+        const double* rho_dn_in = density_.rho(1).data();
+        for (int i = 0; i < Nd_d; ++i) {
+            dens_in[i] = density_.rho_total().data()[i];
+            dens_in[Nd_d + i] = rho_up_in[i] - rho_dn_in[i];
+        }
+
+        const double* rho_up_out = rho_new.rho(0).data();
+        const double* rho_dn_out = rho_new.rho(1).data();
+        for (int i = 0; i < Nd_d; ++i) {
+            dens_out[i] = rho_new.rho_total().data()[i];
+            dens_out[Nd_d + i] = rho_up_out[i] - rho_dn_out[i];
+        }
+
+        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
+
+        double* rho_tot = density_.rho_total().data();
+        double* rho_up = density_.rho(0).data();
+        double* rho_dn = density_.rho(1).data();
+        for (int i = 0; i < Nd_d; ++i) {
+            rho_tot[i] = dens_in[i];
+            double mag = dens_in[Nd_d + i];
+            rho_up[i] = 0.5 * (rho_tot[i] + mag);
+            rho_dn[i] = 0.5 * (rho_tot[i] - mag);
+        }
+
+        for (int i = 0; i < Nd_d; ++i) {
+            if (rho_up[i] < 0.0) rho_up[i] = 0.0;
+            if (rho_dn[i] < 0.0) rho_dn[i] = 0.0;
+            rho_tot[i] = rho_up[i] + rho_dn[i];
+        }
+        {
+            double rho_sum = 0.0;
+            for (int i = 0; i < Nd_d; ++i) rho_sum += rho_tot[i];
+            double Ne_current = rho_sum * grid_->dV();
+            if (Ne_current > 1e-10) {
+                double scale = static_cast<double>(Nelectron) / Ne_current;
+                for (int i = 0; i < Nd_d; ++i) {
+                    rho_up[i] *= scale;
+                    rho_dn[i] *= scale;
+                    rho_tot[i] *= scale;
+                }
+            }
+        }
+    }
+
+    // For density mixing: recompute Veff from mixed density
+    if (!state.use_potential_mixing) {
+        if (is_soc_) {
+            veff_builder_.compute_spinor(density_, rho_b, rho_core, xc_type_, params_.poisson_tol, arrays_);
+        } else {
+            veff_builder_.compute(density_, rho_b, rho_core, xc_type_, 0.0, params_.poisson_tol, arrays_);
+        }
+    }
 }
 
 #ifdef USE_CUDA

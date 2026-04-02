@@ -38,11 +38,13 @@ struct SCFState {
     int Nband_loc = 0;   // local bands on this process
     int Nspin_local = 0; // spins on this process
     int Nkpts = 0;       // local k-points
+    int Nelectron = 0;   // total electron count (for occupations)
 
     // Potential mixing state
     bool use_potential_mixing = false;
     NDArray<double> Veff_mixed;   // zero-mean Veff for mixer (persistent)
     std::vector<double> Veff_mean; // per-spin Veff mean
+    NDArray<double> Veff_out;     // Veff from rho_out (potential mixing), shared between energy & convergence
 };
 
 // Handles all SCF initialization: parameter auto-computation, array allocation,
