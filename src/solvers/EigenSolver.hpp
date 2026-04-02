@@ -121,6 +121,30 @@ private:
     int local_rows_Hs_ = 0, local_cols_Hs_ = 0;
 #endif
 
+    // --- Template-unified implementations ---
+    template<typename T>
+    void chebyshev_filter_impl(const T* X, T* Y, const double* Veff,
+                               int Nd_d, int Nband,
+                               double lambda_cutoff, double eigval_min, double eigval_max,
+                               int degree,
+                               const Vec3& kpt_cart = {0,0,0},
+                               const Vec3& cell_lengths = {0,0,0});
+
+    template<typename T>
+    void orthogonalize_impl(T* X, int Nd_d, int Nband, double dV);
+
+    template<typename T>
+    void project_hamiltonian_impl(const T* X, const double* Veff,
+                                  T* Hs, int Nd_d, int Nband, double dV,
+                                  const Vec3& kpt_cart = {0,0,0},
+                                  const Vec3& cell_lengths = {0,0,0});
+
+    template<typename T>
+    void diag_subspace_impl(T* Hs, double* eigvals, int N);
+
+    template<typename T>
+    void rotate_orbitals_impl(T* X, const T* Q, int Nd_d, int Nband);
+
     // --- Real private methods (serial LAPACK) ---
     void chebyshev_filter(const double* X, double* Y, const double* Veff,
                           int Nd_d, int Nband,

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
+#include <type_traits>
 #include <mpi.h>
 #include <omp.h>
 
@@ -52,6 +53,102 @@ extern "C" {
 }
 
 namespace lynx {
+
+// ===== BLAS/LAPACK type-dispatch helpers =====
+namespace blas {
+
+// gemm: C = alpha * op(A) * op(B) + beta * C
+inline void gemm(const char* ta, const char* tb, const int* m, const int* n, const int* k,
+                 const double* alpha, const double* A, const int* lda,
+                 const double* B, const int* ldb,
+                 const double* beta, double* C, const int* ldc) {
+    dgemm_(ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+inline void gemm(const char* ta, const char* tb, const int* m, const int* n, const int* k,
+                 const Complex* alpha, const Complex* A, const int* lda,
+                 const Complex* B, const int* ldb,
+                 const Complex* beta, Complex* C, const int* ldc) {
+    zgemm_(ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+// potrf: Cholesky factorization
+inline void potrf(const char* uplo, const int* n, double* A, const int* lda, int* info) {
+    dpotrf_(uplo, n, A, lda, info);
+}
+inline void potrf(const char* uplo, const int* n, Complex* A, const int* lda, int* info) {
+    zpotrf_(uplo, n, A, lda, info);
+}
+
+// trsm: triangular solve
+inline void trsm(const char* side, const char* uplo, const char* ta, const char* diag,
+                 const int* m, const int* n, const double* alpha,
+                 const double* A, const int* lda, double* B, const int* ldb) {
+    dtrsm_(side, uplo, ta, diag, m, n, alpha, A, lda, B, ldb);
+}
+inline void trsm(const char* side, const char* uplo, const char* ta, const char* diag,
+                 const int* m, const int* n, const Complex* alpha,
+                 const Complex* A, const int* lda, Complex* B, const int* ldb) {
+    ztrsm_(side, uplo, ta, diag, m, n, alpha, A, lda, B, ldb);
+}
+
+// Eigen-decomposition
+inline void syev(const char* jobz, const char* uplo, const int* n,
+                 double* A, const int* lda, double* w, int* info) {
+    int lwork = -1;
+    double work_query;
+    dsyev_(jobz, uplo, n, A, lda, w, &work_query, &lwork, info);
+    lwork = static_cast<int>(work_query);
+    std::vector<double> work(lwork);
+    dsyev_(jobz, uplo, n, A, lda, w, work.data(), &lwork, info);
+}
+inline void syev(const char* jobz, const char* uplo, const int* n,
+                 Complex* A, const int* lda, double* w, int* info) {
+    int lwork = -1;
+    Complex work_query;
+    std::vector<double> rwork(std::max(1, 3 * (*n) - 2));
+    zheev_(jobz, uplo, n, A, lda, w, &work_query, &lwork, rwork.data(), info);
+    lwork = static_cast<int>(work_query.real());
+    std::vector<Complex> work(lwork);
+    zheev_(jobz, uplo, n, A, lda, w, work.data(), &lwork, rwork.data(), info);
+}
+
+// Transpose character for gemm: 'T' for real, 'C' for complex
+template<typename T> constexpr char trans_char() { return 'T'; }
+template<> constexpr char trans_char<Complex>() { return 'C'; }
+
+// Scalar constants
+template<typename T> inline T one() { return T(1.0); }
+template<> inline Complex one<Complex>() { return Complex(1.0, 0.0); }
+template<typename T> inline T zero() { return T(0.0); }
+template<> inline Complex zero<Complex>() { return Complex(0.0, 0.0); }
+template<typename T> inline T make_scalar(double v) { return T(v); }
+template<> inline Complex make_scalar<Complex>(double v) { return Complex(v, 0.0); }
+
+// Symmetrize: real -> average off-diag, complex -> hermitianize
+inline void symmetrize(double* Hs, int N) {
+    for (int i = 0; i < N; ++i)
+        for (int j = i + 1; j < N; ++j) {
+            double avg = 0.5 * (Hs[i + j * N] + Hs[j + i * N]);
+            Hs[i + j * N] = avg;
+            Hs[j + i * N] = avg;
+        }
+}
+inline void symmetrize(Complex* Hs, int N) {
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            Complex avg = 0.5 * (Hs[i + j * N] + std::conj(Hs[j + i * N]));
+            Hs[i + j * N] = avg;
+            Hs[j + i * N] = std::conj(avg);
+        }
+        Hs[i + i * N] = Complex(Hs[i + i * N].real(), 0.0);
+    }
+}
+
+// MPI type dispatch
+inline MPI_Datatype mpi_type(const double*) { return MPI_DOUBLE; }
+inline MPI_Datatype mpi_type(const Complex*) { return MPI_C_DOUBLE_COMPLEX; }
+
+} // namespace blas
 
 EigenSolver::~EigenSolver() {
 #ifdef USE_SCALAPACK
@@ -400,27 +497,29 @@ void EigenSolver::rotate_orbitals_kpt_scalapack(Complex* X, int Nd_d, int Nband_
 }
 #endif // USE_SCALAPACK
 
-void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Veff,
-                                    int Nd_d, int Nband,
-                                    double lambda_cutoff, double eigval_min, double eigval_max,
-                                    int degree) {
+// ===== Template-unified implementations =====
+
+template<typename T>
+void EigenSolver::chebyshev_filter_impl(const T* X, T* Y, const double* Veff,
+                                         int Nd_d, int Nband,
+                                         double lambda_cutoff, double eigval_min, double eigval_max,
+                                         int degree,
+                                         const Vec3& kpt_cart, const Vec3& cell_lengths) {
     double e = (eigval_max - lambda_cutoff) / 2.0;
     double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma_1 = e / (eigval_min - c);  // reference: sigma1 = e / (a0 - c)
+    double sigma_1 = e / (eigval_min - c);
     double sigma = sigma_1;
-    double sigma_new;
 
-    int nd_ex = halo_->nd_ex();
-
-    // Work arrays
-    std::vector<double> Xold(Nd_d * Nband);
-    std::vector<double> Xnew(Nd_d * Nband);
-    std::vector<double> HX(Nd_d * Nband);
-    std::vector<double> x_ex(nd_ex * Nband);
+    std::vector<T> Xold(Nd_d * Nband);
+    std::vector<T> Xnew(Nd_d * Nband);
+    std::vector<T> HX(Nd_d * Nband);
 
     // Y = (H*X - c*X) * (sigma/e)
-    halo_->execute(X, x_ex.data(), Nband);
-    H_->apply(X, Veff, HX.data(), Nband);
+    if constexpr (std::is_same_v<T, Complex>) {
+        H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+    } else {
+        H_->apply(X, Veff, HX.data(), Nband);
+    }
 
     int total = Nd_d * Nband;
     double scale = sigma / e;
@@ -429,21 +528,21 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
         Y[idx] = scale * (HX[idx] - c * X[idx]);
     }
 
-    // Save X as Xold
-    std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(double));
+    std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(T));
 
-    // Use pointer swap instead of memcpy in iteration loop
-    double* pY = Y;
-    double* pXold = Xold.data();
-    double* pXnew = Xnew.data();
+    T* pY = Y;
+    T* pXold = Xold.data();
+    T* pXnew = Xnew.data();
 
     for (int k = 2; k <= degree; ++k) {
-        sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
+        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
         double gamma = 2.0 * sigma_new / e;
 
-        // Xnew = gamma * (H*Y - c*Y) - sigma*sigma_new * Xold
-        halo_->execute(pY, x_ex.data(), Nband);
-        H_->apply(pY, Veff, HX.data(), Nband);
+        if constexpr (std::is_same_v<T, Complex>) {
+            H_->apply_kpt(pY, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+        } else {
+            H_->apply(pY, Veff, HX.data(), Nband);
+        }
 
         double ss = sigma * sigma_new;
         #pragma omp parallel for schedule(static)
@@ -451,98 +550,119 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
             pXnew[idx] = gamma * (HX[idx] - c * pY[idx]) - ss * pXold[idx];
         }
 
-        // Pointer swap: Xold <- Y, Y <- Xnew
-        double* tmp = pXold;
+        T* tmp = pXold;
         pXold = pY;
         pY = pXnew;
         pXnew = tmp;
         sigma = sigma_new;
     }
 
-    // Copy result back to caller's Y buffer if needed
     if (pY != Y) {
-        std::memcpy(Y, pY, Nd_d * Nband * sizeof(double));
+        std::memcpy(Y, pY, Nd_d * Nband * sizeof(T));
     }
 }
 
-void EigenSolver::orthogonalize(double* X, int Nd_d, int Nband, double dV) {
-    // Cholesky QR: X^T * X = R^T * R, then X <- X * R^{-1}
-    // Compute overlap: S = X^T * X * dV
-    std::vector<double> S(Nband * Nband, 0.0);
+template<typename T>
+void EigenSolver::orthogonalize_impl(T* X, int Nd_d, int Nband, double dV) {
+    std::vector<T> S(Nband * Nband, blas::zero<T>());
 
-    // S = X^T * X (local contribution)
-    char transT = 'T', transN = 'N';
-    double alpha = dV, beta = 0.0;
-    dgemm_(&transT, &transN, &Nband, &Nband, &Nd_d,
-           &alpha, X, &Nd_d, X, &Nd_d, &beta, S.data(), &Nband);
+    char transH = blas::trans_char<T>(), transN = 'N';
+    T alpha = blas::make_scalar<T>(dV), beta = blas::zero<T>();
+    blas::gemm(&transH, &transN, &Nband, &Nband, &Nd_d,
+               &alpha, X, &Nd_d, X, &Nd_d, &beta, S.data(), &Nband);
 
-    // Cholesky: S = R^T * R (upper triangular)
     char uplo = 'U';
     int info;
-    dpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
+    blas::potrf(&uplo, &Nband, S.data(), &Nband, &info);
     if (info != 0) {
-        throw std::runtime_error("Cholesky factorization failed in orthogonalize");
+        throw std::runtime_error("Cholesky factorization failed in orthogonalize (info=" + std::to_string(info) + ")");
     }
 
-    // X <- X * R^{-1}  (solve X * R = X_new => X_new = X * inv(R))
     char side = 'R', diag = 'N';
-    double one = 1.0;
-    dtrsm_(&side, &uplo, &transN, &diag, &Nd_d, &Nband, &one,
-           S.data(), &Nband, X, &Nd_d);
+    T one = blas::one<T>();
+    blas::trsm(&side, &uplo, &transN, &diag, &Nd_d, &Nband, &one,
+               S.data(), &Nband, X, &Nd_d);
+}
+
+template<typename T>
+void EigenSolver::project_hamiltonian_impl(const T* X, const double* Veff,
+                                            T* Hs, int Nd_d, int Nband, double dV,
+                                            const Vec3& kpt_cart, const Vec3& cell_lengths) {
+    std::vector<T> HX(Nd_d * Nband);
+    if constexpr (std::is_same_v<T, Complex>) {
+        H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+    } else {
+        H_->apply(X, Veff, HX.data(), Nband);
+    }
+
+    char transH = blas::trans_char<T>(), transN = 'N';
+    T alpha = blas::make_scalar<T>(dV), beta = blas::zero<T>();
+    blas::gemm(&transH, &transN, &Nband, &Nband, &Nd_d,
+               &alpha, X, &Nd_d, HX.data(), &Nd_d, &beta, Hs, &Nband);
+
+    blas::symmetrize(Hs, Nband);
+}
+
+template<typename T>
+void EigenSolver::diag_subspace_impl(T* Hs, double* eigvals, int N) {
+    char jobz = 'V', uplo = 'U';
+    int info;
+    blas::syev(&jobz, &uplo, &N, Hs, &N, eigvals, &info);
+    if (info != 0) {
+        std::fprintf(stderr, "Eigen-decomposition failed with info=%d, N=%d\n", info, N);
+        throw std::runtime_error("Eigen-decomposition failed in diag_subspace");
+    }
+}
+
+template<typename T>
+void EigenSolver::rotate_orbitals_impl(T* X, const T* Q, int Nd_d, int Nband) {
+    std::vector<T> X_new(Nd_d * Nband);
+    char transN = 'N';
+    T one = blas::one<T>(), zero = blas::zero<T>();
+    blas::gemm(&transN, &transN, &Nd_d, &Nband, &Nband,
+               &one, X, &Nd_d, Q, &Nband, &zero, X_new.data(), &Nd_d);
+    std::memcpy(X, X_new.data(), Nd_d * Nband * sizeof(T));
+}
+
+// Explicit instantiations
+template void EigenSolver::chebyshev_filter_impl<double>(const double*, double*, const double*,
+    int, int, double, double, double, int, const Vec3&, const Vec3&);
+template void EigenSolver::chebyshev_filter_impl<Complex>(const Complex*, Complex*, const double*,
+    int, int, double, double, double, int, const Vec3&, const Vec3&);
+template void EigenSolver::orthogonalize_impl<double>(double*, int, int, double);
+template void EigenSolver::orthogonalize_impl<Complex>(Complex*, int, int, double);
+template void EigenSolver::project_hamiltonian_impl<double>(const double*, const double*, double*, int, int, double, const Vec3&, const Vec3&);
+template void EigenSolver::project_hamiltonian_impl<Complex>(const Complex*, const double*, Complex*, int, int, double, const Vec3&, const Vec3&);
+template void EigenSolver::diag_subspace_impl<double>(double*, double*, int);
+template void EigenSolver::diag_subspace_impl<Complex>(Complex*, double*, int);
+template void EigenSolver::rotate_orbitals_impl<double>(double*, const double*, int, int);
+template void EigenSolver::rotate_orbitals_impl<Complex>(Complex*, const Complex*, int, int);
+
+// ===== Original methods now delegate to template implementations =====
+
+void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Veff,
+                                    int Nd_d, int Nband,
+                                    double lambda_cutoff, double eigval_min, double eigval_max,
+                                    int degree) {
+    chebyshev_filter_impl<double>(X, Y, Veff, Nd_d, Nband,
+                                  lambda_cutoff, eigval_min, eigval_max, degree);
+}
+
+void EigenSolver::orthogonalize(double* X, int Nd_d, int Nband, double dV) {
+    orthogonalize_impl<double>(X, Nd_d, Nband, dV);
 }
 
 void EigenSolver::project_hamiltonian(const double* X, const double* Veff,
                                        double* Hs, int Nd_d, int Nband, double dV) {
-    // HX = H * X
-    std::vector<double> HX(Nd_d * Nband);
-    int nd_ex = halo_->nd_ex();
-    std::vector<double> x_ex(nd_ex * Nband);
-    halo_->execute(X, x_ex.data(), Nband);
-    H_->apply(X, Veff, HX.data(), Nband);
-
-    // Hs = X^T * HX * dV
-    char transT = 'T', transN = 'N';
-    double alpha = dV, beta_v = 0.0;
-    dgemm_(&transT, &transN, &Nband, &Nband, &Nd_d,
-           &alpha, X, &Nd_d, HX.data(), &Nd_d, &beta_v, Hs, &Nband);
-
-    // Symmetrize
-    for (int i = 0; i < Nband; ++i) {
-        for (int j = i + 1; j < Nband; ++j) {
-            double avg = 0.5 * (Hs[i + j * Nband] + Hs[j + i * Nband]);
-            Hs[i + j * Nband] = avg;
-            Hs[j + i * Nband] = avg;
-        }
-    }
+    project_hamiltonian_impl<double>(X, Veff, Hs, Nd_d, Nband, dV);
 }
 
 void EigenSolver::diag_subspace(double* Hs, double* eigvals, int N) {
-    // dsyev: diagonalize symmetric matrix
-    char jobz = 'V', uplo = 'U';
-    int lwork = -1, info;
-    double work_query;
-    dsyev_(&jobz, &uplo, &N, Hs, &N, eigvals, &work_query, &lwork, &info);
-
-    lwork = static_cast<int>(work_query);
-    std::vector<double> work(lwork);
-    dsyev_(&jobz, &uplo, &N, Hs, &N, eigvals, work.data(), &lwork, &info);
-
-    if (info != 0) {
-        // Diagnostic: check for NaN/Inf in input
-        std::fprintf(stderr, "dsyev failed with info=%d, N=%d\n", info, N);
-        throw std::runtime_error("dsyev failed in diag_subspace");
-    }
+    diag_subspace_impl<double>(Hs, eigvals, N);
 }
 
 void EigenSolver::rotate_orbitals(double* X, const double* Q, int Nd_d, int Nband) {
-    // X_new = X * Q
-    std::vector<double> X_new(Nd_d * Nband);
-    char transN = 'N';
-    double one = 1.0, zero = 0.0;
-    dgemm_(&transN, &transN, &Nd_d, &Nband, &Nband,
-           &one, X, &Nd_d, Q, &Nband, &zero, X_new.data(), &Nd_d);
-
-    std::memcpy(X, X_new.data(), Nd_d * Nband * sizeof(double));
+    rotate_orbitals_impl<double>(X, Q, Nd_d, Nband);
 }
 
 void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
@@ -737,133 +857,27 @@ void EigenSolver::chebyshev_filter_kpt(const Complex* X, Complex* Y, const doubl
                                         double lambda_cutoff, double eigval_min, double eigval_max,
                                         const Vec3& kpt_cart, const Vec3& cell_lengths,
                                         int degree) {
-    double e = (eigval_max - lambda_cutoff) / 2.0;
-    double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma_1 = e / (eigval_min - c);
-    double sigma = sigma_1;
-    double sigma_new;
-
-    std::vector<Complex> Xold(Nd_d * Nband);
-    std::vector<Complex> Xnew(Nd_d * Nband);
-    std::vector<Complex> HX(Nd_d * Nband);
-
-    // Y = (H*X - c*X) * (sigma/e)
-    H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
-
-    int total = Nd_d * Nband;
-    double scale = sigma / e;
-    #pragma omp parallel for schedule(static)
-    for (int idx = 0; idx < total; ++idx) {
-        Y[idx] = scale * (HX[idx] - c * X[idx]);
-    }
-
-    std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(Complex));
-
-    // Use pointer swap instead of memcpy in iteration loop
-    Complex* pY = Y;
-    Complex* pXold = Xold.data();
-    Complex* pXnew = Xnew.data();
-
-    for (int k = 2; k <= degree; ++k) {
-        sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
-        double gamma = 2.0 * sigma_new / e;
-
-        H_->apply_kpt(pY, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
-
-        double ss = sigma * sigma_new;
-        #pragma omp parallel for schedule(static)
-        for (int idx = 0; idx < total; ++idx) {
-            pXnew[idx] = gamma * (HX[idx] - c * pY[idx]) - ss * pXold[idx];
-        }
-
-        // Pointer swap
-        Complex* tmp = pXold;
-        pXold = pY;
-        pY = pXnew;
-        pXnew = tmp;
-        sigma = sigma_new;
-    }
-
-    // Copy result back to caller's Y buffer if needed
-    if (pY != Y) {
-        std::memcpy(Y, pY, Nd_d * Nband * sizeof(Complex));
-    }
+    chebyshev_filter_impl<Complex>(X, Y, Veff, Nd_d, Nband,
+                                   lambda_cutoff, eigval_min, eigval_max, degree,
+                                   kpt_cart, cell_lengths);
 }
 
 void EigenSolver::orthogonalize_kpt(Complex* X, int Nd_d, int Nband, double dV) {
-    // Cholesky QR: S = X^H * X * dV, S = R^H * R, X <- X * R^{-1}
-    std::vector<Complex> S(Nband * Nband, Complex(0.0));
-
-    // S = X^H * X * dV
-    char transC = 'C', transN = 'N';
-    Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
-    zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
-           &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
-
-    // Cholesky
-    char uplo = 'U';
-    int info;
-    zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
-    if (info != 0) {
-        throw std::runtime_error("zpotrf failed in orthogonalize_kpt (info=" + std::to_string(info) + ", Nd_d=" + std::to_string(Nd_d) + ", Nband=" + std::to_string(Nband) + ")");
-    }
-
-    // X <- X * R^{-1}
-    char side = 'R', diag = 'N';
-    Complex one_z(1.0, 0.0);
-    ztrsm_(&side, &uplo, &transN, &diag, &Nd_d, &Nband, &one_z,
-           S.data(), &Nband, X, &Nd_d);
+    orthogonalize_impl<Complex>(X, Nd_d, Nband, dV);
 }
 
 void EigenSolver::project_hamiltonian_kpt(const Complex* X, const double* Veff,
                                            Complex* Hs, int Nd_d, int Nband, double dV,
                                            const Vec3& kpt_cart, const Vec3& cell_lengths) {
-    std::vector<Complex> HX(Nd_d * Nband);
-    H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
-
-    // Hs = X^H * HX * dV
-    char transC = 'C', transN = 'N';
-    Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
-    zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
-           &alpha_z, X, &Nd_d, HX.data(), &Nd_d, &beta_z, Hs, &Nband);
-
-    // Hermitianize
-    for (int i = 0; i < Nband; ++i) {
-        for (int j = i + 1; j < Nband; ++j) {
-            Complex avg = 0.5 * (Hs[i + j * Nband] + std::conj(Hs[j + i * Nband]));
-            Hs[i + j * Nband] = avg;
-            Hs[j + i * Nband] = std::conj(avg);
-        }
-        // Diagonal must be real
-        Hs[i + i * Nband] = Complex(Hs[i + i * Nband].real(), 0.0);
-    }
+    project_hamiltonian_impl<Complex>(X, Veff, Hs, Nd_d, Nband, dV, kpt_cart, cell_lengths);
 }
 
 void EigenSolver::diag_subspace_kpt(Complex* Hs, double* eigvals, int N) {
-    char jobz = 'V', uplo = 'U';
-    int lwork = -1, info;
-    Complex work_query;
-    std::vector<double> rwork(std::max(1, 3 * N - 2));
-
-    zheev_(&jobz, &uplo, &N, Hs, &N, eigvals, &work_query, &lwork, rwork.data(), &info);
-
-    lwork = static_cast<int>(work_query.real());
-    std::vector<Complex> work(lwork);
-    zheev_(&jobz, &uplo, &N, Hs, &N, eigvals, work.data(), &lwork, rwork.data(), &info);
-
-    if (info != 0) {
-        std::fprintf(stderr, "zheev failed with info=%d, N=%d\n", info, N);
-        throw std::runtime_error("zheev failed in diag_subspace_kpt");
-    }
+    diag_subspace_impl<Complex>(Hs, eigvals, N);
 }
 
 void EigenSolver::rotate_orbitals_kpt(Complex* X, const Complex* Q, int Nd_d, int Nband) {
-    std::vector<Complex> X_new(Nd_d * Nband);
-    char transN = 'N';
-    Complex one_z(1.0, 0.0), zero_z(0.0, 0.0);
-    zgemm_(&transN, &transN, &Nd_d, &Nband, &Nband,
-           &one_z, X, &Nd_d, Q, &Nband, &zero_z, X_new.data(), &Nd_d);
-    std::memcpy(X, X_new.data(), Nd_d * Nband * sizeof(Complex));
+    rotate_orbitals_impl<Complex>(X, Q, Nd_d, Nband);
 }
 
 void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
