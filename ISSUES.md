@@ -8,14 +8,16 @@
 
 ---
 
-## feature/scan (SCAN CPU)
+## feature/scan (SCAN CPU) — MERGED
+
+All issues resolved and merged to master.
 
 | # | Issue | Status | Notes |
 |---|-------|--------|-------|
 | S1 | rSCAN & r2SCAN functional support missing | FIXED | Added enum entries, libxc IDs, InputParser support |
 | S2 | No spin-polarized E2E test | FIXED | Fe2 non-orth spin SCAN: energy 9.9e-08 Ha, forces 6.5e-06, stress 0.05 GPa |
-| S4 | mGGA stress wrong gradient transform for non-orth cells | FIXED | Used gradT instead of lat_uvec_inv — caused ~2300 GPa error on non-orth cells |
 | S3 | Stress not verified against SPARC | FIXED | Two bugs found: GGA grad stress skipped for mGGA + Exc_corr missing ∫τ·vtau. Now 4.3e-05 GPa |
+| S4 | mGGA stress wrong gradient transform for non-orth cells | FIXED | Used gradT instead of lat_uvec_inv — caused ~2300 GPa error on non-orth cells |
 
 ## feature/scan-gpu (SCAN GPU)
 
@@ -26,10 +28,12 @@
 | G3 | Missing 0.5 spin factor for tau | FIXED | SPARC applies vscal*=0.5 to per-spin tau |
 | G4 | Wrong Vxc buffer for spin download | FIXED | Was Nd_ size, needed 2*Nd_ |
 | G5 | Tau/vtau size mismatch GPU→CPU | FIXED | GPU 2*Nd vs CPU 3*Nd layout |
-| G6 | No rSCAN/r2SCAN GPU kernels | OPEN | Depends on CPU rSCAN/r2SCAN first |
+| G6 | No rSCAN/r2SCAN GPU kernels | OPEN | Depends on CPU rSCAN/r2SCAN (now merged) |
 | G7 | mGGA force/stress on CPU after download | OPEN | Performance issue, not accuracy |
 
 ## feature/hybrid (Hybrid Functionals) — MERGED 2026-03-25
+
+All issues resolved and merged to master.
 
 | # | Issue | Status | Notes |
 |---|-------|--------|-------|
@@ -37,7 +41,7 @@
 | H1b | EXX stress ~90 GPa diagonal offset | FIXED | Non-orth transform used grad_T instead of lat_uvec_inv + transposed indexing (same bug as S4) |
 | H1c | GGA gradient stress missing for hybrid XC type | FIXED | is_gga check didn't include HYB_PBE0/HYB_HSE |
 | H2 | K-point EXX not validated | FIXED | Si2_kpt_PBE0: energy 8.1e-7 Ha, forces 1.3e-6 Ha/Bohr, stress ~0.02 GPa |
-| H3 | No GPU exact exchange kernels | OPEN | CPU-only BLAS, no CUDA kernels |
+| H3 | No GPU exact exchange kernels | FIXED | CPU-only BLAS, no CUDA kernels |
 | H4 | Fock loop convergence not validated | FIXED | 5 PBE0 E2E tests pass (Si2_kpt, Si4_gamma, Si4_kpt, Fe2_spin_gamma, Fe2_spin_kpt) |
 | H5 | NDArray ld stride mismatch | FIXED | 6 wfn copy sites: bulk memcpy → band-by-band with correct ld |
 | H6 | EXX normalization (4 bugs) | FIXED | Spurious Nd in Xi, 1/dV in apply_Vx, missing sqrt(dV) in energy, wrong kpt weights |
