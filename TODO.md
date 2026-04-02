@@ -68,20 +68,20 @@
 - [x] **Non-orthogonal forces/stress coordinate transform** — `nonCart2Cart_grad` + `nonCart2Cart_coord` in Stress.cpp; MgO GGA_PBE matches ref to 0.01 GPa
 
 ### Output & Usability
-- [ ] Eigenvalue printing (per k-point, per spin)
+- [x] Eigenvalue printing (per k-point, per spin)
 - [ ] Electron density output (.cube format)
 - [ ] Band structure calculation & output
 - [ ] Restart / checkpoint (write density to file, read on restart)
 
 ### Additional XC Functionals
-- [ ] Meta-GGA: SCAN, rSCAN, r2SCAN (mGGA Hamiltonian term + stress)
-- [ ] Hybrid: HSE06, PBE0 (exact exchange via ACE or conventional)
+- [x] Meta-GGA: SCAN, rSCAN, r2SCAN (mGGA Hamiltonian term + stress)
+- [x] Hybrid: HSE06, PBE0 (exact exchange via ACE)
 - [ ] vdW-DF (van der Waals density functional)
 - [ ] DFT-D3 dispersion correction
 
 ### Advanced Electronic Structure
-- [ ] Spin-orbit coupling (SOC)
-- [ ] Non-collinear magnetism
+- [x] Spin-orbit coupling (SOC)
+- [x] Non-collinear magnetism
 - [ ] Charged systems (net charge handling)
 
 ### GPU Integration
