@@ -6,6 +6,7 @@ add_library(lynx_core
     core/KPoints.cpp
     core/NumericalMethods.cpp
     core/ParameterDefaults.cpp
+    core/LynxContext.cpp
     parallel/MPIComm.cpp
     parallel/Parallelization.cpp
     parallel/HaloExchange.cpp

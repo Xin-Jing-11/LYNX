@@ -1,0 +1,124 @@
+#pragma once
+
+#include "core/Lattice.hpp"
+#include "core/FDGrid.hpp"
+#include "core/Domain.hpp"
+#include "core/KPoints.hpp"
+#include "operators/FDStencil.hpp"
+#include "operators/Laplacian.hpp"
+#include "operators/Gradient.hpp"
+#include "parallel/Parallelization.hpp"
+#include "parallel/HaloExchange.hpp"
+#include "parallel/MPIComm.hpp"
+#include "io/InputParser.hpp"
+
+#include <memory>
+#include <mpi.h>
+
+namespace lynx {
+
+/// Singleton holding all infrastructure objects initialized once at startup.
+/// Provides read-only access to grid, domain, stencil, operators, and
+/// parallelization state.  Eliminates the need to pass 10+ parameters
+/// through every function signature.
+class LynxContext {
+public:
+    /// Singleton access.
+    static LynxContext& instance();
+
+    /// Build all infrastructure from a (fully-parsed) SystemConfig.
+    /// Must be called exactly once before any accessor is used.
+    /// Modifies `config` in place (resolves auto-defaults and parallel params).
+    void initialize(SystemConfig& config, MPI_Comm world_comm);
+
+    /// True after initialize() has been called.
+    bool is_initialized() const { return initialized_; }
+
+    // ── Grid & spatial ─────────────────────────────────────────────
+    const Lattice&      lattice()  const { return *lattice_; }
+    const FDGrid&       grid()     const { return *grid_; }
+    const FDStencil&    stencil()  const { return *stencil_; }
+    const Domain&       domain()   const { return parallel_->domain(); }
+    const HaloExchange& halo()     const { return *halo_; }
+
+    // ── Pre-built operators ────────────────────────────────────────
+    const Laplacian& laplacian() const { return *laplacian_; }
+    const Gradient&  gradient()  const { return *gradient_; }
+
+    // ── Parallelization ────────────────────────────────────────────
+    const Parallelization& parallel() const { return *parallel_; }
+    const MPIComm& bandcomm()    const { return parallel_->bandcomm(); }
+    const MPIComm& kptcomm()     const { return parallel_->kptcomm(); }
+    const MPIComm& kpt_bridge()  const { return parallel_->kpt_bridge(); }
+    const MPIComm& spincomm()    const { return parallel_->spincomm(); }
+    const MPIComm& spin_bridge() const { return parallel_->spin_bridge(); }
+
+    /// The "effective bandcomm" used by SCF: when npband > 1 this is kptcomm,
+    /// otherwise the real bandcomm.
+    const MPIComm& scf_bandcomm() const { return *scf_bandcomm_; }
+
+    // ── Parallelization indices ────────────────────────────────────
+    int Nspin_local()  const { return parallel_->Nspin_local(); }
+    int Nkpts_local()  const { return parallel_->Nkpts_local(); }
+    int Nband_local()  const { return parallel_->Nband_local(); }
+    int spin_start()   const { return parallel_->spin_start(); }
+    int kpt_start()    const { return parallel_->kpt_start(); }
+    int band_start()   const { return parallel_->band_start(); }
+
+    // ── K-points ───────────────────────────────────────────────────
+    const KPoints& kpoints() const { return *kpoints_; }
+    bool is_kpt()     const { return is_kpt_; }
+    bool is_soc()     const { return is_soc_; }
+    int  Nspin()      const { return Nspin_; }
+    int  Nspinor()    const { return Nspinor_; }
+
+    // ── Physical params ────────────────────────────────────────────
+    int    Nelectron() const { return Nelectron_; }
+    int    Natom()     const { return Natom_; }
+    int    Nstates()   const { return Nstates_; }
+    double dV()        const { return grid_->dV(); }
+
+    // ── MPI rank info ──────────────────────────────────────────────
+    int rank()  const { return rank_; }
+    int nproc() const { return nproc_; }
+
+    // ── Setters for deferred initialization (atoms, electrons) ────
+    void set_atom_info(int Natom, int Nelectron);
+
+    // ── Reset (for testing — allows re-initialization) ─────────────
+    void reset();
+
+private:
+    LynxContext() = default;
+    ~LynxContext();  // releases MPI resources if still initialized
+    LynxContext(const LynxContext&) = delete;
+    LynxContext& operator=(const LynxContext&) = delete;
+
+    bool initialized_ = false;
+
+    // Owned objects
+    std::unique_ptr<Lattice>          lattice_;
+    std::unique_ptr<FDGrid>           grid_;
+    std::unique_ptr<FDStencil>        stencil_;
+    std::unique_ptr<KPoints>          kpoints_;
+    std::unique_ptr<Parallelization>  parallel_;
+    std::unique_ptr<HaloExchange>     halo_;
+    std::unique_ptr<Laplacian>        laplacian_;
+    std::unique_ptr<Gradient>         gradient_;
+
+    // Non-owning pointer to the effective bandcomm
+    const MPIComm* scf_bandcomm_ = nullptr;
+
+    // Cached scalars
+    int Nspin_    = 1;
+    int Nspinor_  = 1;
+    int Nelectron_= 0;
+    int Natom_    = 0;
+    int Nstates_  = 0;
+    bool is_kpt_  = false;
+    bool is_soc_  = false;
+    int rank_     = 0;
+    int nproc_    = 1;
+};
+
+}  // namespace lynx
