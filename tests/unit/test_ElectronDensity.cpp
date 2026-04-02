@@ -30,9 +30,9 @@ TEST(ElectronDensity, ComputeFromWavefunction) {
     Wavefunction wfn;
     wfn.allocate(Nd_d, Nband, 1, 1);
 
-    // Set orbitals to normalized constant: psi = 1/sqrt(Nd_d * dV)
+    // Set orbitals to normalized constant: psi^T * psi = I  =>  psi = 1/sqrt(Nd_d)
     double dV = 0.1;
-    double norm_val = 1.0 / std::sqrt(Nd_d * dV);
+    double norm_val = 1.0 / std::sqrt(static_cast<double>(Nd_d));
     for (int n = 0; n < Nband; ++n) {
         double* col = wfn.psi(0, 0).col(n);
         for (int i = 0; i < Nd_d; ++i) {
@@ -53,10 +53,11 @@ TEST(ElectronDensity, ComputeFromWavefunction) {
     MPIComm null_comm;
     density.compute(wfn, kpt_weights, dV, null_comm, null_comm);
 
-    // rho = sum_n spin_fac * w_k * f_n * |psi_n|^2
+    // rho = sum_n spin_fac * w_k * f_n * |psi_n|^2 / dV
+    // (psi satisfies psi^T*psi=I, density divides by dV to get physical units)
     // spin_fac = 2.0 (non-spin-polarized), w_k = 1.0, f_n = 1.0 for both bands
-    // = 2.0 * 1.0 * 1.0 * norm_val^2 * 2 bands = 4.0 * norm_val^2
-    double expected = 2.0 * 2.0 * norm_val * norm_val;  // spin_fac=2 * 2 bands
+    // = 2.0 * 1.0 * 1.0 * norm_val^2 / dV * 2 bands = 4.0 * norm_val^2 / dV
+    double expected = 2.0 * 2.0 * norm_val * norm_val / dV;  // spin_fac=2 * 2 bands / dV
     for (int i = 0; i < Nd_d; ++i) {
         EXPECT_NEAR(density.rho_total()(i), expected, 1e-10);
     }

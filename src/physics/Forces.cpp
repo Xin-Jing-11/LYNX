@@ -411,6 +411,7 @@ void Forces::compute_nonlocal(
     int Nband = wfn.Nband();  // local band count
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
+    double sqrtdV = std::sqrt(dV);  // psi satisfies psi^T*psi=I; inner products use sqrt(dV)
     int ntypes = crystal.n_types();
     int FDn = gradient.stencil().FDn();
     bool is_kpt = wfn.is_complex();
@@ -500,7 +501,7 @@ void Forces::compute_nonlocal(
                             const Vec3& shift = inf.image_shift[iat];
                             double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                             Complex bloch_fac(std::cos(theta), std::sin(theta));
-                            Complex alpha_scale = bloch_fac * dV;
+                            Complex alpha_scale = bloch_fac * sqrtdV;
 
                             for (int jp = 0; jp < nproj; ++jp) {
                                 Complex dot(0.0, 0.0);
@@ -536,7 +537,7 @@ void Forces::compute_nonlocal(
                                 const Vec3& shift = inf.image_shift[iat];
                                 double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                                 Complex bloch_fac(std::cos(theta), std::sin(theta));
-                                Complex beta_scale = bloch_fac * dV;
+                                Complex beta_scale = bloch_fac * sqrtdV;
 
                                 for (int jp = 0; jp < nproj; ++jp) {
                                     Complex dot(0.0, 0.0);
@@ -591,7 +592,7 @@ void Forces::compute_nonlocal(
                                 for (int ig = 0; ig < ndc; ++ig) {
                                     dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
                                 }
-                                alpha[offset + jp] += dot * dV;
+                                alpha[offset + jp] += dot * sqrtdV;
                             }
                         }
                     }
@@ -622,7 +623,7 @@ void Forces::compute_nonlocal(
                                     for (int ig = 0; ig < ndc; ++ig) {
                                         dot += chi_iat(ig, jp) * Dpsi[gpos[ig]];
                                     }
-                                    beta[offset + jp] += dot * dV;
+                                    beta[offset + jp] += dot * sqrtdV;
                                 }
                             }
                         }
@@ -699,6 +700,7 @@ void Forces::compute_nonlocal_soc(
     int Nband = wfn.Nband();
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
+    double sqrtdV = std::sqrt(dV);  // psi satisfies psi^T*psi=I; inner products use sqrt(dV)
     int ntypes = crystal.n_types();
     int FDn = gradient.stencil().FDn();
 
@@ -758,7 +760,7 @@ void Forces::compute_nonlocal_soc(
             const Complex* psi_up = psi_n;
             const Complex* psi_dn = psi_n + Nd_d;
 
-            // Compute alpha_up/dn = bloch_fac * dV * Chi_soc^T * psi_up/dn
+            // Compute alpha_up/dn = bloch_fac * sqrt(dV) * Chi_soc^H * psi_up/dn
             std::vector<Complex> alpha_up(total_soc_nproj, Complex(0.0));
             std::vector<Complex> alpha_dn(total_soc_nproj, Complex(0.0));
 
@@ -782,7 +784,7 @@ void Forces::compute_nonlocal_soc(
                     const Vec3& shift = inf.image_shift[iat];
                     double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                     Complex bloch_fac(std::cos(theta), std::sin(theta));
-                    Complex alpha_scale = bloch_fac * dV;
+                    Complex alpha_scale = bloch_fac * sqrtdV;
 
                     for (int jp = 0; jp < nproj_soc; ++jp) {
                         Complex dot_up(0.0), dot_dn(0.0);
@@ -811,7 +813,7 @@ void Forces::compute_nonlocal_soc(
                 std::vector<Complex> Dpsi_dn(Nd_d, Complex(0.0));
                 gradient.apply(psi_dn_ex.data(), Dpsi_dn.data(), dim);
 
-                // Compute beta_up/dn = bloch_fac * dV * Chi_soc^T * Dpsi_up/dn
+                // Compute beta_up/dn = bloch_fac * sqrt(dV) * Chi_soc^H * Dpsi_up/dn
                 std::vector<Complex> beta_up(total_soc_nproj, Complex(0.0));
                 std::vector<Complex> beta_dn(total_soc_nproj, Complex(0.0));
 
@@ -835,7 +837,7 @@ void Forces::compute_nonlocal_soc(
                         const Vec3& shift = inf.image_shift[iat];
                         double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                         Complex bloch_fac(std::cos(theta), std::sin(theta));
-                        Complex beta_scale = bloch_fac * dV;
+                        Complex beta_scale = bloch_fac * sqrtdV;
 
                         for (int jp = 0; jp < nproj_soc; ++jp) {
                             Complex dot_up(0.0), dot_dn(0.0);

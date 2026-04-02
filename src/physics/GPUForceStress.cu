@@ -449,20 +449,21 @@ void compute_force_stress_gpu(
 
         int bs = 256;
         size_t smem = bs * sizeof(double);
-        double neg_occfac_dV = -occfac * dV;
+        double neg_occfac = -occfac;  // no dV: psi satisfies psi^T*psi=I
 
         for (int v = 0; v < 6; ++v) {
             kinetic_stress_kernel<<<Nband, bs, smem>>>(
                 d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
-                d_occ, d_sk + v, Nd, Nband, neg_occfac_dV);
+                d_occ, d_sk + v, Nd, Nband, neg_occfac);
             CUDA_CHECK(cudaGetLastError());
         }
     }
 
     // ----------------------------------------------------------------
-    // Step 4: Compute alpha = dV * Chi^T * psi (all bands)
-    // Tiled kernel: fixed shared memory ≈ 2 KB, independent of system size
+    // Step 4: Compute alpha = sqrt(dV) * Chi^T * psi (all bands)
+    // psi satisfies psi^T*psi=I; inner products use sqrt(dV)
     // ----------------------------------------------------------------
+    double sqrtdV = std::sqrt(dV);
     if (total_nproj > 0 && n_influence > 0) {
         CUDA_CHECK(cudaMemset(d_alpha, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
@@ -473,13 +474,13 @@ void compute_force_stress_gpu(
         fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled>>>(
             d_psi, d_Chi_flat, d_gpos_flat,
             d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-            d_alpha, Nd, Nband, Nband, 0, dV, n_influence);
+            d_alpha, Nd, Nband, Nband, 0, sqrtdV, n_influence);
         CUDA_CHECK(cudaGetLastError());
 
         // ----------------------------------------------------------------
         // Step 5: Nonlocal energy (uses alpha before Gamma scaling)
         // energy_nl = wk * sum_n(g_n * sum(Gamma * alpha^2))
-        // Note: alpha here has NOT been Gamma-scaled yet (raw dV*Chi^T*psi)
+        // Note: alpha here has NOT been Gamma-scaled yet (sqrt(dV)*Chi^T*psi)
         // ----------------------------------------------------------------
         nonlocal_energy_kernel<<<1, 1>>>(
             d_alpha, d_occ, d_Gamma, d_IP_displ_phys,
@@ -488,7 +489,7 @@ void compute_force_stress_gpu(
 
         // ----------------------------------------------------------------
         // Step 6: Nonlocal force (3 dims)
-        // For each dim: beta = dV * Chi^T * Dpsi_dim, then reduce
+        // For each dim: beta = sqrt(dV) * Chi^T * Dpsi_dim, then reduce
         // ----------------------------------------------------------------
         {
             const double* d_Dpsi_arr[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
@@ -500,7 +501,7 @@ void compute_force_stress_gpu(
                 fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled>>>(
                     d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
                     d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
-                    d_beta, Nd, Nband, Nband, 0, dV, n_influence);
+                    d_beta, Nd, Nband, Nband, 0, sqrtdV, n_influence);
                 CUDA_CHECK(cudaGetLastError());
 
                 nonlocal_force_reduce_kernel<<<ceildiv(n_phys_atoms, bs_force), bs_force>>>(
@@ -531,7 +532,7 @@ void compute_force_stress_gpu(
                     d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
                     d_atom_pos, d_beta,
                     Nd, Nband, Nband, 0,
-                    dV, n_influence,
+                    sqrtdV, n_influence,
                     nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2);
                 CUDA_CHECK(cudaGetLastError());
 
@@ -692,6 +693,8 @@ void compute_soc_force_gpu(
         return;
     }
 
+    double sqrtdV = std::sqrt(dV);  // psi satisfies psi^T*psi=I; inner products use sqrt(dV)
+
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
     int nz_ex = nz + 2 * FDn;
@@ -745,11 +748,7 @@ void compute_soc_force_gpu(
     }
 
     // ----------------------------------------------------------------
-    // Step 2: Compute alpha_up/dn = bloch * dV * Chi_soc^T * psi_up/dn
-    // We use the gather kernel with the full spinor input but passing
-    // extracted components as if they were spinor (need to fake spinor layout).
-    // Actually, the gather kernel expects spinor layout [up|dn] per band.
-    // So we just call it with d_psi_spinor directly.
+    // Step 2: Compute alpha_up/dn = bloch * sqrt(dV) * Chi_soc^H * psi_up/dn
     // ----------------------------------------------------------------
     CUDA_CHECK(cudaMemset(d_alpha_up, 0, alpha_bytes));
     CUDA_CHECK(cudaMemset(d_alpha_dn, 0, alpha_bytes));
@@ -766,7 +765,7 @@ void compute_soc_force_gpu(
             d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
             d_bloch_fac,
             d_alpha_up, d_alpha_dn,
-            Nd_d, Nband, Nband, 0, dV, n_influence_soc);
+            Nd_d, Nband, Nband, 0, sqrtdV, n_influence_soc);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -835,7 +834,7 @@ void compute_soc_force_gpu(
                 d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
                 d_bloch_fac,
                 d_beta_up, d_beta_dn,
-                Nd_d, Nband, Nband, 0, dV, n_influence_soc);
+                Nd_d, Nband, Nband, 0, sqrtdV, n_influence_soc);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -993,6 +992,7 @@ void compute_soc_stress_gpu(
     // ----------------------------------------------------------------
     // Allocate GPU scratch buffers
     // ----------------------------------------------------------------
+    double sqrtdV = std::sqrt(dV);  // psi satisfies psi^T*psi=I; inner products use sqrt(dV)
     size_t alpha_elems = (size_t)total_soc_nproj * Nband;
     size_t alpha_bytes = alpha_elems * sizeof(cuDoubleComplex);
 
@@ -1033,7 +1033,7 @@ void compute_soc_stress_gpu(
     }
 
     // ----------------------------------------------------------------
-    // Step 2: Compute alpha_up/dn = bloch * dV * Chi_soc^T * psi_up/dn
+    // Step 2: Compute alpha_up/dn = bloch * sqrt(dV) * Chi_soc^H * psi_up/dn
     // ----------------------------------------------------------------
     CUDA_CHECK(cudaMemset(d_alpha_up, 0, alpha_bytes));
     CUDA_CHECK(cudaMemset(d_alpha_dn, 0, alpha_bytes));
@@ -1050,7 +1050,7 @@ void compute_soc_stress_gpu(
             d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
             d_bloch_fac,
             d_alpha_up, d_alpha_dn,
-            Nd_d, Nband, Nband, 0, dV, n_influence_soc);
+            Nd_d, Nband, Nband, 0, sqrtdV, n_influence_soc);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1196,9 +1196,9 @@ void compute_soc_stress_gpu(
                 // Bloch factor for this influence atom
                 double bloch_cos = h_bloch_fac[iat * 2 + 0];
                 double bloch_sin = h_bloch_fac[iat * 2 + 1];
-                // beta_scale = bloch * dV
-                double bs_re = bloch_cos * dV;
-                double bs_im = bloch_sin * dV;
+                // beta_scale = bloch * sqrt(dV)
+                double bs_re = bloch_cos * sqrtdV;
+                double bs_im = bloch_sin * sqrtdV;
 
                 for (int jp = 0; jp < np; ++jp) {
                     for (int n = 0; n < Nband; ++n) {
@@ -1243,7 +1243,7 @@ void compute_soc_stress_gpu(
                             dot_dn_im += w_re * dp_dn.y + w_im * dp_dn.x;
                         }
 
-                        // Multiply by beta_scale = bloch * dV (complex)
+                        // Multiply by beta_scale = bloch * sqrt(dV) (complex)
                         int out_idx = (abase + jp) * Nband + n;
                         beta_soc_up[out_idx].x += bs_re * dot_up_re - bs_im * dot_up_im;
                         beta_soc_up[out_idx].y += bs_re * dot_up_im + bs_im * dot_up_re;
@@ -1528,7 +1528,7 @@ void compute_mgga_stress_gpu(
     {
         int bs = 256;
         size_t smem = bs * sizeof(double);
-        double neg_occfac_dV = -occfac * dV;
+        double neg_occfac = -occfac;  // no dV: psi satisfies psi^T*psi=I
 
         if (is_orth) {
             const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
@@ -1538,14 +1538,14 @@ void compute_mgga_stress_gpu(
             for (int v = 0; v < 6; ++v) {
                 mgga_psi_stress_kernel<<<Nband, bs, smem>>>(
                     d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
-                    d_vtau, d_occ, d_smgga + v, Nd, Nband, neg_occfac_dV);
+                    d_vtau, d_occ, d_smgga + v, Nd, Nband, neg_occfac);
                 CUDA_CHECK(cudaGetLastError());
             }
         } else {
             // Non-orthogonal: single kernel computes all 6 Voigt with uvec_inv transform
             mgga_psi_stress_kernel_nonorth<<<Nband, bs, smem>>>(
                 d_Dpsi_x, d_Dpsi_y, d_Dpsi_z,
-                d_vtau, d_occ, d_smgga, Nd, Nband, neg_occfac_dV,
+                d_vtau, d_occ, d_smgga, Nd, Nband, neg_occfac,
                 uvec_inv[0], uvec_inv[1], uvec_inv[2],
                 uvec_inv[3], uvec_inv[4], uvec_inv[5],
                 uvec_inv[6], uvec_inv[7], uvec_inv[8]);

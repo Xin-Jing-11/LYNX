@@ -213,11 +213,11 @@ void EigenSolver::orthogonalize_scalapack(double* X, int Nd_d, int Nband_loc, do
                         MPI_DOUBLE, bandcomm_->comm());
     }
 
-    // Compute full S = X_full^T * X_full * dV (N x N)
+    // Compute full S = X_full^T * X_full (N x N) — orbitals satisfy psi^T * psi = I
     std::vector<double> S_full(N * N, 0.0);
     {
         char transT = 'T', transN = 'N';
-        double alpha = dV, beta = 0.0;
+        double alpha = 1.0, beta = 0.0;
         dgemm_(&transT, &transN, &N, &N, &Nd_d,
                &alpha, X_full.data(), &Nd_d, X_full.data(), &Nd_d,
                &beta, S_full.data(), &N);
@@ -275,11 +275,11 @@ void EigenSolver::project_hamiltonian_scalapack(const double* X, const double* V
                         MPI_DOUBLE, bandcomm_->comm());
     }
 
-    // 3. Hs = X^T * HX * dV (all procs compute redundantly)
+    // 3. Hs = X^T * HX (all procs compute redundantly) — alpha=1.0
     std::vector<double> Hs(N * N, 0.0);
     {
         char transT = 'T', transN = 'N';
-        double alpha = dV, beta = 0.0;
+        double alpha = 1.0, beta = 0.0;
         dgemm_(&transT, &transN, &N, &N, &Nd_d,
                &alpha, X_full.data(), &Nd_d, HX_full.data(), &Nd_d,
                &beta, Hs.data(), &N);
@@ -364,11 +364,11 @@ void EigenSolver::orthogonalize_kpt_scalapack(Complex* X, int Nd_d, int Nband_lo
                         MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
     }
 
-    // S = X^H * X * dV
+    // S = X^H * X — orbitals satisfy psi^H * psi = I
     std::vector<Complex> S(N * N, Complex(0.0));
     {
         char transC = 'C', transN = 'N';
-        Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+        Complex alpha_z(1.0, 0.0), beta_z(0.0, 0.0);
         zgemm_(&transC, &transN, &N, &N, &Nd_d,
                &alpha_z, X_full.data(), &Nd_d, X_full.data(), &Nd_d,
                &beta_z, S.data(), &N);
@@ -424,11 +424,11 @@ void EigenSolver::project_hamiltonian_kpt_scalapack(const Complex* X, const doub
                         MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
     }
 
-    // Hs = X^H * HX * dV
+    // Hs = X^H * HX — alpha=1.0
     std::vector<Complex> Hs(N * N, Complex(0.0));
     {
         char transC = 'C', transN = 'N';
-        Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+        Complex alpha_z(1.0, 0.0), beta_z(0.0, 0.0);
         zgemm_(&transC, &transN, &N, &N, &Nd_d,
                &alpha_z, X_full.data(), &Nd_d, HX_full.data(), &Nd_d,
                &beta_z, Hs.data(), &N);
@@ -560,10 +560,11 @@ void EigenSolver::chebyshev_filter_impl(const T* X, T* Y, const double* Veff,
 
 template<typename T>
 void EigenSolver::orthogonalize_impl(T* X, int Nd_d, int Nband, double dV) {
+    (void)dV;  // dV no longer used: orbitals satisfy psi^T * psi = I
     std::vector<T> S(Nband * Nband, blas::zero<T>());
 
     char transH = blas::trans_char<T>(), transN = 'N';
-    T alpha = blas::make_scalar<T>(dV), beta = blas::zero<T>();
+    T alpha = blas::one<T>(), beta = blas::zero<T>();
     blas::gemm(&transH, &transN, &Nband, &Nband, &Nd_d,
                &alpha, X, &Nd_d, X, &Nd_d, &beta, S.data(), &Nband);
 
@@ -584,6 +585,7 @@ template<typename T>
 void EigenSolver::project_hamiltonian_impl(const T* X, const double* Veff,
                                             T* Hs, int Nd_d, int Nband, double dV,
                                             const Vec3& kpt_cart, const Vec3& cell_lengths) {
+    (void)dV;  // dV no longer used: orbitals satisfy psi^T * psi = I
     std::vector<T> HX(Nd_d * Nband);
     if constexpr (std::is_same_v<T, Complex>) {
         H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
@@ -592,7 +594,7 @@ void EigenSolver::project_hamiltonian_impl(const T* X, const double* Veff,
     }
 
     char transH = blas::trans_char<T>(), transN = 'N';
-    T alpha = blas::make_scalar<T>(dV), beta = blas::zero<T>();
+    T alpha = blas::one<T>(), beta = blas::zero<T>();
     blas::gemm(&transH, &transN, &Nband, &Nband, &Nd_d,
                &alpha, X, &Nd_d, HX.data(), &Nd_d, &beta, Hs, &Nband);
 
@@ -954,11 +956,11 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
                                MPI_C_DOUBLE_COMPLEX, bandcomm_->comm());
             }
 
-            // Hs = X^H * HX * dV
+            // Hs = X^H * HX — alpha=1.0
             std::vector<Complex> Hs(N * N, Complex(0.0));
             {
                 char transC = 'C', transN = 'N';
-                Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+                Complex alpha_z(1.0, 0.0), beta_z(0.0, 0.0);
                 zgemm_(&transC, &transN, &N, &N, &Nd_d_spinor,
                        &alpha_z, X_full.data(), &Nd_d_spinor, HX_full.data(), &Nd_d_spinor,
                        &beta_z, Hs.data(), &N);
@@ -1008,7 +1010,7 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
                                   kpt_cart, cell_lengths);
 
             char transC = 'C', transN = 'N';
-            Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
+            Complex alpha_z(1.0, 0.0), beta_z(0.0, 0.0);
             zgemm_(&transC, &transN, &Nband_loc, &Nband_loc, &Nd_d_spinor,
                    &alpha_z, Y.data(), &Nd_d_spinor, HX.data(), &Nd_d_spinor,
                    &beta_z, Hs.data(), &Nband_loc);

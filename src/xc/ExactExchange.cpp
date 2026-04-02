@@ -263,21 +263,12 @@ void ExactExchange::solve_for_Xi(const Wavefunction& wfn, int spin) {
     const int Ns = Nstates_;
     const int Nocc = Nstates_occ_;
 
-    // LYNX orbitals satisfy psi^T * psi * dV = I  ("lattice" normalization)
-    // SPARC orbitals satisfy psi^T * psi = I       ("bare-sum" normalization)
-    // SPARC's Poisson solver returns Nd * phi_physical (no 1/Nd normalization)
-    // LYNX's Poisson solver returns phi_physical (divides by Nd)
-    //
-    // To make Xi_LYNX = Xi_SPARC (numerically identical ACE operator),
-    // the coefficient must absorb both factors:
-    //   coeff = occ * Nd * sqrt(dV)   instead of SPARC's   occ / dV
-    //
-    // Derivation: Xi_S = occ/dV * psi_S * sol_S
-    //   psi_S = sqrt(dV)*psi_L,  sol_L = sol_S/dV  (both SPARC & LYNX normalize iFFT by 1/Nd)
-    //   => Xi_S = occ/dV * psi_S * sol_S, want Xi_L = Xi_S
+    // LYNX orbitals now satisfy psi^T * psi = I (same as SPARC convention).
+    // SPARC's Poisson solver returns Nd * phi_physical; LYNX returns phi_physical.
+    // Xi_S = occ/dV * psi_S * sol_S. With psi_L = psi_S and sol_L = sol_S/dV:
     //   coeff * psi_L * sol_L = occ/dV * psi_S * sol_S
-    //   coeff/(sqrt(dV)*dV) = occ/dV => coeff = occ*sqrt(dV)
-    double coeff_scale = std::sqrt(dV_);
+    //   coeff / dV = occ/dV => coeff = occ
+    double coeff_scale = 1.0;
 
     // Gather full psi (LYNX lattice orbitals)
     std::vector<double> psi_full(Nd * Ns);
@@ -298,7 +289,7 @@ void ExactExchange::solve_for_Xi(const Wavefunction& wfn, int spin) {
     std::vector<double> rhs(Nd);
     std::vector<double> sol(Nd);
 
-    // Xi -= occ * Nd * sqrt(dV) * psi * sol  (gives Xi_LYNX = Xi_SPARC)
+    // Xi -= occ * psi * sol  (both in standard normalization)
     for (int j = 0; j < Nocc; j++) {
         if (occ[j] < OCC_THRESHOLD) continue;
         const double* psi_j = psi_full.data() + j * Nd;
@@ -351,14 +342,11 @@ void ExactExchange::calculate_ACE_operator(const Wavefunction& wfn, int spin) {
 
     double* Xi = Xi_[spin].data();
 
-    // M = sqrt(dV) * Xi^T * psi
-    // Xi is in SPARC convention (Xi_LYNX = Xi_SPARC), psi is LYNX convention.
-    // To get M_SPARC = Xi_S^T * psi_S = Xi_S^T * sqrt(dV)*psi_L,
-    // we use alpha = sqrt(dV) in the dgemm.
+    // M = Xi^T * psi (both in standard normalization, alpha=1.0)
     std::vector<double> M(Nocc * Nocc, 0.0);
     {
         char transA = 'T', transB = 'N';
-        double alpha_blas = std::sqrt(dV_);
+        double alpha_blas = 1.0;
         double beta_blas = 0.0;
         dgemm_(&transA, &transB, &Nocc, &Nocc, &Nd,
                &alpha_blas, Xi, &Nd, psi_full.data(), &Nd,
@@ -405,7 +393,7 @@ void ExactExchange::solve_for_Xi_kpt(const Wavefunction& wfn, int spin) {
         int kpt_glob = kpt_start_ + kpt_loc;
 
         // Gather full psi_kpt (LYNX lattice orbitals)
-        double coeff_scale_k = std::sqrt(dV_);
+        double coeff_scale_k = 1.0;  // psi now in standard normalization
         std::vector<Complex> psi_k(Nd * Ns);
         {
             int ld = wfn.psi_kpt(spin, kpt_loc).ld();
@@ -510,11 +498,11 @@ void ExactExchange::calculate_ACE_operator_kpt(const Wavefunction& wfn, int spin
 
     Complex* Xi = Xi_kpt_[spin * wfn.Nkpts() + kpt].data();
 
-    // M = sqrt(dV) * Xi^H * psi (Xi is SPARC convention, psi is LYNX)
+    // M = Xi^H * psi (both in standard normalization, alpha=1.0)
     std::vector<Complex> M(Nocc * Nocc, Complex(0.0));
     {
         char transA = 'C', transB = 'N';
-        Complex alpha_blas(std::sqrt(dV_), 0.0);
+        Complex alpha_blas(1.0, 0.0);
         Complex beta_blas(0.0, 0.0);
         zgemm_(&transA, &transB, &Nocc, &Nocc, &Nd,
                &alpha_blas, Xi, &Nd, psi_full.data(), &Nd,
@@ -644,14 +632,12 @@ double ExactExchange::compute_energy(const Wavefunction& wfn) {
             const double* occ = wfn.occupations(s, 0).data();
             const double* Xi = Xi_[s].data();
 
-            // Y = sqrt(dV) * psi^T * Xi
-            // SPARC: Y_S = psi_S^T * Xi_S. With psi_S = sqrt(dV)*psi_L and Xi_L = Xi_S:
-            //   Y_S = sqrt(dV) * psi_L^T * Xi_L, so alpha = sqrt(dV).
+            // Y = psi^T * Xi (both in standard normalization, alpha=1.0)
             int Nocc = Nstates_occ_;
             std::vector<double> Y(Nstates_ * Nocc, 0.0);
             {
                 char transA = 'T', transB = 'N';
-                double alpha_blas = std::sqrt(dV_);
+                double alpha_blas = 1.0;
                 double beta_blas = 0.0;
                 dgemm_(&transA, &transB, &Nstates_, &Nocc, &Nd_d_,
                        &alpha_blas, psi_full.data(), &Nd_d_, Xi, &Nd_d_,
@@ -697,12 +683,12 @@ double ExactExchange::compute_energy(const Wavefunction& wfn) {
                 const double* occ = wfn.occupations(s, kpt_loc).data();
                 const Complex* Xi = Xi_kpt_[s * wfn.Nkpts() + kpt_loc].data();
 
-                // Y = sqrt(dV) * Xi^H * psi (Xi is SPARC convention, psi is LYNX)
+                // Y = Xi^H * psi (both in standard normalization, alpha=1.0)
                 int Nocc = Nstates_occ_;
                 std::vector<Complex> Y(Nocc * Nstates_, Complex(0.0));
                 {
                     char transA = 'C', transB = 'N';
-                    Complex alpha_blas(std::sqrt(dV_), 0.0);
+                    Complex alpha_blas(1.0, 0.0);
                     Complex beta_blas(0.0, 0.0);
                     zgemm_(&transA, &transB, &Nocc, &Nstates_, &Nd_d_,
                            &alpha_blas, Xi, &Nd_d_, psi_full.data(), &Nd_d_,
@@ -915,12 +901,11 @@ std::array<double, 6> ExactExchange::compute_stress(
             stress_exx[5] += stress_exx_sph;
         }
 
-        // Scale: multiply by (-exx_frac * dV / Nspin)
-        // LYNX psi are dV-normalized (sum |psi|^2 * dV = 1, so sum |psi|^2 = 1/dV)
-        // rhs = conj(psi_q)*psi_k is 1/dV times SPARC's, phi is 1/dV times SPARC's
-        // gradient sums are 1/dV^2 times SPARC's. SPARC uses -exx_frac/dV/Nspin,
-        // so we need (-exx_frac/dV/Nspin)*dV^2 = -exx_frac*dV/Nspin
-        double scale = -exx_frac_ * dV_ / Nspin_;
+        // Scale: multiply by (-exx_frac / dV / Nspin)
+        // LYNX psi now in standard normalization (psi^T*psi=I, same as SPARC).
+        // LYNX Poisson solver returns phi/Nd vs SPARC's phi. So gradient sums are
+        // 1/Nd times SPARC's. SPARC uses -exx_frac/dV/Nspin, same applies to LYNX.
+        double scale = -exx_frac_ / (dV_ * Nspin_);
         for (int i = 0; i < 6; i++)
             stress_exx[i] *= scale;
 
@@ -1197,10 +1182,8 @@ std::array<double, 6> ExactExchange::compute_stress(
         stress_exx[5] += stress_exx_sph;
     }
 
-    // Scale: multiply by (-exx_frac * dV / Nspin)
-    // LYNX psi are dV-normalized, so gradient sums are 1/dV^2 times SPARC's.
-    // SPARC uses -exx_frac/dV/Nspin; we need (-exx_frac/dV/Nspin)*dV^2 = -exx_frac*dV/Nspin
-    double scale = -exx_frac_ * dV_ / Nspin_;
+    // Scale: multiply by (-exx_frac / dV / Nspin) — same as SPARC since psi now in standard norm
+    double scale = -exx_frac_ / (dV_ * Nspin_);
     for (int i = 0; i < 6; i++)
         stress_exx[i] *= scale;
 

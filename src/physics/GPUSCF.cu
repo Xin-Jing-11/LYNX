@@ -3269,7 +3269,7 @@ double GPUSCFRunner::run(
                 // SOC density uses occfac=1 (no spin degeneracy since both spins in spinor)
                 gpu::spinor_density_gpu(d_psi_spinor, d_occ,
                                          d_rho_new_soc, d_mag_x_new, d_mag_y_new, d_mag_z_new,
-                                         Nd_, Nband, 1.0 * wk);
+                                         Nd_, Nband, wk / dV_);
             }
             // Copy total density for SCF error
             CUDA_CHECK(cudaMemcpy(d_rho_new_total, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
@@ -3294,11 +3294,11 @@ double GPUSCFRunner::run(
                         CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
                                                Nband * sizeof(double), cudaMemcpyHostToDevice));
                         gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
-                                                   d_rho_spin_target, Nd_, Nband, occfac * wk);
+                                                   d_rho_spin_target, Nd_, Nband, occfac * wk / dV_);
                     }
                 } else {
                     gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                              d_rho_spin_target, Nd_, Nband, occfac);
+                                              d_rho_spin_target, Nd_, Nband, occfac / dV_);
                 }
             }
 
@@ -3319,11 +3319,11 @@ double GPUSCFRunner::run(
                         CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
                                                Nband * sizeof(double), cudaMemcpyHostToDevice));
                         gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
-                                                   d_rho_new_total, Nd_, Nband, occfac * wk);
+                                                   d_rho_new_total, Nd_, Nband, occfac * wk / dV_);
                     }
                 } else {
                     gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                              d_rho_new_total, Nd_, Nband, occfac);
+                                              d_rho_new_total, Nd_, Nband, occfac / dV_);
                 }
             }
         }
@@ -3367,7 +3367,7 @@ double GPUSCFRunner::run(
                             double occ_n = wfn.occupations(s, k)(n);
                             if (occ_n < 1e-16) continue;
                             double spin_tau_fac = (Nspin_ >= 2) ? 0.5 : 1.0;
-                            double weight = occ_n * wk * spin_tau_fac;
+                            double weight = occ_n * wk * spin_tau_fac / dV_;  // /dV: psi satisfies psi^T*psi=I
 
                             const cuDoubleComplex* d_psi_n = d_psi_sk + (size_t)n * Nd_;
                             // Use x_ex_z (allocated for Nd_ex*Ns complex entries),
@@ -3408,7 +3408,7 @@ double GPUSCFRunner::run(
                         // The 0.5 spin factor ensures tau_up+tau_dn = physical total tau
                         // (same as non-spin tau for a non-magnetic system).
                         double spin_tau_fac = (Nspin_ >= 2) ? 0.5 : 1.0;
-                        double weight = occ_n * spin_tau_fac;
+                        double weight = occ_n * spin_tau_fac / dV_;  // /dV: psi satisfies psi^T*psi=I
 
                         const double* d_psi_n = d_psi_arr[s_glob] + (size_t)n * Nd_;
                         gpu::halo_exchange_gpu(d_psi_n, ctx.buf.aar_x_ex,
@@ -4129,14 +4129,14 @@ double GPUSCFRunner::run(
                             int s_glob = spin_start + s;
                             double* d_rho_s = (s_glob == 0) ? d_rho_new_up : d_rho_new_dn;
                             gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                                     d_rho_s, Nd_, Nband, occfac);
+                                                     d_rho_s, Nd_, Nband, occfac / dV_);
                         }
                         // Total density for XC/Poisson
                         add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_rho_new, Nd_);
                     } else {
                         CUDA_CHECK(cudaMemset(d_rho_new, 0, Nd_ * sizeof(double)));
                         gpu::compute_density_gpu(d_psi_arr[0], d_occ_arr[0],
-                                                 d_rho_new, Nd_, Nband, occfac);
+                                                 d_rho_new, Nd_, Nband, occfac / dV_);
                     }
                 }
 
@@ -4765,7 +4765,7 @@ double GPUSCFRunner::run(
                         double* d_rho_s = (s_glob == 0) ? d_rho_new_up : d_rho_new_dn;
                         for (int k = 0; k < Nkpts; k++) {
                             int k_glob = kpt_start + k;
-                            double wk_dens = kpt_weights_in[k_glob] * occfac_kpt;
+                            double wk_dens = kpt_weights_in[k_glob] * occfac_kpt / dV_;
 
                             // Upload psi per-column (ld padding)
                             {

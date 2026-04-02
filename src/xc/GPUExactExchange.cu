@@ -148,7 +148,7 @@ void build_ACE_gpu(cublasHandle_t cublas,
     if (Nocc <= 0) return;
 
     constexpr double OCC_THRESHOLD = 1e-6;
-    double coeff_scale = std::sqrt(dV);
+    double coeff_scale = 1.0;  // psi now in standard normalization
     int block = 256;
     int grid_Nd = (Nd + block - 1) / block;
 
@@ -182,12 +182,12 @@ void build_ACE_gpu(cublasHandle_t cublas,
     cudaFree(d_rhs);
     cudaFree(d_sol);
 
-    // Phase 2: ACE operator
+    // Phase 2: ACE operator — M = Xi^T * psi (alpha=1.0)
     double* d_M = nullptr;
     CUDA_CHECK(cudaMalloc(&d_M, (size_t)Nocc * Nocc * sizeof(double)));
 
     {
-        double alpha = std::sqrt(dV);
+        double alpha = 1.0;
         double beta = 0.0;
         cublasDgemm(cublas,
             CUBLAS_OP_T, CUBLAS_OP_N,
@@ -246,7 +246,7 @@ double compute_energy_gpu(cublasHandle_t cublas,
     if (Nocc <= 0 || Ns <= 0) return 0.0;
 
     {
-        double alpha = std::sqrt(dV);
+        double alpha = 1.0;  // psi in standard normalization
         double beta = 0.0;
         cublasDgemm(cublas,
             CUBLAS_OP_T, CUBLAS_OP_N,
@@ -338,7 +338,7 @@ void build_ACE_kpt_accumulate_gpu(cublasHandle_t cublas,
                                    cuDoubleComplex* d_Xi)
 {
     constexpr double OCC_THRESHOLD = 1e-6;
-    double coeff_scale = std::sqrt(dV);
+    double coeff_scale = 1.0;  // psi now in standard normalization
     int block = 256;
     int grid_Nd = (Nd + block - 1) / block;
 
@@ -383,12 +383,12 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
 
     int block = 256;
 
-    // M = sqrt(dV) * Xi^H * psi  [Nocc x Nocc]
+    // M = Xi^H * psi  [Nocc x Nocc] — alpha=1.0
     cuDoubleComplex* d_M = nullptr;
     CUDA_CHECK(cudaMalloc(&d_M, (size_t)Nocc * Nocc * sizeof(cuDoubleComplex)));
 
     {
-        cuDoubleComplex alpha = make_cuDoubleComplex(std::sqrt(dV), 0.0);
+        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
         cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
         cublasZgemm(cublas,
             CUBLAS_OP_C, CUBLAS_OP_N,
@@ -451,9 +451,9 @@ double compute_energy_kpt_gpu(cublasHandle_t cublas,
 {
     if (Nocc <= 0 || Ns <= 0) return 0.0;
 
-    // Y[Nocc x Ns] = sqrt(dV) * Xi^H * psi
+    // Y[Nocc x Ns] = Xi^H * psi (alpha=1.0)
     {
-        cuDoubleComplex alpha = make_cuDoubleComplex(std::sqrt(dV), 0.0);
+        cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
         cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
         cublasZgemm(cublas,
             CUBLAS_OP_C, CUBLAS_OP_N,

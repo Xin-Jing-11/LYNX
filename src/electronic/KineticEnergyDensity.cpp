@@ -42,6 +42,8 @@ void KineticEnergyDensity::compute(const Wavefunction& wfn,
     bool is_orth = grid.lattice().is_orthogonal();
     const Mat3& lapcT = grid.lattice().lapc_T();
     Vec3 cell_lengths = grid.lattice().lengths();
+    double dV = grid.dV();
+    double inv_dV = 1.0 / dV;  // psi satisfies psi^T*psi=I, need /dV for physical tau
 
     for (int s = 0; s < Nspin_local; ++s) {
         int s_glob = spin_start + s;
@@ -61,7 +63,7 @@ void KineticEnergyDensity::compute(const Wavefunction& wfn,
                 for (int n = 0; n < Nband_loc; ++n) {
                     double fn = occ(band_start + n);
                     if (fn < 1e-16) continue;
-                    double g_nk = wk * fn;
+                    double g_nk = wk * fn * inv_dV;
 
                     const Complex* col = psi_c.col(n);
                     halo.execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
@@ -94,7 +96,7 @@ void KineticEnergyDensity::compute(const Wavefunction& wfn,
                 for (int n = 0; n < Nband_loc; ++n) {
                     double fn = occ(band_start + n);
                     if (fn < 1e-16) continue;
-                    double g_nk = wk * fn;
+                    double g_nk = wk * fn * inv_dV;
 
                     const double* col = psi.col(n);
                     halo.execute(col, psi_ex.data(), 1);

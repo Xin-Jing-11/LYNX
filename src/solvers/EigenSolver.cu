@@ -208,42 +208,46 @@ void chebyshev_filter_gpu(
     }
 }
 
-// Compute S = X^T * X * dV on GPU (uses custom dot kernel for N ≤ 200, cuBLAS otherwise)
+// Compute S = X^T * X on GPU — orbitals satisfy psi^T * psi = I (alpha=1.0)
 void compute_ata_gpu(
     const double* d_X,  // (Nd, N) on device
     double* d_S,        // (N, N) on device
     int Nd, int N, double dV)
 {
+    (void)dV;  // dV no longer used in orthogonalization
+    double one = 1.0;
     if (N <= 200) {
         // Custom dot kernel — much faster for small N
         int bs = 256;
         dim3 grid(N, N);
-        ata_dot_kernel<<<grid, bs, bs * sizeof(double)>>>(d_X, d_S, Nd, N, dV);
+        ata_dot_kernel<<<grid, bs, bs * sizeof(double)>>>(d_X, d_S, Nd, N, one);
     } else {
         // Fallback to cuBLAS for very large N
         auto& ctx = GPUContext::instance();
         double beta = 0.0;
         cublasDgemm(ctx.cublas, CUBLAS_OP_T, CUBLAS_OP_N,
-                     N, N, Nd, &dV, d_X, Nd, d_X, Nd, &beta, d_S, N);
+                     N, N, Nd, &one, d_X, Nd, d_X, Nd, &beta, d_S, N);
     }
 }
 
-// Compute Hs = X^T * HX * dV on GPU
+// Compute Hs = X^T * HX on GPU — alpha=1.0
 void compute_atb_gpu(
     const double* d_X,   // (Nd, N) on device
     const double* d_HX,  // (Nd, N) on device
     double* d_Hs,        // (N, N) on device
     int Nd, int N, double dV)
 {
+    (void)dV;  // dV no longer used in Hamiltonian projection
+    double one = 1.0;
     if (N <= 200) {
         int bs = 256;
         dim3 grid(N, N);
-        atb_dot_kernel<<<grid, bs, bs * sizeof(double)>>>(d_X, d_HX, d_Hs, Nd, N, dV);
+        atb_dot_kernel<<<grid, bs, bs * sizeof(double)>>>(d_X, d_HX, d_Hs, Nd, N, one);
     } else {
         auto& ctx = GPUContext::instance();
         double beta = 0.0;
         cublasDgemm(ctx.cublas, CUBLAS_OP_T, CUBLAS_OP_N,
-                     N, N, Nd, &dV, d_X, Nd, d_HX, Nd, &beta, d_Hs, N);
+                     N, N, Nd, &one, d_X, Nd, d_HX, Nd, &beta, d_Hs, N);
     }
 }
 
@@ -519,28 +523,30 @@ void chebyshev_filter_z_gpu(
 // Complex subspace operations using cuBLAS/cuSOLVER
 // ============================================================
 
-// Compute S = X^H * X * dV using cublasZgemm
+// Compute S = X^H * X using cublasZgemm — alpha=1.0
 void compute_ata_z_gpu(
     const cuDoubleComplex* d_X,  // (Nd, N)
     cuDoubleComplex* d_S,        // (N, N)
     int Nd, int N, double dV)
 {
+    (void)dV;  // dV no longer used in orthogonalization
     auto& ctx = GPUContext::instance();
-    cuDoubleComplex alpha = make_cuDoubleComplex(dV, 0.0);
+    cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
     cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
     cublasZgemm(ctx.cublas, CUBLAS_OP_C, CUBLAS_OP_N,
                 N, N, Nd, &alpha, d_X, Nd, d_X, Nd, &beta, d_S, N);
 }
 
-// Compute Hs = X^H * HX * dV using cublasZgemm
+// Compute Hs = X^H * HX using cublasZgemm — alpha=1.0
 void compute_atb_z_gpu(
     const cuDoubleComplex* d_X,   // (Nd, N)
     const cuDoubleComplex* d_HX,  // (Nd, N)
     cuDoubleComplex* d_Hs,        // (N, N)
     int Nd, int N, double dV)
 {
+    (void)dV;  // dV no longer used in Hamiltonian projection
     auto& ctx = GPUContext::instance();
-    cuDoubleComplex alpha = make_cuDoubleComplex(dV, 0.0);
+    cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
     cuDoubleComplex beta  = make_cuDoubleComplex(0.0, 0.0);
     cublasZgemm(ctx.cublas, CUBLAS_OP_C, CUBLAS_OP_N,
                 N, N, Nd, &alpha, d_X, Nd, d_HX, Nd, &beta, d_Hs, N);

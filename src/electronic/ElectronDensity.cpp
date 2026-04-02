@@ -92,7 +92,8 @@ void ElectronDensity::compute(const Wavefunction& wfn,
 
                     const Complex* col = psi_c.col(n);
                     double* rho_s = rho_[s_glob].data();
-                    double w = spin_fac * wk * fn;
+                    double inv_dV = 1.0 / dV;
+                    double w = spin_fac * wk * fn * inv_dV;
 
                     for (int i = 0; i < Nd_d_; ++i) {
                         rho_s[i] += w * std::norm(col[i]);
@@ -106,7 +107,8 @@ void ElectronDensity::compute(const Wavefunction& wfn,
 
                     const double* col = psi.col(n);
                     double* rho_s = rho_[s_glob].data();
-                    double w = spin_fac * wk * fn;
+                    double inv_dV = 1.0 / dV;
+                    double w = spin_fac * wk * fn * inv_dV;
 
                     for (int i = 0; i < Nd_d_; ++i) {
                         rho_s[i] += w * col[i] * col[i];
@@ -213,7 +215,8 @@ void ElectronDensity::compute_spinor(const Wavefunction& wfn,
             const Complex* col = psi_c.col(n);
             const Complex* psi_up = col;
             const Complex* psi_dn = col + Nd_d;
-            double w = spin_fac * wk * fn;
+            double inv_dV = 1.0 / dV;
+            double w = spin_fac * wk * fn * inv_dV;
 
             double* rho = rho_total_.data();
             double* mx = mag_x_.data();

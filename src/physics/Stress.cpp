@@ -247,7 +247,8 @@ std::array<double, 6> Stress::compute_impl(
                                         sum += vtau_s[i] * std::real(std::conj(ga) * gb);
                                     }
                                 }
-                                sum *= grid.dV();
+                                // psi satisfies psi^T*psi=I, so dpsi is sqrt(dV) * physical dpsi
+                                // integral = sum * 1.0 (no extra dV)
                                 stress_mgga[voigt[a][b]] += -g_nk * sum;
                             }
                         }
@@ -275,7 +276,8 @@ std::array<double, 6> Stress::compute_impl(
                                         sum += vtau_s[i] * ga * gb;
                                     }
                                 }
-                                sum *= grid.dV();
+                                // psi satisfies psi^T*psi=I, so dpsi is sqrt(dV) * physical dpsi
+                                // integral = sum * 1.0 (no extra dV)
                                 stress_mgga[voigt[a][b]] += -g_nk * sum;
                             }
                         }
@@ -945,6 +947,7 @@ void Stress::compute_nonlocal_kinetic(
     int Nband = wfn.Nband();  // local band count
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
+    double sqrtdV = std::sqrt(dV);  // psi satisfies psi^T*psi=I; inner products use sqrt(dV)
     int ntypes = crystal.n_types();
     int n_atom = crystal.n_atom_total();
     int FDn = gradient.stencil().FDn();
@@ -1103,7 +1106,7 @@ void Stress::compute_nonlocal_kinetic(
                                     double dot = 0.0;
                                     for (int i = 0; i < Nd_d; ++i)
                                         dot += std::real(std::conj(dpsi_cart_sp[dim][i]) * dpsi_cart_sp[dim2][i]);
-                                    sk[cnt] -= 1.0 * wk * g_n * dot * dV;
+                                    sk[cnt] -= 1.0 * wk * g_n * dot;  // no dV: psi satisfies psi^T*psi=I
                                     cnt++;
                                 }
                             }
@@ -1141,7 +1144,7 @@ void Stress::compute_nonlocal_kinetic(
                                 double dot = 0.0;
                                 for (int i = 0; i < Nd_d; ++i)
                                     dot += std::real(std::conj(dpsi_cart[dim][i]) * dpsi_cart[dim2][i]);
-                                sk[cnt] -= occfac * wk * g_n * dot * dV;
+                                sk[cnt] -= occfac * wk * g_n * dot;  // no dV: psi satisfies psi^T*psi=I
                                 cnt++;
                             }
                         }
@@ -1175,7 +1178,7 @@ void Stress::compute_nonlocal_kinetic(
                                     const Vec3& shift = inf.image_shift[iat];
                                     double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                                     Complex bloch_fac(std::cos(theta), std::sin(theta));
-                                    Complex alpha_scale = bloch_fac * dV;
+                                    Complex alpha_scale = bloch_fac * sqrtdV;
 
                                     for (int jp = 0; jp < nproj; ++jp) {
                                         Complex dot(0.0, 0.0);
@@ -1244,7 +1247,7 @@ void Stress::compute_nonlocal_kinetic(
                                             const Vec3& shift = inf.image_shift[iat];
                                             double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                                             Complex bloch_fac(std::cos(theta), std::sin(theta));
-                                            Complex beta_scale = bloch_fac * dV;
+                                            Complex beta_scale = bloch_fac * sqrtdV;
 
                                             for (int jp = 0; jp < nproj; ++jp) {
                                                 Complex dot(0.0, 0.0);
@@ -1307,7 +1310,7 @@ void Stress::compute_nonlocal_kinetic(
                                 const Vec3& shift = inf.image_shift[iat];
                                 double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                                 Complex bloch_fac(std::cos(theta), std::sin(theta));
-                                Complex alpha_scale = bloch_fac * dV;
+                                Complex alpha_scale = bloch_fac * sqrtdV;
 
                                 for (int jp = 0; jp < nproj_soc; ++jp) {
                                     Complex dot_up(0.0), dot_dn(0.0);
@@ -1393,7 +1396,7 @@ void Stress::compute_nonlocal_kinetic(
                                 }
 
                                 // Compute SOC beta_up and beta_dn:
-                                // beta_sp = bloch_fac * dV * Chi_soc^T * (x-R)_dim2 * dpsi_sp/dx_dim
+                                // beta_sp = bloch_fac * sqrt(dV) * Chi_soc^T * (x-R)_dim2 * dpsi_sp/dx_dim
                                 std::vector<Complex> beta_soc_up(total_nproj_soc, Complex(0.0, 0.0));
                                 std::vector<Complex> beta_soc_dn(total_nproj_soc, Complex(0.0, 0.0));
 
@@ -1415,7 +1418,7 @@ void Stress::compute_nonlocal_kinetic(
                                         const Vec3& shift = inf.image_shift[iat];
                                         double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                                         Complex bloch_fac(std::cos(theta), std::sin(theta));
-                                        Complex beta_scale = bloch_fac * dV;
+                                        Complex beta_scale = bloch_fac * sqrtdV;
 
                                         for (int jp = 0; jp < nproj_soc; ++jp) {
                                             Complex dot_up(0.0), dot_dn(0.0);
@@ -1523,13 +1526,13 @@ void Stress::compute_nonlocal_kinetic(
                         }
                     }
 
-                    // Kinetic stress
+                    // Kinetic stress — no dV: psi satisfies psi^T*psi=I
                     int cnt = 0;
                     for (int dim = 0; dim < 3; ++dim) {
                         for (int dim2 = dim; dim2 < 3; ++dim2) {
                             double dot = 0.0;
                             for (int i = 0; i < Nd_d; ++i) dot += dpsi_cart[dim][i] * dpsi_cart[dim2][i];
-                            sk[cnt] -= occfac * wk * g_n * dot * dV;
+                            sk[cnt] -= occfac * wk * g_n * dot;
                             cnt++;
                         }
                     }
@@ -1553,7 +1556,7 @@ void Stress::compute_nonlocal_kinetic(
                                 double dot = 0.0;
                                 for (int ig = 0; ig < ndc; ++ig)
                                     dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
-                                alpha[offset + jp] += dot * dV;
+                                alpha[offset + jp] += dot * sqrtdV;
                             }
                         }
                     }
@@ -1600,7 +1603,7 @@ void Stress::compute_nonlocal_kinetic(
                                             double xR = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
                                             dot += chi_iat(ig, jp) * xR * dpsi_cart[dim][gpos[ig]];
                                         }
-                                        beta[offset + jp] += dot * dV;
+                                        beta[offset + jp] += dot * sqrtdV;
                                     }
                                 }
                             }
