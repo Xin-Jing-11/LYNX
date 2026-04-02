@@ -106,6 +106,25 @@ double Energy::hartree_energy_with_pseudocharge(const double* rho, const double*
     return 0.5 * local_sum * dV;
 }
 
+double Energy::self_consistency_correction(
+    const ElectronDensity& density,
+    const double* Veff_out, const double* Veff_in,
+    int Nd_d, double dV, int Nspin) {
+    double Escc = 0.0;
+    if (Nspin == 2) {
+        for (int s = 0; s < Nspin; ++s) {
+            const double* rho_s = density.rho(s).data();
+            for (int i = 0; i < Nd_d; ++i)
+                Escc += rho_s[i] * (Veff_out[s * Nd_d + i] - Veff_in[s * Nd_d + i]);
+        }
+    } else {
+        const double* rho_tot = density.rho_total().data();
+        for (int i = 0; i < Nd_d; ++i)
+            Escc += rho_tot[i] * (Veff_out[i] - Veff_in[i]);
+    }
+    return Escc * dV;
+}
+
 double Energy::total_energy(const EnergyComponents& E) {
     return E.Etotal;
 }

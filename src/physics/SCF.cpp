@@ -337,21 +337,8 @@ void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho
                                        (is_mgga_type(xc_type_) && tau_.valid()) ? arrays_.vtau.data() : nullptr);
 
         // Self-consistency correction
-        double Escc = 0.0;
-        if (Nspin == 2) {
-            for (int s = 0; s < Nspin; ++s) {
-                const double* rho_s = density_.rho(s).data();
-                for (int i = 0; i < Nd_d; ++i) {
-                    Escc += rho_s[i] * (state.Veff_out.data()[s*Nd_d + i] - Veff_in.data()[s*Nd_d + i]);
-                }
-            }
-        } else {
-            const double* rho_tot = density_.rho_total().data();
-            for (int i = 0; i < Nd_d; ++i) {
-                Escc += rho_tot[i] * (state.Veff_out.data()[i] - Veff_in.data()[i]);
-            }
-        }
-        Escc *= grid_->dV();
+        double Escc = Energy::self_consistency_correction(
+            density_, state.Veff_out.data(), Veff_in.data(), Nd_d, grid_->dV(), Nspin);
         energy_.Etotal += Escc;
 
         // Restore Veff_in for mixer

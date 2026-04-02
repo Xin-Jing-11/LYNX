@@ -63,6 +63,13 @@ public:
     static double hartree_energy_with_pseudocharge(const double* rho, const double* rho_b,
                                                     const double* phi, int Nd_d, double dV);
 
+    // Self-consistency correction: Escc = integral sum_s rho_s * (Veff_out_s - Veff_in_s) dV
+    // Used in potential mixing to correct the total energy for the Veff mismatch.
+    static double self_consistency_correction(
+        const ElectronDensity& density,
+        const double* Veff_out, const double* Veff_in,
+        int Nd_d, double dV, int Nspin);
+
     // Compute total energy from components
     static double total_energy(const EnergyComponents& E);
 
