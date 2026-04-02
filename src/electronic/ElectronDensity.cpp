@@ -18,6 +18,36 @@ void ElectronDensity::allocate(int Nd_d, int Nspin) {
     }
 }
 
+void ElectronDensity::initialize_uniform(int Nd_d, int Nspin, int Nelectron, double cell_volume) {
+    allocate(Nd_d, Nspin);
+    double rho0 = Nelectron / cell_volume;
+
+    if (Nspin == 1) {
+        double* rho = rho_[0].data();
+        for (int i = 0; i < Nd_d; ++i) rho[i] = rho0;
+    } else {
+        double* rho_up = rho_[0].data();
+        double* rho_dn = rho_[1].data();
+        for (int i = 0; i < Nd_d; ++i) {
+            rho_up[i] = rho0 * 0.5;
+            rho_dn[i] = rho0 * 0.5;
+        }
+    }
+    double* rho_t = rho_total_.data();
+    for (int i = 0; i < Nd_d; ++i) rho_t[i] = rho0;
+}
+
+void ElectronDensity::initialize_uniform_noncollinear(int Nd_d, int Nelectron, double cell_volume) {
+    allocate_noncollinear(Nd_d);
+    double rho0 = Nelectron / cell_volume;
+    double* rho = rho_total_.data();
+    for (int i = 0; i < Nd_d; ++i) rho[i] = rho0;
+    std::memcpy(rho_[0].data(), rho, Nd_d * sizeof(double));
+    mag_x_.zero();
+    mag_y_.zero();
+    mag_z_.zero();
+}
+
 void ElectronDensity::compute(const Wavefunction& wfn,
                                const std::vector<double>& kpt_weights,
                                double dV,

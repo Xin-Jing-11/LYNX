@@ -100,6 +100,12 @@ private:
     void lap_plus_diag_nonorth_impl(const T* x_ex, const double* Veff,
                                      T* y, int ncol, double c) const;
 
+    // Templated mGGA: H_mGGA ψ = -0.5 ∇·(vtau · ∇ψ)
+    template<typename T>
+    void apply_mgga_impl(const T* psi, T* y, int ncol,
+                          const Vec3& kpt_cart = {0,0,0},
+                          const Vec3& cell_lengths = {0,0,0}) const;
+
     // Legacy real wrappers
     void lap_plus_diag_orth(const double* x_ex, const double* Veff,
                             double* y, int ncol, double c) const;

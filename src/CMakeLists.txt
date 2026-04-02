@@ -23,6 +23,7 @@ add_library(lynx_core
     electronic/Wavefunction.cpp
     electronic/ElectronDensity.cpp
     electronic/Occupation.cpp
+    electronic/KineticEnergyDensity.cpp
     xc/XCFunctional.cpp
     xc/ExactExchange.cpp
     xc/ExchangePoissonSolver.cpp
@@ -32,6 +33,9 @@ add_library(lynx_core
     solvers/KerkerPreconditioner.cpp
     solvers/EigenSolver.cpp
     physics/Energy.cpp
+    physics/EffectivePotential.cpp
+    physics/SCFInitializer.cpp
+    physics/HybridSCF.cpp
     physics/SCF.cpp
     physics/Forces.cpp
     physics/Stress.cpp

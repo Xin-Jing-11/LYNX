@@ -44,6 +44,32 @@ public:
     static double hartree_energy(const double* rho, const double* phi,
                                   int Nd_d, double dV);
 
+    // XC energy with NLCC: Exc = integral (rho + rho_core) * exc dV
+    static double xc_energy_with_nlcc(const double* rho, const double* rho_core,
+                                       const double* exc, int Nd_d, double dV);
+
+    // Double-counting correction: E2 = integral sum_s rho_s * Vxc_s dV
+    static double double_counting_correction(const ElectronDensity& density,
+                                              const double* Vxc, int Nd_d, double dV, int Nspin);
+
+    // Electrostatic energy: E3 = integral rho * phi dV
+    static double electrostatic_energy(const double* rho, const double* phi, int Nd_d, double dV);
+
+    // mGGA double-counting correction: E3_mgga = integral tau * vtau dV
+    static double mgga_correction(const double* tau, const double* vtau,
+                                   int Nd_d, double dV, int Nspin);
+
+    // Hartree energy with pseudocharge: 0.5 * integral (rho + rho_b) * phi dV
+    static double hartree_energy_with_pseudocharge(const double* rho, const double* rho_b,
+                                                    const double* phi, int Nd_d, double dV);
+
+    // Self-consistency correction: Escc = integral sum_s rho_s * (Veff_out_s - Veff_in_s) dV
+    // Used in potential mixing to correct the total energy for the Veff mismatch.
+    static double self_consistency_correction(
+        const ElectronDensity& density,
+        const double* Veff_out, const double* Veff_in,
+        int Nd_d, double dV, int Nspin);
+
     // Compute total energy from components
     static double total_energy(const EnergyComponents& E);
 

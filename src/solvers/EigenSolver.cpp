@@ -1,4 +1,5 @@
 #include "solvers/EigenSolver.hpp"
+#include "solvers/Lanczos.hpp"
 #include "solvers/LinearSolver.hpp"
 #include "parallel/Parallelization.hpp"
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
+#include <type_traits>
 #include <mpi.h>
 #include <omp.h>
 
@@ -34,8 +36,6 @@ extern "C" {
                 const double* alpha, const double* a, const int* lda,
                 const double* b, const int* ldb,
                 const double* beta, double* c, const int* ldc);
-    void dsterf_(const int* n, double* d, double* e, int* info);
-
     // Complex
     void zgemm_(const char* transa, const char* transb,
                 const int* m, const int* n, const int* k,
@@ -52,6 +52,102 @@ extern "C" {
 }
 
 namespace lynx {
+
+// ===== BLAS/LAPACK type-dispatch helpers =====
+namespace blas {
+
+// gemm: C = alpha * op(A) * op(B) + beta * C
+inline void gemm(const char* ta, const char* tb, const int* m, const int* n, const int* k,
+                 const double* alpha, const double* A, const int* lda,
+                 const double* B, const int* ldb,
+                 const double* beta, double* C, const int* ldc) {
+    dgemm_(ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+inline void gemm(const char* ta, const char* tb, const int* m, const int* n, const int* k,
+                 const Complex* alpha, const Complex* A, const int* lda,
+                 const Complex* B, const int* ldb,
+                 const Complex* beta, Complex* C, const int* ldc) {
+    zgemm_(ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+// potrf: Cholesky factorization
+inline void potrf(const char* uplo, const int* n, double* A, const int* lda, int* info) {
+    dpotrf_(uplo, n, A, lda, info);
+}
+inline void potrf(const char* uplo, const int* n, Complex* A, const int* lda, int* info) {
+    zpotrf_(uplo, n, A, lda, info);
+}
+
+// trsm: triangular solve
+inline void trsm(const char* side, const char* uplo, const char* ta, const char* diag,
+                 const int* m, const int* n, const double* alpha,
+                 const double* A, const int* lda, double* B, const int* ldb) {
+    dtrsm_(side, uplo, ta, diag, m, n, alpha, A, lda, B, ldb);
+}
+inline void trsm(const char* side, const char* uplo, const char* ta, const char* diag,
+                 const int* m, const int* n, const Complex* alpha,
+                 const Complex* A, const int* lda, Complex* B, const int* ldb) {
+    ztrsm_(side, uplo, ta, diag, m, n, alpha, A, lda, B, ldb);
+}
+
+// Eigen-decomposition
+inline void syev(const char* jobz, const char* uplo, const int* n,
+                 double* A, const int* lda, double* w, int* info) {
+    int lwork = -1;
+    double work_query;
+    dsyev_(jobz, uplo, n, A, lda, w, &work_query, &lwork, info);
+    lwork = static_cast<int>(work_query);
+    std::vector<double> work(lwork);
+    dsyev_(jobz, uplo, n, A, lda, w, work.data(), &lwork, info);
+}
+inline void syev(const char* jobz, const char* uplo, const int* n,
+                 Complex* A, const int* lda, double* w, int* info) {
+    int lwork = -1;
+    Complex work_query;
+    std::vector<double> rwork(std::max(1, 3 * (*n) - 2));
+    zheev_(jobz, uplo, n, A, lda, w, &work_query, &lwork, rwork.data(), info);
+    lwork = static_cast<int>(work_query.real());
+    std::vector<Complex> work(lwork);
+    zheev_(jobz, uplo, n, A, lda, w, work.data(), &lwork, rwork.data(), info);
+}
+
+// Transpose character for gemm: 'T' for real, 'C' for complex
+template<typename T> constexpr char trans_char() { return 'T'; }
+template<> constexpr char trans_char<Complex>() { return 'C'; }
+
+// Scalar constants
+template<typename T> inline T one() { return T(1.0); }
+template<> inline Complex one<Complex>() { return Complex(1.0, 0.0); }
+template<typename T> inline T zero() { return T(0.0); }
+template<> inline Complex zero<Complex>() { return Complex(0.0, 0.0); }
+template<typename T> inline T make_scalar(double v) { return T(v); }
+template<> inline Complex make_scalar<Complex>(double v) { return Complex(v, 0.0); }
+
+// Symmetrize: real -> average off-diag, complex -> hermitianize
+inline void symmetrize(double* Hs, int N) {
+    for (int i = 0; i < N; ++i)
+        for (int j = i + 1; j < N; ++j) {
+            double avg = 0.5 * (Hs[i + j * N] + Hs[j + i * N]);
+            Hs[i + j * N] = avg;
+            Hs[j + i * N] = avg;
+        }
+}
+inline void symmetrize(Complex* Hs, int N) {
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            Complex avg = 0.5 * (Hs[i + j * N] + std::conj(Hs[j + i * N]));
+            Hs[i + j * N] = avg;
+            Hs[j + i * N] = std::conj(avg);
+        }
+        Hs[i + i * N] = Complex(Hs[i + i * N].real(), 0.0);
+    }
+}
+
+// MPI type dispatch
+inline MPI_Datatype mpi_type(const double*) { return MPI_DOUBLE; }
+inline MPI_Datatype mpi_type(const Complex*) { return MPI_C_DOUBLE_COMPLEX; }
+
+} // namespace blas
 
 EigenSolver::~EigenSolver() {
 #ifdef USE_SCALAPACK
@@ -400,27 +496,29 @@ void EigenSolver::rotate_orbitals_kpt_scalapack(Complex* X, int Nd_d, int Nband_
 }
 #endif // USE_SCALAPACK
 
-void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Veff,
-                                    int Nd_d, int Nband,
-                                    double lambda_cutoff, double eigval_min, double eigval_max,
-                                    int degree) {
+// ===== Template-unified implementations =====
+
+template<typename T>
+void EigenSolver::chebyshev_filter_impl(const T* X, T* Y, const double* Veff,
+                                         int Nd_d, int Nband,
+                                         double lambda_cutoff, double eigval_min, double eigval_max,
+                                         int degree,
+                                         const Vec3& kpt_cart, const Vec3& cell_lengths) {
     double e = (eigval_max - lambda_cutoff) / 2.0;
     double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma_1 = e / (eigval_min - c);  // reference: sigma1 = e / (a0 - c)
+    double sigma_1 = e / (eigval_min - c);
     double sigma = sigma_1;
-    double sigma_new;
 
-    int nd_ex = halo_->nd_ex();
-
-    // Work arrays
-    std::vector<double> Xold(Nd_d * Nband);
-    std::vector<double> Xnew(Nd_d * Nband);
-    std::vector<double> HX(Nd_d * Nband);
-    std::vector<double> x_ex(nd_ex * Nband);
+    std::vector<T> Xold(Nd_d * Nband);
+    std::vector<T> Xnew(Nd_d * Nband);
+    std::vector<T> HX(Nd_d * Nband);
 
     // Y = (H*X - c*X) * (sigma/e)
-    halo_->execute(X, x_ex.data(), Nband);
-    H_->apply(X, Veff, HX.data(), Nband);
+    if constexpr (std::is_same_v<T, Complex>) {
+        H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+    } else {
+        H_->apply(X, Veff, HX.data(), Nband);
+    }
 
     int total = Nd_d * Nband;
     double scale = sigma / e;
@@ -429,21 +527,21 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
         Y[idx] = scale * (HX[idx] - c * X[idx]);
     }
 
-    // Save X as Xold
-    std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(double));
+    std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(T));
 
-    // Use pointer swap instead of memcpy in iteration loop
-    double* pY = Y;
-    double* pXold = Xold.data();
-    double* pXnew = Xnew.data();
+    T* pY = Y;
+    T* pXold = Xold.data();
+    T* pXnew = Xnew.data();
 
     for (int k = 2; k <= degree; ++k) {
-        sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
+        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
         double gamma = 2.0 * sigma_new / e;
 
-        // Xnew = gamma * (H*Y - c*Y) - sigma*sigma_new * Xold
-        halo_->execute(pY, x_ex.data(), Nband);
-        H_->apply(pY, Veff, HX.data(), Nband);
+        if constexpr (std::is_same_v<T, Complex>) {
+            H_->apply_kpt(pY, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+        } else {
+            H_->apply(pY, Veff, HX.data(), Nband);
+        }
 
         double ss = sigma * sigma_new;
         #pragma omp parallel for schedule(static)
@@ -451,266 +549,200 @@ void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Vef
             pXnew[idx] = gamma * (HX[idx] - c * pY[idx]) - ss * pXold[idx];
         }
 
-        // Pointer swap: Xold <- Y, Y <- Xnew
-        double* tmp = pXold;
+        T* tmp = pXold;
         pXold = pY;
         pY = pXnew;
         pXnew = tmp;
         sigma = sigma_new;
     }
 
-    // Copy result back to caller's Y buffer if needed
     if (pY != Y) {
-        std::memcpy(Y, pY, Nd_d * Nband * sizeof(double));
+        std::memcpy(Y, pY, Nd_d * Nband * sizeof(T));
     }
 }
 
-void EigenSolver::orthogonalize(double* X, int Nd_d, int Nband, double dV) {
-    // Cholesky QR: X^T * X = R^T * R, then X <- X * R^{-1}
-    // Compute overlap: S = X^T * X * dV
-    std::vector<double> S(Nband * Nband, 0.0);
+template<typename T>
+void EigenSolver::orthogonalize_impl(T* X, int Nd_d, int Nband, double dV) {
+    std::vector<T> S(Nband * Nband, blas::zero<T>());
 
-    // S = X^T * X (local contribution)
-    char transT = 'T', transN = 'N';
-    double alpha = dV, beta = 0.0;
-    dgemm_(&transT, &transN, &Nband, &Nband, &Nd_d,
-           &alpha, X, &Nd_d, X, &Nd_d, &beta, S.data(), &Nband);
+    char transH = blas::trans_char<T>(), transN = 'N';
+    T alpha = blas::make_scalar<T>(dV), beta = blas::zero<T>();
+    blas::gemm(&transH, &transN, &Nband, &Nband, &Nd_d,
+               &alpha, X, &Nd_d, X, &Nd_d, &beta, S.data(), &Nband);
 
-    // Cholesky: S = R^T * R (upper triangular)
     char uplo = 'U';
     int info;
-    dpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
+    blas::potrf(&uplo, &Nband, S.data(), &Nband, &info);
     if (info != 0) {
-        throw std::runtime_error("Cholesky factorization failed in orthogonalize");
+        throw std::runtime_error("Cholesky factorization failed in orthogonalize (info=" + std::to_string(info) + ")");
     }
 
-    // X <- X * R^{-1}  (solve X * R = X_new => X_new = X * inv(R))
     char side = 'R', diag = 'N';
-    double one = 1.0;
-    dtrsm_(&side, &uplo, &transN, &diag, &Nd_d, &Nband, &one,
-           S.data(), &Nband, X, &Nd_d);
+    T one = blas::one<T>();
+    blas::trsm(&side, &uplo, &transN, &diag, &Nd_d, &Nband, &one,
+               S.data(), &Nband, X, &Nd_d);
+}
+
+template<typename T>
+void EigenSolver::project_hamiltonian_impl(const T* X, const double* Veff,
+                                            T* Hs, int Nd_d, int Nband, double dV,
+                                            const Vec3& kpt_cart, const Vec3& cell_lengths) {
+    std::vector<T> HX(Nd_d * Nband);
+    if constexpr (std::is_same_v<T, Complex>) {
+        H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
+    } else {
+        H_->apply(X, Veff, HX.data(), Nband);
+    }
+
+    char transH = blas::trans_char<T>(), transN = 'N';
+    T alpha = blas::make_scalar<T>(dV), beta = blas::zero<T>();
+    blas::gemm(&transH, &transN, &Nband, &Nband, &Nd_d,
+               &alpha, X, &Nd_d, HX.data(), &Nd_d, &beta, Hs, &Nband);
+
+    blas::symmetrize(Hs, Nband);
+}
+
+template<typename T>
+void EigenSolver::diag_subspace_impl(T* Hs, double* eigvals, int N) {
+    char jobz = 'V', uplo = 'U';
+    int info;
+    blas::syev(&jobz, &uplo, &N, Hs, &N, eigvals, &info);
+    if (info != 0) {
+        std::fprintf(stderr, "Eigen-decomposition failed with info=%d, N=%d\n", info, N);
+        throw std::runtime_error("Eigen-decomposition failed in diag_subspace");
+    }
+}
+
+template<typename T>
+void EigenSolver::rotate_orbitals_impl(T* X, const T* Q, int Nd_d, int Nband) {
+    std::vector<T> X_new(Nd_d * Nband);
+    char transN = 'N';
+    T one = blas::one<T>(), zero = blas::zero<T>();
+    blas::gemm(&transN, &transN, &Nd_d, &Nband, &Nband,
+               &one, X, &Nd_d, Q, &Nband, &zero, X_new.data(), &Nd_d);
+    std::memcpy(X, X_new.data(), Nd_d * Nband * sizeof(T));
+}
+
+// Explicit instantiations
+template void EigenSolver::chebyshev_filter_impl<double>(const double*, double*, const double*,
+    int, int, double, double, double, int, const Vec3&, const Vec3&);
+template void EigenSolver::chebyshev_filter_impl<Complex>(const Complex*, Complex*, const double*,
+    int, int, double, double, double, int, const Vec3&, const Vec3&);
+template void EigenSolver::orthogonalize_impl<double>(double*, int, int, double);
+template void EigenSolver::orthogonalize_impl<Complex>(Complex*, int, int, double);
+template void EigenSolver::project_hamiltonian_impl<double>(const double*, const double*, double*, int, int, double, const Vec3&, const Vec3&);
+template void EigenSolver::project_hamiltonian_impl<Complex>(const Complex*, const double*, Complex*, int, int, double, const Vec3&, const Vec3&);
+template void EigenSolver::diag_subspace_impl<double>(double*, double*, int);
+template void EigenSolver::diag_subspace_impl<Complex>(Complex*, double*, int);
+template void EigenSolver::rotate_orbitals_impl<double>(double*, const double*, int, int);
+template void EigenSolver::rotate_orbitals_impl<Complex>(Complex*, const Complex*, int, int);
+
+// ===== Original methods now delegate to template implementations =====
+
+void EigenSolver::chebyshev_filter(const double* X, double* Y, const double* Veff,
+                                    int Nd_d, int Nband,
+                                    double lambda_cutoff, double eigval_min, double eigval_max,
+                                    int degree) {
+    chebyshev_filter_impl<double>(X, Y, Veff, Nd_d, Nband,
+                                  lambda_cutoff, eigval_min, eigval_max, degree);
+}
+
+void EigenSolver::orthogonalize(double* X, int Nd_d, int Nband, double dV) {
+    orthogonalize_impl<double>(X, Nd_d, Nband, dV);
 }
 
 void EigenSolver::project_hamiltonian(const double* X, const double* Veff,
                                        double* Hs, int Nd_d, int Nband, double dV) {
-    // HX = H * X
-    std::vector<double> HX(Nd_d * Nband);
-    int nd_ex = halo_->nd_ex();
-    std::vector<double> x_ex(nd_ex * Nband);
-    halo_->execute(X, x_ex.data(), Nband);
-    H_->apply(X, Veff, HX.data(), Nband);
-
-    // Hs = X^T * HX * dV
-    char transT = 'T', transN = 'N';
-    double alpha = dV, beta_v = 0.0;
-    dgemm_(&transT, &transN, &Nband, &Nband, &Nd_d,
-           &alpha, X, &Nd_d, HX.data(), &Nd_d, &beta_v, Hs, &Nband);
-
-    // Symmetrize
-    for (int i = 0; i < Nband; ++i) {
-        for (int j = i + 1; j < Nband; ++j) {
-            double avg = 0.5 * (Hs[i + j * Nband] + Hs[j + i * Nband]);
-            Hs[i + j * Nband] = avg;
-            Hs[j + i * Nband] = avg;
-        }
-    }
+    project_hamiltonian_impl<double>(X, Veff, Hs, Nd_d, Nband, dV);
 }
 
 void EigenSolver::diag_subspace(double* Hs, double* eigvals, int N) {
-    // dsyev: diagonalize symmetric matrix
-    char jobz = 'V', uplo = 'U';
-    int lwork = -1, info;
-    double work_query;
-    dsyev_(&jobz, &uplo, &N, Hs, &N, eigvals, &work_query, &lwork, &info);
-
-    lwork = static_cast<int>(work_query);
-    std::vector<double> work(lwork);
-    dsyev_(&jobz, &uplo, &N, Hs, &N, eigvals, work.data(), &lwork, &info);
-
-    if (info != 0) {
-        // Diagnostic: check for NaN/Inf in input
-        std::fprintf(stderr, "dsyev failed with info=%d, N=%d\n", info, N);
-        throw std::runtime_error("dsyev failed in diag_subspace");
-    }
+    diag_subspace_impl<double>(Hs, eigvals, N);
 }
 
 void EigenSolver::rotate_orbitals(double* X, const double* Q, int Nd_d, int Nband) {
-    // X_new = X * Q
-    std::vector<double> X_new(Nd_d * Nband);
-    char transN = 'N';
-    double one = 1.0, zero = 0.0;
-    dgemm_(&transN, &transN, &Nd_d, &Nband, &Nband,
-           &one, X, &Nd_d, Q, &Nband, &zero, X_new.data(), &Nd_d);
-
-    std::memcpy(X, X_new.data(), Nd_d * Nband * sizeof(double));
+    rotate_orbitals_impl<double>(X, Q, Nd_d, Nband);
 }
 
 void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
                                   double& eigval_min, double& eigval_max,
                                   double tol_lanczos, int max_iter) {
-    // Reference: Lanczos() in eigenSolver.c
-    // Tolerance-based stopping: converges when both eigmin and eigmax errors < tol
-    int nd_ex = halo_->nd_ex();
-
-    std::vector<double> V_j(Nd_d), V_jm1(Nd_d), V_jp1(Nd_d);
-    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
-
-    // Local comm for dot products (no domain decomposition)
-    MPIComm self_comm(MPI_COMM_SELF);
-
-    // Initial vector: match reference srand(rank*100+1), range [0,1]
-    int rank = 0;  // single domain process
-    std::srand(rank * 100 + 1);
-    for (int i = 0; i < Nd_d; ++i)
-        V_jm1[i] = (double)std::rand() / RAND_MAX;
-
-    // Normalize
-    double vscal = std::sqrt(LinearSolver::dot(V_jm1.data(), V_jm1.data(), Nd_d, self_comm));
-    vscal = 1.0 / vscal;
-    for (int i = 0; i < Nd_d; ++i) V_jm1[i] *= vscal;
-
-    // First H*v
-    std::vector<double> v_ex(nd_ex);
-    halo_->execute(V_jm1.data(), v_ex.data(), 1);
-    H_->apply(V_jm1.data(), Veff, V_j.data(), 1);
-
-    // a[0] = <V_jm1, V_j>
-    a[0] = LinearSolver::dot(V_jm1.data(), V_j.data(), Nd_d, self_comm);
-
-    // Orthogonalize: V_j = V_j - a[0]*V_jm1
-    for (int i = 0; i < Nd_d; ++i)
-        V_j[i] -= a[0] * V_jm1[i];
-
-    // b[0] = ||V_j||
-    b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, self_comm));
-
-    if (b[0] == 0.0) {
-        // Invariant subspace; pick random vector orthogonal to V_jm1
-        for (int i = 0; i < Nd_d; ++i)
-            V_j[i] = -1.0 + 2.0 * ((double)std::rand() / RAND_MAX);
-        double dot_val = LinearSolver::dot(V_j.data(), V_jm1.data(), Nd_d, self_comm);
-        for (int i = 0; i < Nd_d; ++i) V_j[i] -= dot_val * V_jm1[i];
-        b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, self_comm));
-    }
-
-    // Scale V_j
-    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
-    for (int i = 0; i < Nd_d; ++i) V_j[i] *= vscal;
-
-    eigval_min = 0.0;
-    eigval_max = 0.0;
-    double eigmin_pre = 0.0, eigmax_pre = 0.0;
-    double err_eigmin = tol_lanczos + 1.0;
-    double err_eigmax = tol_lanczos + 1.0;
-
-    int j = 0;
-    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
-        // V_{j+1} = H * V_j
-        halo_->execute(V_j.data(), v_ex.data(), 1);
-        H_->apply(V_j.data(), Veff, V_jp1.data(), 1);
-
-        // a[j+1] = <V_j, V_{j+1}>
-        a[j + 1] = LinearSolver::dot(V_j.data(), V_jp1.data(), Nd_d, self_comm);
-
-        // V_{j+1} = V_{j+1} - a[j+1]*V_j - b[j]*V_{j-1}
-        for (int i = 0; i < Nd_d; ++i) {
-            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
-            V_jm1[i] = V_j[i];
-        }
-
-        b[j + 1] = std::sqrt(LinearSolver::dot(V_jp1.data(), V_jp1.data(), Nd_d, self_comm));
-        if (b[j + 1] == 0.0) break;
-
-        vscal = 1.0 / b[j + 1];
-        for (int i = 0; i < Nd_d; ++i) V_j[i] = V_jp1[i] * vscal;
-
-        // Solve tridiagonal eigenvalue problem using dsterf_
-        // Copy a[0..j+1] into d, b[0..j+1] into e
-        int n = j + 2;
-        std::vector<double> d(n), e(n);
-        for (int k = 0; k < n; ++k) { d[k] = a[k]; e[k] = b[k]; }
-
-        int info;
-        dsterf_(&n, d.data(), e.data(), &info);
-        if (info == 0) {
-            eigval_min = d[0];
-            eigval_max = d[n - 1];
-        } else {
-            break;
-        }
-
-        err_eigmin = std::abs(eigval_min - eigmin_pre);
-        err_eigmax = std::abs(eigval_max - eigmax_pre);
-        eigmin_pre = eigval_min;
-        eigmax_pre = eigval_max;
-
-        j++;
-    }
-
-    // Apply safety margins (reference: eigmax *= 1.01, eigmin -= 0.1)
-    eigval_max *= 1.01;
-    eigval_min -= 0.1;
+    auto matvec = [&](const double* x, double* y) {
+        H_->apply(x, Veff, y, 1);
+    };
+    lynx::lanczos_bounds<double>(matvec, Nd_d, eigval_min, eigval_max,
+                                  tol_lanczos, max_iter);
 }
 
-void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
-                        int Nd_d, int Nband,
-                        double lambda_cutoff, double eigval_min, double eigval_max,
-                        int cheb_degree, int ld) {
+// ===========================================================================
+// Template-unified solve
+// ===========================================================================
+
+template<typename T>
+void EigenSolver::solve_impl(T* psi, double* eigvals, const double* Veff,
+                              int Nd_d, int Nband,
+                              double lambda_cutoff, double eigval_min, double eigval_max,
+                              int cheb_degree, int ld,
+                              const Vec3& kpt_cart, const Vec3& cell_lengths) {
     if (ld == 0) ld = Nd_d;
     double dV = domain_->global_grid().dV();
-
-    // Nband here is local band count. For serial case, Nband = Nband_global.
     int Nband_loc = Nband;
 
     // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
-    std::vector<double> psi_packed;
-    double* psi_work = psi;
+    std::vector<T> psi_packed;
+    T* psi_work = psi;
     if (ld != Nd_d) {
         psi_packed.resize(Nd_d * Nband_loc);
         for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(double));
+            std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(T));
         psi_work = psi_packed.data();
     }
 
-    // Step 1: Chebyshev filter (embarrassingly parallel — each proc filters its local bands)
-    std::vector<double> Y(Nd_d * Nband_loc);
-    chebyshev_filter(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
-                     lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    // Step 1: Chebyshev filter
+    std::vector<T> Y(Nd_d * Nband_loc);
+    chebyshev_filter_impl<T>(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
+                              lambda_cutoff, eigval_min, eigval_max, cheb_degree,
+                              kpt_cart, cell_lengths);
 
 #ifdef USE_SCALAPACK
     if (npband_ > 1) {
-        // Band-parallel path: distributed subspace operations
-        // Step 2: Orthogonalize (Allgather + Cholesky QR)
-        orthogonalize_scalapack(Y.data(), Nd_d, Nband_loc, dV);
+        // Band-parallel path
+        if constexpr (std::is_same_v<T, Complex>) {
+            orthogonalize_kpt_scalapack(Y.data(), Nd_d, Nband_loc, dV);
 
-        // Step 3+4: Project Hamiltonian + diagonalize (returns ALL eigenvalues)
-        int N = Nband_global_;
-        std::vector<double> eigs_all(N);
-        project_hamiltonian_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV);
+            int N = Nband_global_;
+            std::vector<double> eigs_all(N);
+            project_hamiltonian_kpt_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV,
+                                              kpt_cart, cell_lengths);
 
-        // Step 5: Rotate orbitals (Allgather + dgemm + extract local)
-        rotate_orbitals_scalapack(Y.data(), Nd_d, Nband_loc);
+            rotate_orbitals_kpt_scalapack(Y.data(), Nd_d, Nband_loc);
 
-        // Copy ALL eigenvalues (caller needs them all for Fermi level)
-        // eigvals buffer must be large enough for Nband_global
-        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+            std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+        } else {
+            orthogonalize_scalapack(Y.data(), Nd_d, Nband_loc, dV);
+
+            int N = Nband_global_;
+            std::vector<double> eigs_all(N);
+            project_hamiltonian_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV);
+
+            rotate_orbitals_scalapack(Y.data(), Nd_d, Nband_loc);
+
+            std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+        }
     } else
 #endif
     {
-        // Serial path: standard LAPACK
-        // Step 2: Orthogonalize filtered vectors
-        orthogonalize(Y.data(), Nd_d, Nband_loc, dV);
+        // Serial path
+        orthogonalize_impl<T>(Y.data(), Nd_d, Nband_loc, dV);
 
-        // Step 3: Project Hamiltonian onto subspace
-        std::vector<double> Hs(Nband_loc * Nband_loc);
-        project_hamiltonian(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV);
+        std::vector<T> Hs(Nband_loc * Nband_loc);
+        project_hamiltonian_impl<T>(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV,
+                                     kpt_cart, cell_lengths);
 
-        // Step 4: Diagonalize subspace Hamiltonian
         std::vector<double> eigs(Nband_loc);
-        diag_subspace(Hs.data(), eigs.data(), Nband_loc);
+        diag_subspace_impl<T>(Hs.data(), eigs.data(), Nband_loc);
 
-        // Step 5: Rotate orbitals
-        rotate_orbitals(Y.data(), Hs.data(), Nd_d, Nband_loc);
+        rotate_orbitals_impl<T>(Y.data(), Hs.data(), Nd_d, Nband_loc);
 
         std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
     }
@@ -718,9 +750,9 @@ void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
     // Unpack from packed layout (stride=Nd_d) back to NDArray layout (stride=ld)
     if (ld != Nd_d) {
         for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(double));
+            std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(T));
     } else {
-        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(double));
+        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(T));
     }
 
     // Update lambda_cutoff: use last global eigenvalue
@@ -728,142 +760,18 @@ void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
     lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
 }
 
-// ===========================================================================
-// Complex (k-point) implementations
-// ===========================================================================
+// Explicit instantiations for solve_impl
+template void EigenSolver::solve_impl<double>(double*, double*, const double*,
+    int, int, double, double, double, int, int, const Vec3&, const Vec3&);
+template void EigenSolver::solve_impl<Complex>(Complex*, double*, const double*,
+    int, int, double, double, double, int, int, const Vec3&, const Vec3&);
 
-void EigenSolver::chebyshev_filter_kpt(const Complex* X, Complex* Y, const double* Veff,
-                                        int Nd_d, int Nband,
-                                        double lambda_cutoff, double eigval_min, double eigval_max,
-                                        const Vec3& kpt_cart, const Vec3& cell_lengths,
-                                        int degree) {
-    double e = (eigval_max - lambda_cutoff) / 2.0;
-    double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma_1 = e / (eigval_min - c);
-    double sigma = sigma_1;
-    double sigma_new;
-
-    std::vector<Complex> Xold(Nd_d * Nband);
-    std::vector<Complex> Xnew(Nd_d * Nband);
-    std::vector<Complex> HX(Nd_d * Nband);
-
-    // Y = (H*X - c*X) * (sigma/e)
-    H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
-
-    int total = Nd_d * Nband;
-    double scale = sigma / e;
-    #pragma omp parallel for schedule(static)
-    for (int idx = 0; idx < total; ++idx) {
-        Y[idx] = scale * (HX[idx] - c * X[idx]);
-    }
-
-    std::memcpy(Xold.data(), X, Nd_d * Nband * sizeof(Complex));
-
-    // Use pointer swap instead of memcpy in iteration loop
-    Complex* pY = Y;
-    Complex* pXold = Xold.data();
-    Complex* pXnew = Xnew.data();
-
-    for (int k = 2; k <= degree; ++k) {
-        sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
-        double gamma = 2.0 * sigma_new / e;
-
-        H_->apply_kpt(pY, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
-
-        double ss = sigma * sigma_new;
-        #pragma omp parallel for schedule(static)
-        for (int idx = 0; idx < total; ++idx) {
-            pXnew[idx] = gamma * (HX[idx] - c * pY[idx]) - ss * pXold[idx];
-        }
-
-        // Pointer swap
-        Complex* tmp = pXold;
-        pXold = pY;
-        pY = pXnew;
-        pXnew = tmp;
-        sigma = sigma_new;
-    }
-
-    // Copy result back to caller's Y buffer if needed
-    if (pY != Y) {
-        std::memcpy(Y, pY, Nd_d * Nband * sizeof(Complex));
-    }
-}
-
-void EigenSolver::orthogonalize_kpt(Complex* X, int Nd_d, int Nband, double dV) {
-    // Cholesky QR: S = X^H * X * dV, S = R^H * R, X <- X * R^{-1}
-    std::vector<Complex> S(Nband * Nband, Complex(0.0));
-
-    // S = X^H * X * dV
-    char transC = 'C', transN = 'N';
-    Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
-    zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
-           &alpha_z, X, &Nd_d, X, &Nd_d, &beta_z, S.data(), &Nband);
-
-    // Cholesky
-    char uplo = 'U';
-    int info;
-    zpotrf_(&uplo, &Nband, S.data(), &Nband, &info);
-    if (info != 0) {
-        throw std::runtime_error("zpotrf failed in orthogonalize_kpt (info=" + std::to_string(info) + ", Nd_d=" + std::to_string(Nd_d) + ", Nband=" + std::to_string(Nband) + ")");
-    }
-
-    // X <- X * R^{-1}
-    char side = 'R', diag = 'N';
-    Complex one_z(1.0, 0.0);
-    ztrsm_(&side, &uplo, &transN, &diag, &Nd_d, &Nband, &one_z,
-           S.data(), &Nband, X, &Nd_d);
-}
-
-void EigenSolver::project_hamiltonian_kpt(const Complex* X, const double* Veff,
-                                           Complex* Hs, int Nd_d, int Nband, double dV,
-                                           const Vec3& kpt_cart, const Vec3& cell_lengths) {
-    std::vector<Complex> HX(Nd_d * Nband);
-    H_->apply_kpt(X, Veff, HX.data(), Nband, kpt_cart, cell_lengths);
-
-    // Hs = X^H * HX * dV
-    char transC = 'C', transN = 'N';
-    Complex alpha_z(dV, 0.0), beta_z(0.0, 0.0);
-    zgemm_(&transC, &transN, &Nband, &Nband, &Nd_d,
-           &alpha_z, X, &Nd_d, HX.data(), &Nd_d, &beta_z, Hs, &Nband);
-
-    // Hermitianize
-    for (int i = 0; i < Nband; ++i) {
-        for (int j = i + 1; j < Nband; ++j) {
-            Complex avg = 0.5 * (Hs[i + j * Nband] + std::conj(Hs[j + i * Nband]));
-            Hs[i + j * Nband] = avg;
-            Hs[j + i * Nband] = std::conj(avg);
-        }
-        // Diagonal must be real
-        Hs[i + i * Nband] = Complex(Hs[i + i * Nband].real(), 0.0);
-    }
-}
-
-void EigenSolver::diag_subspace_kpt(Complex* Hs, double* eigvals, int N) {
-    char jobz = 'V', uplo = 'U';
-    int lwork = -1, info;
-    Complex work_query;
-    std::vector<double> rwork(std::max(1, 3 * N - 2));
-
-    zheev_(&jobz, &uplo, &N, Hs, &N, eigvals, &work_query, &lwork, rwork.data(), &info);
-
-    lwork = static_cast<int>(work_query.real());
-    std::vector<Complex> work(lwork);
-    zheev_(&jobz, &uplo, &N, Hs, &N, eigvals, work.data(), &lwork, rwork.data(), &info);
-
-    if (info != 0) {
-        std::fprintf(stderr, "zheev failed with info=%d, N=%d\n", info, N);
-        throw std::runtime_error("zheev failed in diag_subspace_kpt");
-    }
-}
-
-void EigenSolver::rotate_orbitals_kpt(Complex* X, const Complex* Q, int Nd_d, int Nband) {
-    std::vector<Complex> X_new(Nd_d * Nband);
-    char transN = 'N';
-    Complex one_z(1.0, 0.0), zero_z(0.0, 0.0);
-    zgemm_(&transN, &transN, &Nd_d, &Nband, &Nband,
-           &one_z, X, &Nd_d, Q, &Nband, &zero_z, X_new.data(), &Nd_d);
-    std::memcpy(X, X_new.data(), Nd_d * Nband * sizeof(Complex));
+void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
+                        int Nd_d, int Nband,
+                        double lambda_cutoff, double eigval_min, double eigval_max,
+                        int cheb_degree, int ld) {
+    solve_impl<double>(psi, eigvals, Veff, Nd_d, Nband,
+                        lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld);
 }
 
 void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
@@ -871,181 +779,52 @@ void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
                              double lambda_cutoff, double eigval_min, double eigval_max,
                              const Vec3& kpt_cart, const Vec3& cell_lengths,
                              int cheb_degree, int ld) {
-    if (ld == 0) ld = Nd_d;
-    double dV = domain_->global_grid().dV();
-    int Nband_loc = Nband;
+    solve_impl<Complex>(psi, eigvals, Veff, Nd_d, Nband,
+                         lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld,
+                         kpt_cart, cell_lengths);
+}
 
-    // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
-    std::vector<Complex> psi_packed;
-    Complex* psi_work = psi;
-    if (ld != Nd_d) {
-        psi_packed.resize(Nd_d * Nband_loc);
-        for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(Complex));
-        psi_work = psi_packed.data();
-    }
+// ===========================================================================
+// Complex (k-point) thin wrappers (used by spinor solver)
+// ===========================================================================
 
-    // Step 1: Chebyshev filter (each proc filters its local bands)
-    std::vector<Complex> Y(Nd_d * Nband_loc);
-    chebyshev_filter_kpt(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
-                         lambda_cutoff, eigval_min, eigval_max,
-                         kpt_cart, cell_lengths, cheb_degree);
+void EigenSolver::chebyshev_filter_kpt(const Complex* X, Complex* Y, const double* Veff,
+                                        int Nd_d, int Nband,
+                                        double lambda_cutoff, double eigval_min, double eigval_max,
+                                        const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                        int degree) {
+    chebyshev_filter_impl<Complex>(X, Y, Veff, Nd_d, Nband,
+                                   lambda_cutoff, eigval_min, eigval_max, degree,
+                                   kpt_cart, cell_lengths);
+}
 
-#ifdef USE_SCALAPACK
-    if (npband_ > 1) {
-        // Band-parallel path
-        orthogonalize_kpt_scalapack(Y.data(), Nd_d, Nband_loc, dV);
+void EigenSolver::orthogonalize_kpt(Complex* X, int Nd_d, int Nband, double dV) {
+    orthogonalize_impl<Complex>(X, Nd_d, Nband, dV);
+}
 
-        int N = Nband_global_;
-        std::vector<double> eigs_all(N);
-        project_hamiltonian_kpt_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV,
-                                          kpt_cart, cell_lengths);
+void EigenSolver::project_hamiltonian_kpt(const Complex* X, const double* Veff,
+                                           Complex* Hs, int Nd_d, int Nband, double dV,
+                                           const Vec3& kpt_cart, const Vec3& cell_lengths) {
+    project_hamiltonian_impl<Complex>(X, Veff, Hs, Nd_d, Nband, dV, kpt_cart, cell_lengths);
+}
 
-        rotate_orbitals_kpt_scalapack(Y.data(), Nd_d, Nband_loc);
+void EigenSolver::diag_subspace_kpt(Complex* Hs, double* eigvals, int N) {
+    diag_subspace_impl<Complex>(Hs, eigvals, N);
+}
 
-        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
-    } else
-#endif
-    {
-        // Serial path
-        orthogonalize_kpt(Y.data(), Nd_d, Nband_loc, dV);
-
-        std::vector<Complex> Hs(Nband_loc * Nband_loc);
-        project_hamiltonian_kpt(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV,
-                                kpt_cart, cell_lengths);
-
-        std::vector<double> eigs(Nband_loc);
-        diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
-
-        rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d, Nband_loc);
-
-        std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
-    }
-
-    // Unpack
-    if (ld != Nd_d) {
-        for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(Complex));
-    } else {
-        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(Complex));
-    }
-
-    int N_eig = (npband_ > 1) ? Nband_global_ : Nband_loc;
-    lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
+void EigenSolver::rotate_orbitals_kpt(Complex* X, const Complex* Q, int Nd_d, int Nband) {
+    rotate_orbitals_impl<Complex>(X, Q, Nd_d, Nband);
 }
 
 void EigenSolver::lanczos_bounds_kpt(const double* Veff, int Nd_d,
                                       const Vec3& kpt_cart, const Vec3& cell_lengths,
                                       double& eigval_min, double& eigval_max,
                                       double tol_lanczos, int max_iter) {
-    MPIComm self_comm(MPI_COMM_SELF);
-
-    std::vector<Complex> V_j(Nd_d), V_jm1(Nd_d), V_jp1(Nd_d);
-    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
-
-    // Initial random vector
-    int rank = 0;
-    std::srand(rank * 100 + 1);
-    for (int i = 0; i < Nd_d; ++i)
-        V_jm1[i] = Complex((double)std::rand() / RAND_MAX, (double)std::rand() / RAND_MAX);
-
-    // Normalize: ||v|| = sqrt(Re(<v,v>))
-    double norm2 = 0.0;
-    for (int i = 0; i < Nd_d; ++i)
-        norm2 += std::norm(V_jm1[i]);  // |z|^2
-    double vscal = 1.0 / std::sqrt(norm2);
-    for (int i = 0; i < Nd_d; ++i) V_jm1[i] *= vscal;
-
-    // H * v
-    H_->apply_kpt(V_jm1.data(), Veff, V_j.data(), 1, kpt_cart, cell_lengths);
-
-    // a[0] = Re(<V_jm1, V_j>)
-    Complex dot_val(0.0, 0.0);
-    for (int i = 0; i < Nd_d; ++i)
-        dot_val += std::conj(V_jm1[i]) * V_j[i];
-    a[0] = dot_val.real();
-
-    // V_j -= a[0] * V_jm1
-    for (int i = 0; i < Nd_d; ++i)
-        V_j[i] -= a[0] * V_jm1[i];
-
-    // b[0] = ||V_j||
-    norm2 = 0.0;
-    for (int i = 0; i < Nd_d; ++i)
-        norm2 += std::norm(V_j[i]);
-    b[0] = std::sqrt(norm2);
-
-    if (b[0] == 0.0) {
-        for (int i = 0; i < Nd_d; ++i)
-            V_j[i] = Complex(-1.0 + 2.0 * ((double)std::rand() / RAND_MAX),
-                             -1.0 + 2.0 * ((double)std::rand() / RAND_MAX));
-        dot_val = Complex(0.0, 0.0);
-        for (int i = 0; i < Nd_d; ++i)
-            dot_val += std::conj(V_j[i]) * V_jm1[i];
-        for (int i = 0; i < Nd_d; ++i)
-            V_j[i] -= dot_val * V_jm1[i];
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d; ++i)
-            norm2 += std::norm(V_j[i]);
-        b[0] = std::sqrt(norm2);
-    }
-
-    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
-    for (int i = 0; i < Nd_d; ++i) V_j[i] *= vscal;
-
-    eigval_min = 0.0;
-    eigval_max = 0.0;
-    double eigmin_pre = 0.0, eigmax_pre = 0.0;
-    double err_eigmin = tol_lanczos + 1.0;
-    double err_eigmax = tol_lanczos + 1.0;
-
-    int j = 0;
-    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
-        H_->apply_kpt(V_j.data(), Veff, V_jp1.data(), 1, kpt_cart, cell_lengths);
-
-        dot_val = Complex(0.0, 0.0);
-        for (int i = 0; i < Nd_d; ++i)
-            dot_val += std::conj(V_j[i]) * V_jp1[i];
-        a[j + 1] = dot_val.real();
-
-        for (int i = 0; i < Nd_d; ++i) {
-            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
-            V_jm1[i] = V_j[i];
-        }
-
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d; ++i)
-            norm2 += std::norm(V_jp1[i]);
-        b[j + 1] = std::sqrt(norm2);
-        if (b[j + 1] == 0.0) break;
-
-        vscal = 1.0 / b[j + 1];
-        for (int i = 0; i < Nd_d; ++i) V_j[i] = V_jp1[i] * vscal;
-
-        // Solve tridiagonal eigenvalue problem
-        int n = j + 2;
-        std::vector<double> d(n), e_vec(n);
-        for (int kk = 0; kk < n; ++kk) { d[kk] = a[kk]; e_vec[kk] = b[kk]; }
-
-        int info;
-        dsterf_(&n, d.data(), e_vec.data(), &info);
-        if (info == 0) {
-            eigval_min = d[0];
-            eigval_max = d[n - 1];
-        } else {
-            break;
-        }
-
-        err_eigmin = std::abs(eigval_min - eigmin_pre);
-        err_eigmax = std::abs(eigval_max - eigmax_pre);
-        eigmin_pre = eigval_min;
-        eigmax_pre = eigval_max;
-
-        j++;
-    }
-
-    eigval_max *= 1.01;
-    eigval_min -= 0.1;
+    auto matvec = [&](const Complex* x, Complex* y) {
+        H_->apply_kpt(x, Veff, y, 1, kpt_cart, cell_lengths);
+    };
+    lynx::lanczos_bounds<Complex>(matvec, Nd_d, eigval_min, eigval_max,
+                                   tol_lanczos, max_iter);
 }
 
 // ===========================================================================
@@ -1270,113 +1049,12 @@ void EigenSolver::lanczos_bounds_spinor_kpt(const double* Veff_spinor, int Nd_d,
                                               const Vec3& kpt_cart, const Vec3& cell_lengths,
                                               double& eigval_min, double& eigval_max,
                                               double tol_lanczos, int max_iter) {
-    int Nd_d_spinor = 2 * Nd_d;
-    MPIComm self_comm(MPI_COMM_SELF);
-
-    std::vector<Complex> V_j(Nd_d_spinor), V_jm1(Nd_d_spinor), V_jp1(Nd_d_spinor);
-    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
-
-    // Initial random vector
-    std::srand(1);
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        V_jm1[i] = Complex((double)std::rand() / RAND_MAX, (double)std::rand() / RAND_MAX);
-
-    // Normalize
-    double norm2 = 0.0;
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        norm2 += std::norm(V_jm1[i]);
-    double vscal = 1.0 / std::sqrt(norm2);
-    for (int i = 0; i < Nd_d_spinor; ++i) V_jm1[i] *= vscal;
-
-    // H * v
-    H_->apply_spinor_kpt(V_jm1.data(), Veff_spinor, V_j.data(), 1, Nd_d,
-                          kpt_cart, cell_lengths);
-
-    // a[0] = Re(<V_jm1, V_j>)
-    Complex dot_val(0.0);
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        dot_val += std::conj(V_jm1[i]) * V_j[i];
-    a[0] = dot_val.real();
-
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        V_j[i] -= a[0] * V_jm1[i];
-
-    norm2 = 0.0;
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        norm2 += std::norm(V_j[i]);
-    b[0] = std::sqrt(norm2);
-
-    if (b[0] == 0.0) {
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            V_j[i] = Complex(-1.0 + 2.0 * ((double)std::rand() / RAND_MAX),
-                             -1.0 + 2.0 * ((double)std::rand() / RAND_MAX));
-        dot_val = Complex(0.0);
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            dot_val += std::conj(V_j[i]) * V_jm1[i];
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            V_j[i] -= dot_val * V_jm1[i];
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            norm2 += std::norm(V_j[i]);
-        b[0] = std::sqrt(norm2);
-    }
-
-    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
-    for (int i = 0; i < Nd_d_spinor; ++i) V_j[i] *= vscal;
-
-    eigval_min = 0.0;
-    eigval_max = 0.0;
-    double eigmin_pre = 0.0, eigmax_pre = 0.0;
-    double err_eigmin = tol_lanczos + 1.0;
-    double err_eigmax = tol_lanczos + 1.0;
-
-    int j = 0;
-    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
-        H_->apply_spinor_kpt(V_j.data(), Veff_spinor, V_jp1.data(), 1, Nd_d,
-                              kpt_cart, cell_lengths);
-
-        dot_val = Complex(0.0);
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            dot_val += std::conj(V_j[i]) * V_jp1[i];
-        a[j + 1] = dot_val.real();
-
-        for (int i = 0; i < Nd_d_spinor; ++i) {
-            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
-            V_jm1[i] = V_j[i];
-        }
-
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            norm2 += std::norm(V_jp1[i]);
-        b[j + 1] = std::sqrt(norm2);
-        if (b[j + 1] == 0.0) break;
-
-        vscal = 1.0 / b[j + 1];
-        for (int i = 0; i < Nd_d_spinor; ++i) V_j[i] = V_jp1[i] * vscal;
-
-        int n = j + 2;
-        std::vector<double> d(n), e_vec(n);
-        for (int kk = 0; kk < n; ++kk) { d[kk] = a[kk]; e_vec[kk] = b[kk]; }
-
-        int info;
-        dsterf_(&n, d.data(), e_vec.data(), &info);
-        if (info == 0) {
-            eigval_min = d[0];
-            eigval_max = d[n - 1];
-        } else {
-            break;
-        }
-
-        err_eigmin = std::abs(eigval_min - eigmin_pre);
-        err_eigmax = std::abs(eigval_max - eigmax_pre);
-        eigmin_pre = eigval_min;
-        eigmax_pre = eigval_max;
-
-        j++;
-    }
-
-    eigval_max *= 1.01;
-    eigval_min -= 0.1;
+    int Nd_spinor = 2 * Nd_d;
+    auto matvec = [&](const Complex* x, Complex* y) {
+        H_->apply_spinor_kpt(x, Veff_spinor, y, 1, Nd_d, kpt_cart, cell_lengths);
+    };
+    lynx::lanczos_bounds<Complex>(matvec, Nd_spinor, eigval_min, eigval_max,
+                                   tol_lanczos, max_iter);
 }
 
 } // namespace lynx
