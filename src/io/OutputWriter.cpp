@@ -9,7 +9,7 @@ void OutputWriter::print_summary(const SystemConfig& config, const Lattice& latt
     if (world_rank != 0) return;
 
     std::printf("====================================================\n");
-    std::printf("              LYNX C++ (Phase 1)\n");
+    std::printf("              LYNX C++\n");
     std::printf("====================================================\n\n");
 
     std::printf("Lattice vectors (Bohr):\n");
