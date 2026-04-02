@@ -21,9 +21,7 @@ void VeffArrays::allocate(int Nd_d, int Nspin, XCType xc_type, bool is_soc) {
     }
 
     if (is_mgga_type(xc_type)) {
-        int tau_size = (Nspin == 2) ? 3 * Nd_d : Nd_d;
         int vtau_size = (Nspin == 2) ? 2 * Nd_d : Nd_d;
-        tau = NDArray<double>(tau_size);
         vtau = NDArray<double>(vtau_size);
     }
 }
@@ -81,7 +79,9 @@ void EffectivePotential::compute(const ElectronDensity& density,
                                   XCType xc_type,
                                   double exx_frac_scale,
                                   double poisson_tol,
-                                  VeffArrays& arrays) {
+                                  VeffArrays& arrays,
+                                  const double* tau,
+                                  bool tau_valid) {
     int Nd_d = domain_->Nd_d();
     int Nspin = Nspin_global_;
 
@@ -103,11 +103,11 @@ void EffectivePotential::compute(const ElectronDensity& density,
 
     // For the first Veff (before tau is computed from real wavefunctions),
     // SPARC uses PBE instead of SCAN (exchangeCorrelation.c line 64-68).
-    if (xc.is_mgga() && !arrays.tau_valid) {
+    if (xc.is_mgga() && !tau_valid) {
         xc.setup(XCType::GGA_PBE, *domain_, *grid_, gradient_, halo_);
     }
-    const double* tau_ptr = (xc.is_mgga() && arrays.tau_valid) ? arrays.tau.data() : nullptr;
-    double* vtau_ptr = (xc.is_mgga() && arrays.tau_valid) ? arrays.vtau.data() : nullptr;
+    const double* tau_ptr = (xc.is_mgga() && tau_valid) ? tau : nullptr;
+    double* vtau_ptr = (xc.is_mgga() && tau_valid) ? arrays.vtau.data() : nullptr;
 
     if (Nspin == 2) {
         // Spin-polarized: build rho_xc array [total | up | down] (3*Nd_d)
@@ -164,7 +164,7 @@ void EffectivePotential::compute(const ElectronDensity& density,
     }
 
     // 4. Set vtau on Hamiltonian for mGGA (only after tau has been computed)
-    if (is_mgga_type(xc_type) && arrays.tau_valid) {
+    if (is_mgga_type(xc_type) && tau_valid) {
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(arrays.vtau.data());
     } else if (is_mgga_type(xc_type)) {
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(nullptr);

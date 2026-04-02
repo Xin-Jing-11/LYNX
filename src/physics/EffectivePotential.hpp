@@ -25,10 +25,8 @@ struct VeffArrays {
     NDArray<double> exc;        // XC energy density (Nd_d)
     NDArray<double> phi;        // electrostatic potential (Nd_d)
     NDArray<double> Dxcdgrho;   // GGA: dExc/d(|grad rho|^2) (Nd_d * dxc_ncol)
-    NDArray<double> tau;        // kinetic energy density (mGGA) (Nd_d or 3*Nd_d for spin)
     NDArray<double> vtau;       // d(n*exc)/d(tau) (mGGA) (Nd_d or 2*Nd_d for spin)
     NDArray<double> Veff_spinor; // spinor Veff [V_uu|V_dd|Re(V_ud)|Im(V_ud)] (4*Nd_d)
-    bool tau_valid = false;     // true after first compute_tau() call
 
     // Allocate arrays for given system parameters
     void allocate(int Nd_d, int Nspin, XCType xc_type, bool is_soc);
@@ -62,7 +60,9 @@ public:
                  XCType xc_type,
                  double exx_frac_scale,
                  double poisson_tol,
-                 VeffArrays& arrays);
+                 VeffArrays& arrays,
+                 const double* tau = nullptr,
+                 bool tau_valid = false);
 
     // Compute spinor Veff from noncollinear density (rho, mx, my, mz).
     void compute_spinor(const ElectronDensity& density,

@@ -13,6 +13,7 @@
 #include "electronic/Wavefunction.hpp"
 #include "electronic/ElectronDensity.hpp"
 #include "electronic/Occupation.hpp"
+#include "electronic/KineticEnergyDensity.hpp"
 #include "xc/XCFunctional.hpp"
 #include "solvers/EigenSolver.hpp"
 #include "solvers/PoissonSolver.hpp"
@@ -111,7 +112,7 @@ public:
     const double* Veff() const { return arrays_.Veff.data(); }
     const double* Dxcdgrho() const { return arrays_.Dxcdgrho.data(); }
     const double* vtau() const { return arrays_.vtau.data(); }
-    const double* tau() const { return arrays_.tau.data(); }
+    const double* tau() const { return tau_.data(); }
 
 #ifdef USE_CUDA
     GPUSCFRunner* gpu_runner() { return gpu_runner_.get(); }
@@ -174,10 +175,8 @@ private:
     void mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
                         const double* rho_b, const double* rho_core, int Nelectron, SCFState& state);
 
-    // Compute kinetic energy density tau from wavefunctions
-    void compute_tau(const Wavefunction& wfn,
-                     const std::vector<double>& kpt_weights,
-                     int kpt_start, int band_start);
+    // Kinetic energy density (mGGA)
+    KineticEnergyDensity tau_;
 
 #ifdef USE_CUDA
     std::unique_ptr<GPUSCFRunner> gpu_runner_;
