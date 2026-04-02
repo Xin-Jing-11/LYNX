@@ -12,6 +12,7 @@
 #include "electronic/Wavefunction.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
+#include "core/LynxContext.hpp"
 
 #include <vector>
 
@@ -26,7 +27,23 @@ class Forces {
 public:
     Forces() = default;
 
-    // Compute all forces. Returns total forces [n_atom * 3].
+    /// Simplified compute using LynxContext for infrastructure.
+    std::vector<double> compute(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const double* phi,
+        const double* rho,
+        const double* Vloc,
+        const double* b,
+        const double* b_ref,
+        const double* Vxc,
+        const double* rho_core);
+
+    /// Legacy compute with explicit infrastructure parameters.
     std::vector<double> compute(
         const Wavefunction& wfn,
         const Crystal& crystal,

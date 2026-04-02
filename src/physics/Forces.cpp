@@ -14,6 +14,28 @@
 namespace lynx {
 
 std::vector<double> Forces::compute(
+    const LynxContext& ctx,
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomInfluence>& influence,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const double* phi,
+    const double* rho,
+    const double* Vloc,
+    const double* b,
+    const double* b_ref,
+    const double* Vxc,
+    const double* rho_core) {
+    std::vector<double> kpt_weights = ctx.kpoints().normalized_weights();
+    return compute(wfn, crystal, influence, nloc_influence, vnl,
+                   ctx.stencil(), ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
+                   phi, rho, Vloc, b, b_ref, Vxc, rho_core,
+                   kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
+                   &ctx.kpoints(), ctx.kpt_start(), ctx.band_start());
+}
+
+std::vector<double> Forces::compute(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,

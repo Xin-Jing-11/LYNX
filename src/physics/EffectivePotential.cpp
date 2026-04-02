@@ -26,6 +26,11 @@ void VeffArrays::allocate(int Nd_d, int Nspin, XCType xc_type, bool is_soc) {
     }
 }
 
+void EffectivePotential::setup(const LynxContext& ctx, const Hamiltonian& hamiltonian) {
+    setup(ctx.domain(), ctx.grid(), ctx.stencil(), ctx.laplacian(), ctx.gradient(),
+          hamiltonian, ctx.halo(), ctx.Nspin());
+}
+
 void EffectivePotential::setup(const Domain& domain,
                                 const FDGrid& grid,
                                 const FDStencil& stencil,

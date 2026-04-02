@@ -8,12 +8,8 @@
 #include <fstream>
 
 #include "io/InputParser.hpp"
-#include "core/Lattice.hpp"
-#include "core/FDGrid.hpp"
-#include "core/Domain.hpp"
-#include "operators/FDStencil.hpp"
-#include "operators/Laplacian.hpp"
-#include "operators/Gradient.hpp"
+#include "core/LynxContext.hpp"
+#include "core/ParameterDefaults.hpp"
 #include "operators/Hamiltonian.hpp"
 #include "operators/NonlocalProjector.hpp"
 #include "atoms/Crystal.hpp"
@@ -22,19 +18,11 @@
 #include "electronic/ElectronDensity.hpp"
 #include "electronic/Occupation.hpp"
 #include "xc/XCFunctional.hpp"
-#include "solvers/PoissonSolver.hpp"
-#include "solvers/EigenSolver.hpp"
-#include "solvers/Mixer.hpp"
 #include "physics/SCF.hpp"
 #include "physics/Energy.hpp"
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
 #include "physics/Electrostatics.hpp"
-#include "parallel/MPIComm.hpp"
-#include "parallel/HaloExchange.hpp"
-#include "parallel/Parallelization.hpp"
-#include "core/KPoints.hpp"
-#include "core/ParameterDefaults.hpp"
 
 using namespace lynx;
 
@@ -63,41 +51,17 @@ static DFTResult run_single_point(const std::string& json_file) {
     InputParser::resolve_pseudopotentials(config);
     InputParser::validate(config);
 
-    Lattice lattice(config.latvec, config.cell_type);
-    FDGrid grid(config.Nx, config.Ny, config.Nz, lattice,
-                config.bcx, config.bcy, config.bcz);
-    FDStencil stencil(config.fd_order, grid, lattice);
+    // Initialize infrastructure via LynxContext
+    auto& ctx = LynxContext::instance();
+    ctx.reset();  // allow re-use across test cases
+    ctx.initialize(config, MPI_COMM_WORLD);
 
-    // SOC detection
-    bool is_soc = (config.spin_type == SpinType::NonCollinear);
-    int Nspin = is_soc ? 1 : ((config.spin_type == SpinType::None) ? 1 : 2);
-    int Nspinor = is_soc ? 2 : 1;
-    if (is_soc) config.parallel.npspin = 1;
-
-    KPoints kpoints;
-    kpoints.generate(config.Kx, config.Ky, config.Kz, config.kpt_shift, lattice);
-    int Nkpts = kpoints.Nkpts();
-    bool is_kpt = !kpoints.is_gamma_only() || is_soc;
-
-    // Auto-detect parallelization (matching main.cpp logic)
-    int nproc; MPI_Comm_size(MPI_COMM_WORLD, &nproc);
-    if (is_soc) config.parallel.npspin = 1;
-    else if (Nspin == 2 && nproc >= 2 && config.parallel.npspin <= 1)
-        config.parallel.npspin = 2;
-    int nproc_after_spin = nproc / config.parallel.npspin;
-    if (config.parallel.npkpt <= 1 && Nkpts > 1 && nproc_after_spin > 1)
-        config.parallel.npkpt = std::min(nproc_after_spin, Nkpts);
-    int nproc_after_kpt = nproc_after_spin / std::max(1, config.parallel.npkpt);
-    if (config.parallel.npband <= 1 && nproc_after_kpt > 1)
-        config.parallel.npband = nproc_after_kpt;
-
-    Parallelization parallel(MPI_COMM_WORLD, config.parallel,
-                             grid, Nspin, Nkpts, config.Nstates);
-
-    const auto& domain = parallel.domain();
-    const auto& bandcomm = parallel.bandcomm();
-    const auto& kptcomm = parallel.kptcomm();
-    const auto& spincomm = parallel.spincomm();
+    const auto& lattice = ctx.lattice();
+    const auto& grid = ctx.grid();
+    const auto& domain = ctx.domain();
+    const auto& stencil = ctx.stencil();
+    int Nspin = ctx.Nspin();
+    bool is_soc = ctx.is_soc();
 
     // Load pseudopotentials and create Crystal
     std::vector<AtomType> atom_types;
@@ -172,20 +136,14 @@ static DFTResult run_single_point(const std::string& json_file) {
     elec.compute_Ec(Vloc.data(), Nd_d, grid.dV());
 
     // Operators
-    HaloExchange halo(domain, stencil.FDn());
-    Laplacian laplacian(stencil, domain);
-    Gradient gradient(stencil, domain);
-
     NonlocalProjector vnl;
     vnl.setup(crystal, nloc_influence, domain, grid);
     if (is_soc) vnl.setup_soc(crystal, nloc_influence, domain, grid);
 
     Hamiltonian hamiltonian;
-    hamiltonian.setup(stencil, domain, grid, halo, &vnl);
+    hamiltonian.setup(stencil, domain, grid, ctx.halo(), &vnl);
 
-    // SCF — all parameters already resolved by update_default above
-    int Nstates = config.Nstates;
-
+    // SCF setup using LynxContext
     SCFParams scf_params;
     scf_params.max_iter = config.max_scf_iter;
     scf_params.min_iter = config.min_scf_iter;
@@ -200,27 +158,16 @@ static DFTResult run_single_point(const std::string& json_file) {
     scf_params.poisson_tol = config.poisson_tol;
     scf_params.precond_tol = config.precond_tol;
 
-    int Nspin_local = parallel.Nspin_local();
-    int Nkpts_local = parallel.Nkpts_local();
-    int kpt_start = parallel.kpt_start();
-    int spin_start = parallel.spin_start();
-    int Nband_local = parallel.Nband_local();
-    int band_start = parallel.band_start();
-    const auto& kpt_bridge = parallel.kpt_bridge();
-    const auto& spin_bridge = parallel.spin_bridge();
-
     SCF scf;
-    scf.setup(grid, domain, stencil, laplacian, gradient, hamiltonian,
-              halo, &vnl, bandcomm, kpt_bridge, spin_bridge, scf_params,
-              Nspin, Nspin_local, spin_start, &kpoints, kpt_start,
-              Nstates, band_start);
+    scf.setup(ctx, hamiltonian, &vnl, scf_params);
 #ifdef USE_CUDA
     scf.set_gpu_data(crystal, nloc_influence, influence, elec);
 #endif
 
     Wavefunction wfn;
-    wfn.allocate(Nd_d, Nband_local, Nstates, Nspin_local, Nkpts_local,
-                 is_kpt, Nspinor);
+    wfn.allocate(Nd_d, ctx.Nband_local(), ctx.Nstates(),
+                 ctx.Nspin_local(), ctx.Nkpts_local(),
+                 ctx.is_kpt(), ctx.Nspinor());
 
     // Initialize density from atomic superposition
     {
@@ -228,7 +175,6 @@ static DFTResult run_single_point(const std::string& json_file) {
         elec.compute_atomic_density(crystal, influence, domain, grid,
                                     rho_at.data(), Nelectron);
 
-        // Compute initial magnetization from atom spin values (matches main.cpp)
         double* mag_ptr = nullptr;
         std::vector<double> mag_init;
         if (Nspin == 2) {
@@ -237,8 +183,7 @@ static DFTResult run_single_point(const std::string& json_file) {
             for (size_t it = 0; it < config.atom_types.size(); ++it) {
                 const auto& at_in = config.atom_types[it];
                 for (size_t ia = 0; ia < at_in.coords.size(); ++ia) {
-                    double atom_spin = 0.0;
-                    if (ia < at_in.spin.size()) atom_spin = at_in.spin[ia];
+                    double atom_spin = (ia < at_in.spin.size()) ? at_in.spin[ia] : 0.0;
                     total_spin += atom_spin;
                 }
             }
@@ -294,30 +239,24 @@ static DFTResult run_single_point(const std::string& json_file) {
         std::printf("  Eself+Ec= %.15e\n", scf.energy().Eself + scf.energy().Ec);
     }
 
-    // Forces
+    // Forces — use LynxContext-based overload
     if (config.print_forces) {
-        std::vector<double> kpt_weights = kpoints.normalized_weights();
         Forces forces;
-        result.forces = forces.compute(wfn, crystal, influence, nloc_influence, vnl,
-                                       stencil, gradient, halo, domain, grid,
+        result.forces = forces.compute(ctx, wfn, crystal, influence, nloc_influence, vnl,
                                        scf.phi(), scf.density().rho_total().data(),
                                        Vloc.data(),
                                        elec.pseudocharge().data(),
                                        elec.pseudocharge_ref().data(),
                                        scf.Vxc(),
-                                       has_nlcc ? rho_core.data() : nullptr,
-                                       kpt_weights, bandcomm, kpt_bridge, spin_bridge,
-                                       &kpoints, kpt_start, band_start);
+                                       has_nlcc ? rho_core.data() : nullptr);
     }
 
-    // Stress
+    // Stress — use LynxContext-based overload
     if (config.calc_stress || config.calc_pressure) {
-        std::vector<double> kpt_weights = kpoints.normalized_weights();
         Stress stress_calc;
         int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 : 1;
         const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
         const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
-        // Compute mGGA stress on GPU if available
         const double* gpu_mgga_ptr = nullptr;
         const double* gpu_dot_ptr = nullptr;
         std::array<double, 6> gpu_mgga_stress = {};
@@ -327,9 +266,7 @@ static DFTResult run_single_point(const std::string& json_file) {
             bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
                             config.xc == XCType::MGGA_RSCAN ||
                             config.xc == XCType::MGGA_R2SCAN);
-            // GPU mGGA stress only supports gamma-point (real psi).
-            // For k-point mode, let CPU compute it (with correct uvec_inv transformation).
-            if (is_mgga && scf.gpu_runner() && !is_kpt) {
+            if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
                 scf.gpu_runner()->compute_mgga_stress(wfn, domain, grid, Nspin_calc,
                                                        gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
                 gpu_mgga_ptr = gpu_mgga_stress.data();
@@ -337,8 +274,7 @@ static DFTResult run_single_point(const std::string& json_file) {
             }
         }
 #endif
-        result.stress = stress_calc.compute(wfn, crystal, influence, nloc_influence, vnl,
-                                            stencil, gradient, halo, domain, grid,
+        result.stress = stress_calc.compute(ctx, wfn, crystal, influence, nloc_influence, vnl,
                                             scf.phi(), scf.density().rho_total().data(),
                                             rho_up_ptr, rho_dn_ptr,
                                             Vloc.data(),
@@ -351,8 +287,6 @@ static DFTResult run_single_point(const std::string& json_file) {
                                             config.xc,
                                             Nspin_calc,
                                             has_nlcc ? rho_core.data() : nullptr,
-                                            kpt_weights, bandcomm, kpt_bridge, spin_bridge,
-                                            &kpoints, kpt_start, band_start,
                                             scf.vtau(), scf.tau(),
                                             gpu_mgga_ptr, gpu_dot_ptr);
         result.pressure = stress_calc.pressure();

@@ -155,6 +155,10 @@ EigenSolver::~EigenSolver() {
 #endif
 }
 
+void EigenSolver::setup(const LynxContext& ctx, const Hamiltonian& H) {
+    setup(H, ctx.halo(), ctx.domain(), ctx.scf_bandcomm(), ctx.Nstates());
+}
+
 void EigenSolver::setup(const Hamiltonian& H,
                          const HaloExchange& halo,
                          const Domain& domain,

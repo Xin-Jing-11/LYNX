@@ -12,6 +12,7 @@
 #include "electronic/ElectronDensity.hpp"
 #include "xc/XCFunctional.hpp"
 #include "solvers/PoissonSolver.hpp"
+#include "core/LynxContext.hpp"
 
 namespace lynx {
 
@@ -38,6 +39,10 @@ class EffectivePotential {
 public:
     EffectivePotential() = default;
 
+    /// Simplified setup using LynxContext.
+    void setup(const LynxContext& ctx, const Hamiltonian& hamiltonian);
+
+    /// Legacy setup with explicit parameters.
     void setup(const Domain& domain,
                const FDGrid& grid,
                const FDStencil& stencil,

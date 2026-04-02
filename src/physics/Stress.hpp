@@ -13,6 +13,7 @@
 #include "xc/XCFunctional.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
+#include "core/LynxContext.hpp"
 
 #include <vector>
 #include <array>
@@ -30,7 +31,35 @@ class Stress {
 public:
     Stress() = default;
 
-    // Compute full stress tensor. Returns 6-component Voigt stress in Ha/Bohr³.
+    /// Simplified compute using LynxContext for infrastructure.
+    std::array<double, 6> compute(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const double* phi,
+        const double* rho,
+        const double* rho_up,
+        const double* rho_dn,
+        const double* Vloc,
+        const double* b,
+        const double* b_ref,
+        const double* exc,
+        const double* Vxc,
+        const double* Dxcdgrho,
+        double Exc,
+        double Esc,
+        XCType xc_type,
+        int Nspin,
+        const double* rho_core,
+        const double* vtau = nullptr,
+        const double* tau = nullptr,
+        const double* gpu_mgga_psi_stress = nullptr,
+        const double* gpu_tau_vtau_dot = nullptr);
+
+    /// Legacy compute with explicit infrastructure parameters.
     std::array<double, 6> compute(
         const Wavefunction& wfn,
         const Crystal& crystal,

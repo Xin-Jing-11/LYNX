@@ -17,6 +17,20 @@ static bool is_mgga_type(XCType t) {
     return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
 }
 
+void SCF::setup(const LynxContext& ctx,
+                 const Hamiltonian& hamiltonian,
+                 const NonlocalProjector* vnl,
+                 const SCFParams& params) {
+    setup(ctx.grid(), ctx.domain(), ctx.stencil(),
+          ctx.laplacian(), ctx.gradient(),
+          hamiltonian, ctx.halo(), vnl,
+          ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
+          params,
+          ctx.Nspin(), ctx.Nspin_local(), ctx.spin_start(),
+          &ctx.kpoints(), ctx.kpt_start(),
+          ctx.Nstates(), ctx.band_start());
+}
+
 void SCF::setup(const FDGrid& grid,
                  const Domain& domain,
                  const FDStencil& stencil,

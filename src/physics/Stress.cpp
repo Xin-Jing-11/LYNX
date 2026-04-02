@@ -44,6 +44,42 @@ static void nonCart2Cart_grad_arrays(const Mat3& uvec_inv, double* gx, double* g
 }
 
 std::array<double, 6> Stress::compute(
+    const LynxContext& ctx,
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomInfluence>& influence,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const double* phi,
+    const double* rho,
+    const double* rho_up,
+    const double* rho_dn,
+    const double* Vloc,
+    const double* b,
+    const double* b_ref,
+    const double* exc,
+    const double* Vxc,
+    const double* Dxcdgrho,
+    double Exc,
+    double Esc,
+    XCType xc_type,
+    int Nspin,
+    const double* rho_core,
+    const double* vtau,
+    const double* tau,
+    const double* gpu_mgga_psi_stress,
+    const double* gpu_tau_vtau_dot) {
+    std::vector<double> kpt_weights = ctx.kpoints().normalized_weights();
+    return compute(wfn, crystal, influence, nloc_influence, vnl,
+                   ctx.stencil(), ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
+                   phi, rho, rho_up, rho_dn, Vloc, b, b_ref, exc, Vxc, Dxcdgrho,
+                   Exc, Esc, xc_type, Nspin, rho_core,
+                   kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
+                   &ctx.kpoints(), ctx.kpt_start(), ctx.band_start(),
+                   vtau, tau, gpu_mgga_psi_stress, gpu_tau_vtau_dot);
+}
+
+std::array<double, 6> Stress::compute(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,

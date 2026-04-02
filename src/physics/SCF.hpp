@@ -23,6 +23,7 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "io/InputParser.hpp"
+#include "core/LynxContext.hpp"
 
 #include <vector>
 #include <functional>
@@ -67,6 +68,13 @@ public:
     SCF(SCF&&) = default;
     SCF& operator=(SCF&&) = default;
 
+    /// Simplified setup using LynxContext for all infrastructure.
+    void setup(const LynxContext& ctx,
+               const Hamiltonian& hamiltonian,
+               const NonlocalProjector* vnl,
+               const SCFParams& params);
+
+    /// Legacy setup with explicit parameters (still supported).
     void setup(const FDGrid& grid,
                const Domain& domain,
                const FDStencil& stencil,
