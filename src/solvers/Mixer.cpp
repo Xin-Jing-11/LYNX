@@ -1,5 +1,5 @@
 #include "solvers/Mixer.hpp"
-#include "parallel/MPIComm.hpp"
+#include "core/NumericalMethods.hpp"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -13,35 +13,27 @@ void Mixer::setup(int Nd_d,
                    MixingPrecond precond_type,
                    int history_depth,
                    double mixing_param,
-                   const Laplacian* laplacian,
-                   const HaloExchange* halo,
-                   const FDGrid* grid) {
+                   Preconditioner* preconditioner) {
     Nd_d_ = Nd_d;
     var_ = var;
     precond_type_ = precond_type;
     m_ = history_depth;
     beta_ = mixing_param;
-    laplacian_ = laplacian;
-    halo_ = halo;
-    grid_ = grid;
-    if (grid) Nd_ = grid->Nd();
-
-    // Compute TOL_PRECOND = h_eff^2 * 1e-3 (reference: initialization.c:2655-2664)
-    if (grid) {
-        double dx = grid->dx(), dy = grid->dy(), dz = grid->dz();
-        double h_eff;
-        if (std::abs(dx - dy) < 1e-12 && std::abs(dy - dz) < 1e-12) {
-            h_eff = dx;
-        } else {
-            double dx2_inv = 1.0 / (dx * dx);
-            double dy2_inv = 1.0 / (dy * dy);
-            double dz2_inv = 1.0 / (dz * dz);
-            h_eff = std::sqrt(3.0 / (dx2_inv + dy2_inv + dz2_inv));
-        }
-        precond_tol_ = h_eff * h_eff * 1e-3;
-    }
+    preconditioner_ = preconditioner;
 
     reset();
+}
+
+void Mixer::set_density_constraint(int Nelectron, int Nd_global, double dV) {
+    density_constraint_ = true;
+    Nelectron_ = Nelectron;
+    Nd_ = Nd_global;
+    dV_ = dV;
+}
+
+void Mixer::set_potential_mean_shift(int Nd_global) {
+    potential_mean_shift_ = true;
+    Nd_ = Nd_global;
 }
 
 void Mixer::reset() {
@@ -53,84 +45,71 @@ void Mixer::reset() {
     F_.clear();
 }
 
-void Mixer::apply_kerker(const double* f, double amix, double* Pf) const {
-    if (!laplacian_ || !halo_) {
-        // No preconditioner available, just scale
-        for (int i = 0; i < Nd_d_; ++i)
-            Pf[i] = amix * f[i];
-        return;
+void Mixer::remove_mean(double* x, int ncol) {
+    veff_mean_.resize(ncol, 0.0);
+    for (int s = 0; s < ncol; ++s) {
+        double mean = 0;
+        for (int i = 0; i < Nd_d_; ++i) mean += x[s * Nd_d_ + i];
+        mean /= Nd_;
+        veff_mean_[s] = mean;
+        for (int i = 0; i < Nd_d_; ++i) x[s * Nd_d_ + i] -= mean;
     }
+}
 
-    int Nd_d = Nd_d_;
-    int nd_ex = halo_->nd_ex();
+void Mixer::restore_mean(double* x, int ncol) {
+    for (int s = 0; s < ncol; ++s) {
+        for (int i = 0; i < Nd_d_; ++i) {
+            x[s * Nd_d_ + i] += veff_mean_[s];
+        }
+    }
+}
 
-    // Reference: Kerker_precond
-    // Step 1: Compute Lf = (Lap - idiemac*kTF²) * f
-    // where Lap_vec_mult with c = -idiemac*kTF² does: Lap*f + c*f
-    constexpr double kTF = 1.0;        // PRECOND_KERKER_KTF
-    constexpr double idiemac = 0.1;    // PRECOND_KERKER_THRESH
+void Mixer::apply_density_constraint(double* x, int ncol) {
+    if (!density_constraint_) return;
 
-    std::vector<double> f_ex(nd_ex, 0.0);
-    halo_->execute(f, f_ex.data(), 1);
-
-    std::vector<double> Lf(Nd_d);
-    // Lf = Lap*f + (-idiemac*kTF²)*f = (Lap - idiemac*kTF²)*f
-    laplacian_->apply(f_ex.data(), Lf.data(), 1.0, -idiemac * kTF * kTF, 1);
-
-    // Step 2: Solve -(Lap - kTF²) * Pf = Lf
-    // i.e., (-Lap + kTF²) * Pf = -Lf  ... wait, reference uses:
-    //   AAR(pLYNX, res_fun, precond_fun, -lambda_TF^2, DMnd, Pf, Lf, ...)
-    // where res_fun computes: b + (Lap + c)*x = Lf + (Lap - kTF²)*x
-    // So residual = Lf - (-Lap + kTF²)*Pf, and we solve (-Lap + kTF²)*Pf = Lf
-    // Actually: res_fun = b + (Lap + c)*x where c = -kTF², so operator is (Lap - kTF²)
-    // We solve (Lap - kTF²)*Pf = -Lf  ... no.
-    // Let me re-check: AAR solves A*x = b where A*x = -(Lap + c)*x = -Lap*x - c*x
-    // with c = -kTF², A*x = -Lap*x + kTF²*x, and b = Lf
-    // Actually reference AAR: res = b - A*x, and the operator does b + (Lap+c)*x
-    // So it's solving: -(Lap + c)*x = b, i.e., (-Lap + kTF²)*x = Lf
-    // That means: (-Lap + kTF²)*Pf = Lf
-
-    auto op = [this, Nd_d](const double* x, double* Ax) {
-        int nd_ex = halo_->nd_ex();
-        std::vector<double> x_ex(nd_ex, 0.0);
-        halo_->execute(x, x_ex.data(), 1);
-        // (-Lap + kTF²)*x = -Lap*x + kTF²*x
-        laplacian_->apply(x_ex.data(), Ax, -1.0, kTF * kTF, 1);
-    };
-
-    // Jacobi preconditioner for the operator -(Lap + c) where c = -kTF²
-    // Reference: m_inv = (D2_coeff_x[0] + D2_coeff_y[0] + D2_coeff_z[0] + c)
-    //            m_inv = -1.0 / m_inv
-    //            f[i] = m_inv * r[i]
-    const auto& stencil = laplacian_->stencil();
-    double m_diag = stencil.D2_coeff_x()[0] + stencil.D2_coeff_y()[0]
-                  + stencil.D2_coeff_z()[0] + (-kTF * kTF);
-    double m_inv = (std::abs(m_diag) < 1e-14) ? 1.0 : (-1.0 / m_diag);
-
-    auto jacobi_precond = [m_inv, Nd_d](const double* r, double* z) {
-        for (int i = 0; i < Nd_d; ++i)
-            z[i] = m_inv * r[i];
-    };
-
-    // Initial guess: Pf = 0
-    std::memset(Pf, 0, Nd_d * sizeof(double));
-
-    // Reference uses omega=0.6, beta=0.6, m=7, p=6
-    AARParams params;
-    params.omega = 0.6;
-    params.beta = 0.6;
-    params.m = 7;
-    params.p = 6;
-    params.tol = precond_tol_;  // TOL_PRECOND = h_eff^2 * 1e-3
-    params.max_iter = 1000;
-
-    LinearSolver::PrecondFunc precond_fn = jacobi_precond;
-    MPIComm self_comm(MPI_COMM_SELF);
-    LinearSolver::aar(op, Lf.data(), Pf, Nd_d, params, self_comm, &precond_fn);
-
-    // Step 3: Scale by -amix (reference: Pf[i] *= -a)
-    for (int i = 0; i < Nd_d; ++i) {
-        Pf[i] *= -amix;
+    if (ncol == 2) {
+        // Spin-polarized: x = [total | magnetization]
+        // Unpack to up/dn, clamp, repack
+        for (int i = 0; i < Nd_d_; ++i) {
+            double rho_tot = x[i];
+            double mag = x[Nd_d_ + i];
+            double rho_up = 0.5 * (rho_tot + mag);
+            double rho_dn = 0.5 * (rho_tot - mag);
+            if (rho_up < 0.0) rho_up = 0.0;
+            if (rho_dn < 0.0) rho_dn = 0.0;
+            x[i] = rho_up + rho_dn;
+            x[Nd_d_ + i] = rho_up - rho_dn;
+        }
+        // Renormalize total density (column 0)
+        double rho_sum = 0.0;
+        for (int i = 0; i < Nd_d_; ++i) rho_sum += x[i];
+        double Ne_current = rho_sum * dV_;
+        if (Ne_current > 1e-10) {
+            double scale = static_cast<double>(Nelectron_) / Ne_current;
+            for (int i = 0; i < Nd_d_; ++i) {
+                // Scale both total and magnetization consistently
+                double rho_tot = x[i];
+                double mag = x[Nd_d_ + i];
+                double rho_up = 0.5 * (rho_tot + mag);
+                double rho_dn = 0.5 * (rho_tot - mag);
+                rho_up *= scale;
+                rho_dn *= scale;
+                x[i] = rho_up + rho_dn;
+                x[Nd_d_ + i] = rho_up - rho_dn;
+            }
+        }
+    } else {
+        // ncol==1 (non-spin) or ncol==4 (SOC): clamp and renormalize column 0
+        for (int i = 0; i < Nd_d_; ++i) {
+            if (x[i] < 0.0) x[i] = 0.0;
+        }
+        double rho_sum = 0.0;
+        for (int i = 0; i < Nd_d_; ++i) rho_sum += x[i];
+        double Ne_current = rho_sum * dV_;
+        if (Ne_current > 1e-10) {
+            double scale = static_cast<double>(Nelectron_) / Ne_current;
+            for (int i = 0; i < Nd_d_; ++i) x[i] *= scale;
+        }
     }
 }
 
@@ -142,6 +121,20 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
     // ncol: number of density columns (1 for non-spin, 3 for spin [total,up,down])
 
     int N = Nd_d * ncol;  // total vector length
+
+    // For potential mixing with mean-shift: work with zero-mean x_k and g_k,
+    // then restore g_k's mean to the result. Matches SPARC's flow exactly.
+    std::vector<double> g_k_shifted;
+    std::vector<double> xk_mean;
+    if (potential_mean_shift_ && var_ == MixingVariable::Potential) {
+        // Remove mean from x_k (saves to veff_mean_ temporarily)
+        remove_mean(x_k, ncol);
+        // Make a zero-mean copy of g_k, saving g_k's mean as the authoritative mean
+        g_k_shifted.resize(N);
+        std::memcpy(g_k_shifted.data(), g_k, N * sizeof(double));
+        remove_mean(g_k_shifted.data(), ncol);  // veff_mean_ now holds g_k's mean
+        g_k = g_k_shifted.data();
+    }
 
     // Allocate state on first call
     if (f_k_.empty()) {
@@ -210,39 +203,9 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
             }
         }
 
-        // Solve FtF * Gamma = Ftf via least squares (Gaussian elimination)
+        // Solve FtF * Gamma = Ftf via Gaussian elimination with partial pivoting
         std::vector<double> Gamma(cols, 0.0);
-        {
-            std::vector<double> A(FtF);
-            std::vector<double> b(Ftf);
-            for (int k = 0; k < cols; ++k) {
-                int pivot = k;
-                for (int i = k + 1; i < cols; ++i) {
-                    if (std::abs(A[i * cols + k]) > std::abs(A[pivot * cols + k]))
-                        pivot = i;
-                }
-                if (pivot != k) {
-                    for (int j = 0; j < cols; ++j)
-                        std::swap(A[k * cols + j], A[pivot * cols + j]);
-                    std::swap(b[k], b[pivot]);
-                }
-                double diag = A[k * cols + k];
-                if (std::abs(diag) < 1e-14) continue;
-                for (int i = k + 1; i < cols; ++i) {
-                    double factor = A[i * cols + k] / diag;
-                    for (int j = k + 1; j < cols; ++j)
-                        A[i * cols + j] -= factor * A[k * cols + j];
-                    b[i] -= factor * b[k];
-                }
-            }
-            for (int k = cols - 1; k >= 0; --k) {
-                if (std::abs(A[k * cols + k]) < 1e-14) continue;
-                Gamma[k] = b[k];
-                for (int j = k + 1; j < cols; ++j)
-                    Gamma[k] -= A[k * cols + j] * Gamma[j];
-                Gamma[k] /= A[k * cols + k];
-            }
-        }
+        gauss_solve(FtF.data(), Ftf.data(), Gamma.data(), cols);
 
         // x_wavg = x_k - R * Gamma
         std::memcpy(x_wavg.data(), x_k, N * sizeof(double));
@@ -270,18 +233,18 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
     }
 
     // Apply preconditioner to f_wavg -> Pf
-    // For potential mixing: Kerker on ALL columns (each spin channel independently)
-    // For density mixing: Kerker on column 0 (total density), none on magnetization
+    // For potential mixing: precondition ALL columns (each spin channel independently)
+    // For density mixing: precondition column 0 (total density), identity on magnetization
     std::vector<double> Pf(N);
-    if (precond_type_ == MixingPrecond::Kerker && laplacian_ && halo_) {
+    if (precond_type_ == MixingPrecond::Kerker && preconditioner_) {
         if (var_ == MixingVariable::Potential) {
             // Potential mixing: apply Kerker to each spin channel independently
             for (int c = 0; c < ncol; ++c) {
-                apply_kerker(f_wavg.data() + c * Nd_d_, amix, Pf.data() + c * Nd_d_);
+                preconditioner_->apply(f_wavg.data() + c * Nd_d_, Pf.data() + c * Nd_d_, Nd_d_, amix);
             }
         } else {
             // Density mixing: Kerker on column 0 (total density) only
-            apply_kerker(f_wavg.data(), amix, Pf.data());
+            preconditioner_->apply(f_wavg.data(), Pf.data(), Nd_d_, amix);
             // Columns 1+: no preconditioner (MixingPrecondMag default = none)
             for (int c = 1; c < ncol; ++c) {
                 for (int i = 0; i < Nd_d_; ++i)
@@ -300,6 +263,16 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
 
     for (int i = 0; i < N; ++i) {
         x_k[i] = x_wavg[i] + Pf[i];
+    }
+
+    // For potential mixing with mean-shift: restore mean to x_k
+    if (potential_mean_shift_ && var_ == MixingVariable::Potential) {
+        restore_mean(x_k, ncol);
+    }
+
+    // For density mixing: apply clamping + renormalization
+    if (density_constraint_ && var_ != MixingVariable::Potential) {
+        apply_density_constraint(x_k, ncol);
     }
 
     iter_++;

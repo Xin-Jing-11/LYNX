@@ -298,20 +298,9 @@ void HybridSCF::run_inner_scf(Wavefunction& wfn,
             break;
         }
 
-        // Mix density
+        // Mix density (clamping+renormalization handled by mixer)
         if (Nspin == 1) {
             mixer.mix(density.rho_total().data(), rho_new_fock.rho_total().data(), Nd_d);
-            double* rho_mix = density.rho_total().data();
-            for (int i = 0; i < Nd_d; ++i) if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
-            {
-                double rho_sum = 0.0;
-                for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
-                double Ne_current = rho_sum * grid.dV();
-                if (Ne_current > 1e-10) {
-                    double scale = static_cast<double>(Nelectron) / Ne_current;
-                    for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
-                }
-            }
             std::memcpy(density.rho(0).data(), density.rho_total().data(), Nd_d * sizeof(double));
         } else {
             // Spin-polarized mixing
@@ -337,18 +326,6 @@ void HybridSCF::run_inner_scf(Wavefunction& wfn,
                 double mag = dens_in[Nd_d + i];
                 rho_up[i] = 0.5 * (rho_tot[i] + mag);
                 rho_dn[i] = 0.5 * (rho_tot[i] - mag);
-                if (rho_up[i] < 0.0) rho_up[i] = 0.0;
-                if (rho_dn[i] < 0.0) rho_dn[i] = 0.0;
-                rho_tot[i] = rho_up[i] + rho_dn[i];
-            }
-            {
-                double rho_sum = 0.0;
-                for (int i = 0; i < Nd_d; ++i) rho_sum += rho_tot[i];
-                double Ne_current = rho_sum * grid.dV();
-                if (Ne_current > 1e-10) {
-                    double scale = static_cast<double>(Nelectron) / Ne_current;
-                    for (int i = 0; i < Nd_d; ++i) { rho_up[i] *= scale; rho_dn[i] *= scale; rho_tot[i] *= scale; }
-                }
             }
         }
 

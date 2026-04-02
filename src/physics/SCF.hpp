@@ -37,6 +37,8 @@ namespace lynx {
 class ExactExchange;  // forward declaration
 struct SCFState;      // forward declaration (defined in SCFInitializer.hpp)
 
+/// All fields must be fully resolved before passing to SCF.
+/// Call ParameterDefaults::update_default() in main.cpp after parsing to fill auto-defaults.
 struct SCFParams {
     int max_iter = 100;
     int min_iter = 2;
@@ -46,11 +48,12 @@ struct SCFParams {
     int mixing_history = 7;
     double mixing_param = 0.3;
     SmearingType smearing = SmearingType::GaussianSmearing;
-    double elec_temp = -1.0;    // K (auto: 0.2eV for Gaussian, 0.1eV for FD)
-    int cheb_degree = -1;       // auto: Mesh2ChebDegree(h_eff)
+    double elec_temp = 0.0;     // Electronic temperature in Kelvin (must be set before use)
+    int cheb_degree = 0;        // Chebyshev polynomial degree (must be set before use)
     int rho_trigger = 4;         // CheFSI passes before first density (from random guess)
     int nchefsi = 1;             // CheFSI passes per subsequent SCF iteration
-    double poisson_tol = -1.0;   // Default: computed as tol * 0.01
+    double poisson_tol = 0.0;    // Poisson solver tolerance (must be set before use)
+    double precond_tol = 0.0;    // Kerker preconditioner tolerance (must be set before use)
     bool print_eigen = false;
     EXXParams exx_params;     // exact exchange parameters (hybrid functionals)
 };

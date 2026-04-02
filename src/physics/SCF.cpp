@@ -2,6 +2,7 @@
 #include "physics/SCFInitializer.hpp"
 #include "physics/HybridSCF.hpp"
 #include "xc/ExactExchange.hpp"
+#include "solvers/KerkerPreconditioner.hpp"
 #include "core/constants.hpp"
 #include <cmath>
 #include <cstdio>
@@ -254,10 +255,23 @@ double SCF::run(Wavefunction& wfn,
 #endif
 
     // ===== 1. Initialize =====
+    // Setup preconditioner and mixer
+    std::unique_ptr<KerkerPreconditioner> kerker_precond;
+    if (params_.mixing_precond == MixingPrecond::Kerker) {
+        kerker_precond = std::make_unique<KerkerPreconditioner>(
+            laplacian_, halo_, grid_, 1.0, 0.1, params_.precond_tol);
+    }
     Mixer mixer;
     mixer.setup(Nd_d, params_.mixing_var, params_.mixing_precond,
                 params_.mixing_history, params_.mixing_param,
-                laplacian_, halo_, grid_);
+                kerker_precond.get());
+
+    bool use_potential_mixing = (params_.mixing_var == MixingVariable::Potential) && !is_soc_;
+    if (use_potential_mixing) {
+        mixer.set_potential_mean_shift(grid_->Nd());
+    } else {
+        mixer.set_density_constraint(Nelectron, grid_->Nd(), grid_->dV());
+    }
 
     EigenSolver eigsolver;
     eigsolver.setup(*hamiltonian_, *halo_, *domain_, *bandcomm_, wfn.Nband_global());
@@ -553,21 +567,11 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
     int Nspin = Nspin_global_;
 
     if (state.use_potential_mixing) {
-        for (int s = 0; s < Nspin; ++s) {
-            double mean = 0;
-            for (int i = 0; i < Nd_d; ++i) mean += state.Veff_out.data()[s*Nd_d + i];
-            mean /= grid_->Nd();
-            state.Veff_mean[s] = mean;
-            for (int i = 0; i < Nd_d; ++i) state.Veff_out.data()[s*Nd_d + i] -= mean;
-        }
-
+        // Mixer handles mean-shift internally via set_potential_mean_shift
         mixer.mix(state.Veff_mixed.data(), state.Veff_out.data(), Nd_d, Nspin);
 
-        for (int s = 0; s < Nspin; ++s) {
-            for (int i = 0; i < Nd_d; ++i) {
-                arrays_.Veff.data()[s*Nd_d + i] = state.Veff_mixed.data()[s*Nd_d + i] + state.Veff_mean[s];
-            }
-        }
+        // Copy mixed potential to arrays_.Veff for Hamiltonian
+        std::memcpy(arrays_.Veff.data(), state.Veff_mixed.data(), Nd_d * Nspin * sizeof(double));
     } else if (is_soc_) {
         // SOC: mix packed array [rho | mx | my | mz] (4*Nd_d)
         std::vector<double> dens_in(4 * Nd_d), dens_out(4 * Nd_d);
@@ -581,45 +585,21 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         std::memcpy(dens_out.data() + 2*Nd_d, rho_new.mag_y().data(), Nd_d * sizeof(double));
         std::memcpy(dens_out.data() + 3*Nd_d, rho_new.mag_z().data(), Nd_d * sizeof(double));
 
+        // Mixer handles clamping+renormalization of column 0 (density constraint)
         mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4);
 
-        double* rho_mix = density_.rho_total().data();
-        for (int i = 0; i < Nd_d; ++i) {
-            rho_mix[i] = dens_in[i];
-            if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
-        }
-        {
-            double rho_sum = 0.0;
-            for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
-            double Ne_current = rho_sum * grid_->dV();
-            if (Ne_current > 1e-10) {
-                double scale = static_cast<double>(Nelectron) / Ne_current;
-                for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
-            }
-        }
-        std::memcpy(density_.rho(0).data(), rho_mix, Nd_d * sizeof(double));
+        // Unpack back into density structure
+        std::memcpy(density_.rho_total().data(), dens_in.data(), Nd_d * sizeof(double));
+        std::memcpy(density_.rho(0).data(), dens_in.data(), Nd_d * sizeof(double));
         std::memcpy(density_.mag_x().data(), dens_in.data() + Nd_d, Nd_d * sizeof(double));
         std::memcpy(density_.mag_y().data(), dens_in.data() + 2*Nd_d, Nd_d * sizeof(double));
         std::memcpy(density_.mag_z().data(), dens_in.data() + 3*Nd_d, Nd_d * sizeof(double));
     } else if (Nspin == 1) {
+        // Mixer handles clamping+renormalization (density constraint)
         mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d);
-
-        double* rho_mix = density_.rho_total().data();
-        for (int i = 0; i < Nd_d; ++i) {
-            if (rho_mix[i] < 0.0) rho_mix[i] = 0.0;
-        }
-        {
-            double rho_sum = 0.0;
-            for (int i = 0; i < Nd_d; ++i) rho_sum += rho_mix[i];
-            double Ne_current = rho_sum * grid_->dV();
-            if (Ne_current > 1e-10) {
-                double scale = static_cast<double>(Nelectron) / Ne_current;
-                for (int i = 0; i < Nd_d; ++i) rho_mix[i] *= scale;
-            }
-        }
         std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
     } else {
-        // Spin-polarized density mixing
+        // Spin-polarized: mix packed array [total | magnetization] (2*Nd_d)
         std::vector<double> dens_in(2 * Nd_d), dens_out(2 * Nd_d);
 
         const double* rho_up_in = density_.rho(0).data();
@@ -636,8 +616,10 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
             dens_out[Nd_d + i] = rho_up_out[i] - rho_dn_out[i];
         }
 
+        // Mixer handles clamping+renormalization (density constraint for ncol==2)
         mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
 
+        // Unpack [total | magnetization] back to [up | down]
         double* rho_tot = density_.rho_total().data();
         double* rho_up = density_.rho(0).data();
         double* rho_dn = density_.rho(1).data();
@@ -646,25 +628,6 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
             double mag = dens_in[Nd_d + i];
             rho_up[i] = 0.5 * (rho_tot[i] + mag);
             rho_dn[i] = 0.5 * (rho_tot[i] - mag);
-        }
-
-        for (int i = 0; i < Nd_d; ++i) {
-            if (rho_up[i] < 0.0) rho_up[i] = 0.0;
-            if (rho_dn[i] < 0.0) rho_dn[i] = 0.0;
-            rho_tot[i] = rho_up[i] + rho_dn[i];
-        }
-        {
-            double rho_sum = 0.0;
-            for (int i = 0; i < Nd_d; ++i) rho_sum += rho_tot[i];
-            double Ne_current = rho_sum * grid_->dV();
-            if (Ne_current > 1e-10) {
-                double scale = static_cast<double>(Nelectron) / Ne_current;
-                for (int i = 0; i < Nd_d; ++i) {
-                    rho_up[i] *= scale;
-                    rho_dn[i] *= scale;
-                    rho_tot[i] *= scale;
-                }
-            }
         }
     }
 

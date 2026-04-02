@@ -1,4 +1,5 @@
 #include "electronic/Occupation.hpp"
+#include "core/NumericalMethods.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -75,64 +76,11 @@ double Occupation::find_fermi_level(const std::vector<double>& all_eigs,
         }
     }
 
-    // Brent's method
-    double c = a, fc = fa;
-    double d = b - a, e = d;
-    constexpr double tol = 1e-14;
-    constexpr int max_iter = 200;
-
-    for (int iter = 0; iter < max_iter; ++iter) {
-        if ((fb > 0 && fc > 0) || (fb < 0 && fc < 0)) {
-            c = a; fc = fa;
-            d = e = b - a;
-        }
-        if (std::abs(fc) < std::abs(fb)) {
-            a = b; b = c; c = a;
-            fa = fb; fb = fc; fc = fa;
-        }
-        double tol1 = 2.0 * std::numeric_limits<double>::epsilon() * std::abs(b) + 0.5 * tol;
-        double xm = 0.5 * (c - b);
-
-        if (std::abs(xm) <= tol1 || fb == 0.0) {
-            return b;
-        }
-
-        if (std::abs(e) >= tol1 && std::abs(fa) > std::abs(fb)) {
-            double s = fb / fa;
-            double p, q;
-            if (a == c) {
-                p = 2.0 * xm * s;
-                q = 1.0 - s;
-            } else {
-                q = fa / fc;
-                double r = fb / fc;
-                p = s * (2.0 * xm * q * (q - r) - (b - a) * (r - 1.0));
-                q = (q - 1.0) * (r - 1.0) * (s - 1.0);
-            }
-            if (p > 0) q = -q;
-            p = std::abs(p);
-            if (2.0 * p < std::min(3.0 * xm * q - std::abs(tol1 * q), std::abs(e * q))) {
-                e = d;
-                d = p / q;
-            } else {
-                d = xm;
-                e = d;
-            }
-        } else {
-            d = xm;
-            e = d;
-        }
-        a = b;
-        fa = fb;
-        if (std::abs(d) > tol1) {
-            b += d;
-        } else {
-            b += (xm >= 0) ? tol1 : -tol1;
-        }
-        fb = total_occupation(all_eigs, all_weights, b, beta, smearing) - Nelectron;
-    }
-
-    return b;
+    // Use generic Brent's root finder
+    auto occ_residual = [&](double Ef) {
+        return total_occupation(all_eigs, all_weights, Ef, beta, smearing) - Nelectron;
+    };
+    return brent_root(occ_residual, a, b, 1e-14, 200);
 }
 
 double Occupation::compute(Wavefunction& wfn,

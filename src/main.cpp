@@ -22,6 +22,7 @@
 #include "atoms/AtomType.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "physics/SCF.hpp"
+#include "core/ParameterDefaults.hpp"
 #include "physics/Energy.hpp"
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
@@ -200,6 +201,19 @@ int main(int argc, char** argv) {
         int Nelectron = (config.Nelectron > 0) ? config.Nelectron : total_Nelectron;
         int Natom = static_cast<int>(all_positions.size());
 
+        // ===== Resolve all auto-default parameters =====
+        // This is the ONE place where sentinel values (-1) get replaced with
+        // computed defaults. After this call, every parameter is valid.
+        lynx::ParameterDefaults::update_default(config, grid, Nelectron,
+                                              (Nspin == 2), is_soc);
+        if (rank == 0) {
+            double h_eff = lynx::ParameterDefaults::compute_h_eff(grid.dx(), grid.dy(), grid.dz());
+            std::printf("Parameters resolved: h_eff=%.6f, cheb_degree=%d, elec_temp=%.1f K, "
+                        "poisson_tol=%.2e, precond_tol=%.2e, Nstates=%d\n",
+                        h_eff, config.cheb_degree, config.elec_temp,
+                        config.poisson_tol, config.precond_tol, config.Nstates);
+        }
+
         lynx::Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
 
         if (rank == 0) {
@@ -282,15 +296,7 @@ int main(int argc, char** argv) {
         hamiltonian.setup(stencil, domain, grid, halo, &vnl);
 
         // ===== Setup SCF =====
-        int Nstates = config.Nstates;
-        if (Nstates <= 0) {
-            if (is_soc) {
-                // SOC: spinor holds both spin components, no /2
-                Nstates = Nelectron + 20;
-            } else {
-                Nstates = Nelectron / 2 + 10;
-            }
-        }
+        int Nstates = config.Nstates;  // already resolved by update_default
 
         lynx::SCFParams scf_params;
         scf_params.max_iter = config.max_scf_iter;
@@ -303,6 +309,8 @@ int main(int argc, char** argv) {
         scf_params.smearing = config.smearing;
         scf_params.elec_temp = config.elec_temp;
         scf_params.cheb_degree = config.cheb_degree;
+        scf_params.poisson_tol = config.poisson_tol;
+        scf_params.precond_tol = config.precond_tol;
         scf_params.rho_trigger = config.rho_trigger;
 
         lynx::SCF scf;

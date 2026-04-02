@@ -1,4 +1,5 @@
 #include "atoms/Pseudopotential.hpp"
+#include "core/NumericalMethods.hpp"
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -332,14 +333,21 @@ void Pseudopotential::load_psp8(const std::string& filename) {
 }
 
 void Pseudopotential::compute_splines() {
+    // Helper: compute spline derivatives using NumericalMethods
+    auto setup_deriv = [](const std::vector<double>& x, const std::vector<double>& y,
+                          std::vector<double>& yd) {
+        SplineData s = spline_setup(x, y);
+        yd = std::move(s.dydx);
+    };
+
     // Spline rVloc
-    spline_deriv(r_, rVloc_, rVloc_d_);
+    setup_deriv(r_, rVloc_, rVloc_d_);
 
     // Spline each projector
     for (int l = 0; l <= lmax_; ++l) {
         if (l == lloc_) continue;
         for (int p = 0; p < ppl_[l]; ++p) {
-            spline_deriv(r_, UdV_[l][p], UdV_d_[l][p]);
+            setup_deriv(r_, UdV_[l][p], UdV_d_[l][p]);
         }
     }
 
@@ -347,188 +355,56 @@ void Pseudopotential::compute_splines() {
     if (has_soc_) {
         for (int l = 1; l <= lmax_; ++l) {
             for (int p = 0; p < ppl_soc_[l]; ++p) {
-                spline_deriv(r_, UdV_soc_[l][p], UdV_soc_d_[l][p]);
+                setup_deriv(r_, UdV_soc_[l][p], UdV_soc_d_[l][p]);
             }
         }
     }
 
     // Spline isolated atom density if available
     if (!rho_iso_atom_.empty())
-        spline_deriv(r_, rho_iso_atom_, rho_iso_atom_d_);
+        setup_deriv(r_, rho_iso_atom_, rho_iso_atom_d_);
 
     // Spline core charge if available
     if (!rho_c_.empty())
-        spline_deriv(r_, rho_c_, rho_c_d_);
+        setup_deriv(r_, rho_c_, rho_c_d_);
 }
 
-// Compute first derivatives at node points using tridiagonal system
-// (matches reference LYNX getYD_gen)
+// Compute first derivatives at node points — delegates to NumericalMethods
 void Pseudopotential::spline_deriv(const std::vector<double>& x,
                                    const std::vector<double>& y,
                                    std::vector<double>& yd) {
-    int n = static_cast<int>(x.size());
-    yd.resize(n, 0.0);
-    if (n < 2) return;
-    if (n == 2) {
-        yd[0] = yd[1] = (y[1] - y[0]) / (x[1] - x[0]);
-        return;
-    }
-
-    // Build tridiagonal system for first derivatives
-    std::vector<double> A(n, 0.0), B(n, 0.0), C(n, 0.0);
-
-    // First row (non-standard BC matching reference getYD_gen)
-    double h0 = x[1] - x[0];
-    double h1 = x[2] - x[1];
-    double r0 = (y[1] - y[0]) / h0;
-    double r1 = (y[2] - y[1]) / h1;
-    B[0] = h1 * (h0 + h1);
-    C[0] = (h0 + h1) * (h0 + h1);
-    yd[0] = r0 * (3.0 * h0 * h1 + 2.0 * h1 * h1) + r1 * h0 * h0;
-
-    // Interior rows
-    for (int i = 1; i < n - 1; ++i) {
-        h0 = x[i] - x[i-1];
-        h1 = x[i+1] - x[i];
-        r0 = (y[i] - y[i-1]) / h0;
-        r1 = (y[i+1] - y[i]) / h1;
-        A[i] = h1;
-        B[i] = 2.0 * (h0 + h1);
-        C[i] = h0;
-        yd[i] = 3.0 * (r0 * h1 + r1 * h0);
-    }
-
-    // Last row
-    int i = n - 1;
-    h0 = x[i-1] - x[i-2];
-    h1 = x[i] - x[i-1];
-    r0 = (y[i-1] - y[i-2]) / h0;
-    r1 = (y[i] - y[i-1]) / h1;
-    A[i] = (h0 + h1) * (h0 + h1);
-    B[i] = h0 * (h0 + h1);
-    yd[i] = r0 * h1 * h1 + r1 * (3.0 * h0 * h1 + 2.0 * h0 * h0);
-
-    // Solve tridiagonal system (Gauss elimination)
-    // Forward sweep
-    std::vector<double> F(n, 0.0);
-    double b = B[0];
-    yd[0] = yd[0] / b;
-    for (int j = 1; j < n; ++j) {
-        F[j] = C[j-1] / b;
-        b = B[j] - A[j] * F[j];
-        if (std::abs(b) < 1e-30) b = 1e-30;
-        yd[j] = (yd[j] - A[j] * yd[j-1]) / b;
-    }
-    // Back substitution
-    for (int j = n - 2; j >= 0; --j) {
-        yd[j] -= F[j+1] * yd[j+1];
-    }
+    SplineData s = spline_setup(x, y);
+    yd = std::move(s.dydx);
 }
 
-// Hermite cubic spline interpolation (matches reference LYNX SplineInterp)
+// Hermite cubic spline interpolation — delegates to NumericalMethods
 void Pseudopotential::spline_interp(const std::vector<double>& r_grid,
                                     const std::vector<double>& f,
                                     const std::vector<double>& yd,
                                     const std::vector<double>& r_interp,
                                     std::vector<double>& f_interp) {
-    int n = static_cast<int>(r_grid.size());
+    // Build SplineData from pre-computed components (no re-computation of derivatives)
+    SplineData spline;
+    spline.x = r_grid;
+    spline.y = f;
+    spline.dydx = yd;
+
     int m = static_cast<int>(r_interp.size());
     f_interp.resize(m);
-
-    // Check if grid is uniform
-    bool is_uniform = true;
-    if (n > 2) {
-        double delta = r_grid[1] - r_grid[0];
-        for (int i = 2; i < n; ++i) {
-            if (std::abs((r_grid[i] - r_grid[i-1]) - delta) > 1e-10 * std::max(1.0, delta)) {
-                is_uniform = false;
-                break;
-            }
-        }
-    }
-
-    double delta_x = (n >= 2) ? (r_grid[1] - r_grid[0]) : 1.0;
-    double x1_max = r_grid[n - 1];
-
-    for (int i = 0; i < m; ++i) {
-        double r = r_interp[i];
-
-        // Clamp to grid range
-        if (r <= r_grid[0]) {
-            f_interp[i] = f[0];
-            continue;
-        }
-        if (r >= x1_max) {
-            f_interp[i] = f[n - 1];
-            continue;
-        }
-
-        // Find interval
-        int j;
-        if (is_uniform) {
-            j = static_cast<int>((r - r_grid[0]) / delta_x);
-            if (j >= n - 1) j = n - 2;
-        } else {
-            // Binary search
-            int lo = 0, hi = n - 1;
-            while (hi - lo > 1) {
-                int mid = (lo + hi) / 2;
-                if (r_grid[mid] > r) hi = mid;
-                else lo = mid;
-            }
-            j = lo;
-        }
-
-        // Hermite interpolation coefficients
-        double p1 = r_grid[j];
-        double p3 = r_grid[j + 1];
-        double dx = 1.0 / (p3 - p1);
-        double dy = (f[j + 1] - f[j]) * dx;
-        double A0 = f[j];
-        double A1 = yd[j];
-        double A2 = dx * (3.0 * dy - 2.0 * yd[j] - yd[j + 1]);
-        double A3 = dx * dx * (-2.0 * dy + yd[j] + yd[j + 1]);
-
-        // Horner's rule
-        double x = r - p1;
-        f_interp[i] = ((A3 * x + A2) * x + A1) * x + A0;
-    }
+    spline_eval_array(spline, r_interp.data(), f_interp.data(), m);
 }
 
 double Pseudopotential::spline_interp_single(const std::vector<double>& r_grid,
                                               const std::vector<double>& f,
                                               const std::vector<double>& yd,
                                               double r) {
-    int n = static_cast<int>(r_grid.size());
-    if (r <= r_grid[0]) return f[0];
-    if (r >= r_grid[n - 1]) return f[n - 1];
+    // Build SplineData from pre-computed components (no re-computation of derivatives)
+    SplineData spline;
+    spline.x = r_grid;
+    spline.y = f;
+    spline.dydx = yd;
 
-    // Find interval (uniform grid fast path)
-    double delta_x = r_grid[1] - r_grid[0];
-    int j = static_cast<int>((r - r_grid[0]) / delta_x);
-    if (j >= n - 1) j = n - 2;
-    // Verify uniform grid assumption; if not, binary search
-    if (r < r_grid[j] || r > r_grid[j + 1]) {
-        int lo = 0, hi = n - 1;
-        while (hi - lo > 1) {
-            int mid = (lo + hi) / 2;
-            if (r_grid[mid] > r) hi = mid;
-            else lo = mid;
-        }
-        j = lo;
-    }
-
-    double p1 = r_grid[j];
-    double p3 = r_grid[j + 1];
-    double dx = 1.0 / (p3 - p1);
-    double dy = (f[j + 1] - f[j]) * dx;
-    double A0 = f[j];
-    double A1 = yd[j];
-    double A2 = dx * (3.0 * dy - 2.0 * yd[j] - yd[j + 1]);
-    double A3 = dx * dx * (-2.0 * dy + yd[j] + yd[j + 1]);
-
-    double x = r - p1;
-    return ((A3 * x + A2) * x + A1) * x + A0;
+    return spline_eval(spline, r);
 }
 
 } // namespace lynx

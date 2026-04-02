@@ -11,38 +11,11 @@ static bool is_mgga_type(XCType t) {
 }
 
 void SCFInitializer::auto_compute_params(SCFParams& params, const FDGrid& grid, int rank_world) {
-    // Compute default Poisson tolerance
-    if (params.poisson_tol < 0.0)
-        params.poisson_tol = params.tol * 0.01;
-
-    // Auto-compute electronic temperature (reference: initialization.c:1914-1923)
-    if (params.elec_temp < 0.0) {
-        double smearing_eV = (params.smearing == SmearingType::GaussianSmearing) ? 0.2 : 0.1;
-        double beta_au = constants::EH / smearing_eV;
-        params.elec_temp = 1.0 / (constants::KB * beta_au);
-    }
-
-    // Auto-compute Chebyshev degree from mesh spacing
-    if (params.cheb_degree < 0) {
-        double dx = grid.dx(), dy = grid.dy(), dz = grid.dz();
-        double h_eff;
-        if (std::abs(dx - dy) < 1e-12 && std::abs(dy - dz) < 1e-12) {
-            h_eff = dx;
-        } else {
-            double dx2i = 1.0/(dx*dx), dy2i = 1.0/(dy*dy), dz2i = 1.0/(dz*dz);
-            h_eff = std::sqrt(3.0 / (dx2i + dy2i + dz2i));
-        }
-        double p3 = -700.0 / 3.0, p2 = 1240.0 / 3.0, p1 = -773.0 / 3.0, p0 = 1078.0 / 15.0;
-        double npl;
-        if (h_eff > 0.7) {
-            npl = 14.0;
-        } else {
-            npl = ((p3 * h_eff + p2) * h_eff + p1) * h_eff + p0;
-        }
-        params.cheb_degree = static_cast<int>(std::round(npl));
-        if (rank_world == 0)
-            std::printf("Auto Chebyshev degree: %d (h_eff=%.6f)\n", params.cheb_degree, h_eff);
-    }
+    // All parameters should be pre-resolved by ParameterDefaults::update_default() in main.cpp.
+    // This function is now a no-op; kept for backward compatibility with test code
+    // that may not call ParameterDefaults.
+    (void)grid;
+    (void)rank_world;
 }
 
 void SCFInitializer::init_density(ElectronDensity& density, int Nd_d, int Nelectron,
