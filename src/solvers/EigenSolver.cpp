@@ -156,21 +156,14 @@ EigenSolver::~EigenSolver() {
 }
 
 void EigenSolver::setup(const LynxContext& ctx, const Hamiltonian& H) {
-    setup(H, ctx.halo(), ctx.domain(), ctx.scf_bandcomm(), ctx.Nstates());
-}
-
-void EigenSolver::setup(const Hamiltonian& H,
-                         const HaloExchange& halo,
-                         const Domain& domain,
-                         const MPIComm& bandcomm,
-                         int Nband_global) {
     H_ = &H;
-    halo_ = &halo;
-    domain_ = &domain;
-    bandcomm_ = &bandcomm;
+    halo_ = &ctx.halo();
+    domain_ = &ctx.domain();
+    bandcomm_ = &ctx.scf_bandcomm();
 
-    npband_ = bandcomm.is_null() ? 1 : bandcomm.size();
-    band_rank_ = bandcomm.is_null() ? 0 : bandcomm.rank();
+    npband_ = bandcomm_->is_null() ? 1 : bandcomm_->size();
+    band_rank_ = bandcomm_->is_null() ? 0 : bandcomm_->rank();
+    int Nband_global = ctx.Nstates();
     Nband_global_ = (Nband_global > 0) ? Nband_global : 0;
 
 #ifdef USE_SCALAPACK

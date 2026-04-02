@@ -22,15 +22,8 @@ public:
     EigenSolver() = default;
     ~EigenSolver();
 
-    /// Simplified setup using LynxContext.
+    /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx, const Hamiltonian& H);
-
-    /// Legacy setup with explicit parameters.
-    void setup(const Hamiltonian& H,
-               const HaloExchange& halo,
-               const Domain& domain,
-               const MPIComm& bandcomm,
-               int Nband_global = 0);
 
     // --- Real (Gamma-point) interface ---
     // Nband here is the LOCAL band count (Nband_local).

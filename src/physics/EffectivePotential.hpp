@@ -39,18 +39,8 @@ class EffectivePotential {
 public:
     EffectivePotential() = default;
 
-    /// Simplified setup using LynxContext.
+    /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx, const Hamiltonian& hamiltonian);
-
-    /// Legacy setup with explicit parameters.
-    void setup(const Domain& domain,
-               const FDGrid& grid,
-               const FDStencil& stencil,
-               const Laplacian& laplacian,
-               const Gradient& gradient,
-               const Hamiltonian& hamiltonian,
-               const HaloExchange& halo,
-               int Nspin_global);
 
     // Compute Veff for standard (scalar) case.
     // density: electron density (with spin-resolved components)

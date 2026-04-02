@@ -46,6 +46,8 @@
 #include "physics/Stress.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
+#include "core/LynxContext.hpp"
+#include "core/ParameterDefaults.hpp"
 
 using namespace lynx;
 
@@ -844,7 +846,13 @@ int main(int argc, char** argv) {
     // ============================================================
     std::string json_file = "/home/xx/Desktop/LYNX/examples/BaTiO3.json";
     auto config = InputParser::parse(json_file);
+    InputParser::resolve_pseudopotentials(config);
     InputParser::validate(config);
+
+    // Initialize LynxContext for EigenSolver setup
+    auto& ctx = LynxContext::instance();
+    ctx.reset();
+    ctx.initialize(config, MPI_COMM_WORLD);
 
     Lattice lattice(config.latvec, config.cell_type);
     FDGrid grid(config.Nx, config.Ny, config.Nz, lattice,
@@ -1117,8 +1125,7 @@ int main(int argc, char** argv) {
     // Phase 5: Lanczos spectrum bounds (CPU — runs once)
     // ============================================================
     EigenSolver eigsolver;
-    MPIComm bandcomm(MPI_COMM_SELF);
-    eigsolver.setup(hamiltonian, halo, domain, bandcomm, Nband);
+    eigsolver.setup(ctx, hamiltonian);
 
     double eigval_min, eigval_max;
     {
@@ -1386,8 +1393,6 @@ int main(int argc, char** argv) {
         }
 
         // CPU reference: nonlocal forces
-        MPIComm comm_self(MPI_COMM_SELF);
-        std::vector<double> kpt_w = {1.0};
         Forces forces_cpu;
         std::vector<double> h_phi(Nd), h_rho_dl(Nd), h_Vxc_dl(Nd);
         CUDA_CHECK(cudaMemcpy(h_phi.data(), d_phi, Nd * sizeof(double), cudaMemcpyDeviceToHost));
@@ -1399,13 +1404,11 @@ int main(int argc, char** argv) {
         elec2.compute_pseudocharge(crystal, influence, domain, grid, stencil);
         elec2.compute_Vloc(crystal, influence, domain, grid, h_Vloc.data());
 
-        forces_cpu.compute(wfn, crystal, influence, nloc_influence, vnl,
-                           stencil, gradient, halo, domain, grid,
+        forces_cpu.compute(ctx, wfn, crystal, influence, nloc_influence, vnl,
                            h_phi.data(), h_rho_dl.data(), h_Vloc.data(),
                            elec.pseudocharge().data(), elec.pseudocharge().data(),
                            h_Vxc_dl.data(),
-                           has_nlcc ? rho_core.data() : nullptr,
-                           kpt_w, comm_self, comm_self, comm_self);
+                           has_nlcc ? rho_core.data() : nullptr);
 
         // CPU reference: stress
         Stress stress_cpu;
@@ -1426,15 +1429,13 @@ int main(int argc, char** argv) {
         std::vector<double> h_Vxc2(Nd), h_exc2(Nd), h_Dxcdgrho(Nd);
         xcfunc2.evaluate(rho_xc.data(), h_Vxc2.data(), h_exc2.data(), Nd, h_Dxcdgrho.data());
 
-        stress_cpu.compute(wfn, crystal, influence, nloc_influence, vnl,
-                           stencil, gradient, halo, domain, grid,
+        stress_cpu.compute(ctx, wfn, crystal, influence, nloc_influence, vnl,
                            h_phi.data(), h_rho_dl.data(), nullptr, nullptr,
                            h_Vloc.data(), elec.pseudocharge().data(), elec.pseudocharge().data(),
                            h_exc_dl.data(), h_Vxc_dl.data(), h_Dxcdgrho.data(),
                            Exc_sum, elec.Eself() + elec.Ec(),
                            XCType::GGA_PBE, 1,
-                           has_nlcc ? rho_core.data() : nullptr,
-                           kpt_w, comm_self, comm_self, comm_self);
+                           has_nlcc ? rho_core.data() : nullptr);
 
         // Compare nonlocal forces
         const auto& cpu_f_nloc = forces_cpu.nonlocal_forces();
@@ -1481,6 +1482,7 @@ int main(int argc, char** argv) {
     if (g_d_rho_core) cudaFree(g_d_rho_core);
     if (g_d_pseudocharge) cudaFree(g_d_pseudocharge);
     if (g_d_mix_fkm1) cudaFree(g_d_mix_fkm1);
+    LynxContext::instance().reset();
     MPI_Finalize();
     return converged ? 0 : 1;
 }

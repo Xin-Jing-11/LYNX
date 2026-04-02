@@ -27,26 +27,14 @@ void VeffArrays::allocate(int Nd_d, int Nspin, XCType xc_type, bool is_soc) {
 }
 
 void EffectivePotential::setup(const LynxContext& ctx, const Hamiltonian& hamiltonian) {
-    setup(ctx.domain(), ctx.grid(), ctx.stencil(), ctx.laplacian(), ctx.gradient(),
-          hamiltonian, ctx.halo(), ctx.Nspin());
-}
-
-void EffectivePotential::setup(const Domain& domain,
-                                const FDGrid& grid,
-                                const FDStencil& stencil,
-                                const Laplacian& laplacian,
-                                const Gradient& gradient,
-                                const Hamiltonian& hamiltonian,
-                                const HaloExchange& halo,
-                                int Nspin_global) {
-    domain_ = &domain;
-    grid_ = &grid;
-    stencil_ = &stencil;
-    laplacian_ = &laplacian;
-    gradient_ = &gradient;
+    domain_ = &ctx.domain();
+    grid_ = &ctx.grid();
+    stencil_ = &ctx.stencil();
+    laplacian_ = &ctx.laplacian();
+    gradient_ = &ctx.gradient();
     hamiltonian_ = &hamiltonian;
-    halo_ = &halo;
-    Nspin_global_ = Nspin_global;
+    halo_ = &ctx.halo();
+    Nspin_global_ = ctx.Nspin();
 }
 
 void EffectivePotential::solve_poisson(const double* rho, const double* rho_b,

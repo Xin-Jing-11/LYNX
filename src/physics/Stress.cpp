@@ -1,5 +1,8 @@
 #include "physics/Stress.hpp"
+#include "physics/SCF.hpp"
 #include "physics/Electrostatics.hpp"
+#include "xc/ExactExchange.hpp"
+#include "core/Driver.hpp"
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -70,52 +73,17 @@ std::array<double, 6> Stress::compute(
     const double* gpu_mgga_psi_stress,
     const double* gpu_tau_vtau_dot) {
     std::vector<double> kpt_weights = ctx.kpoints().normalized_weights();
-    return compute(wfn, crystal, influence, nloc_influence, vnl,
-                   ctx.stencil(), ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
-                   phi, rho, rho_up, rho_dn, Vloc, b, b_ref, exc, Vxc, Dxcdgrho,
-                   Exc, Esc, xc_type, Nspin, rho_core,
-                   kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
-                   &ctx.kpoints(), ctx.kpt_start(), ctx.band_start(),
-                   vtau, tau, gpu_mgga_psi_stress, gpu_tau_vtau_dot);
-}
-
-std::array<double, 6> Stress::compute(
-    const Wavefunction& wfn,
-    const Crystal& crystal,
-    const std::vector<AtomInfluence>& influence,
-    const std::vector<AtomNlocInfluence>& nloc_influence,
-    const NonlocalProjector& vnl,
-    const FDStencil& stencil,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
-    const double* phi,
-    const double* rho,
-    const double* rho_up,
-    const double* rho_dn,
-    const double* Vloc,
-    const double* b,
-    const double* b_ref,
-    const double* exc,
-    const double* Vxc,
-    const double* Dxcdgrho,
-    double Exc,
-    double Esc,
-    XCType xc_type,
-    int Nspin,
-    const double* rho_core,
-    const std::vector<double>& kpt_weights,
-    const MPIComm& bandcomm,
-    const MPIComm& kptcomm,
-    const MPIComm& spincomm,
-    const KPoints* kpoints,
-    int kpt_start,
-    int band_start,
-    const double* vtau,
-    const double* tau,
-    const double* gpu_mgga_psi_stress,
-    const double* gpu_tau_vtau_dot) {
+    const auto& stencil = ctx.stencil();
+    const auto& gradient = ctx.gradient();
+    const auto& halo = ctx.halo();
+    const auto& domain = ctx.domain();
+    const auto& grid = ctx.grid();
+    const auto& bandcomm = ctx.scf_bandcomm();
+    const auto& kptcomm = ctx.kpt_bridge();
+    const auto& spincomm = ctx.spin_bridge();
+    const KPoints* kpoints = &ctx.kpoints();
+    int kpt_start = ctx.kpt_start();
+    int band_start = ctx.band_start();
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -1607,6 +1575,77 @@ void Stress::compute_nonlocal_kinetic(
         stress_nl_[i] /= cell_measure_;
         stress_k_[i] /= cell_measure_;
         stress_soc_[i] /= cell_measure_;
+    }
+}
+
+void Stress::compute_and_print(const SystemConfig& config,
+                                const LynxContext& ctx,
+                                const Wavefunction& wfn,
+                                SCF& scf,
+                                const Crystal& crystal,
+                                const AtomSetup& atoms,
+                                const NonlocalProjector& vnl) {
+    int rank = ctx.rank();
+
+    int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 :
+                     (config.spin_type == SpinType::NonCollinear) ? 1 : 1;
+    const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
+    const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
+
+    // GPU mGGA stress
+    const double* gpu_mgga_ptr = nullptr;
+    const double* gpu_dot_ptr = nullptr;
+    std::array<double, 6> gpu_mgga_stress = {};
+    double gpu_tau_vtau_dot = 0.0;
+#ifdef USE_CUDA
+    {
+        bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
+                        config.xc == XCType::MGGA_RSCAN ||
+                        config.xc == XCType::MGGA_R2SCAN);
+        if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
+            scf.gpu_runner()->compute_mgga_stress(
+                wfn, ctx.domain(), ctx.grid(), Nspin_calc,
+                gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
+            gpu_mgga_ptr = gpu_mgga_stress.data();
+            gpu_dot_ptr = &gpu_tau_vtau_dot;
+        }
+    }
+#endif
+
+    Stress stress;
+    auto sigma = stress.compute(ctx, wfn, crystal,
+                                atoms.influence, atoms.nloc_influence, vnl,
+                                scf.phi(), scf.density().rho_total().data(),
+                                rho_up_ptr, rho_dn_ptr,
+                                atoms.Vloc.data(),
+                                atoms.elec.pseudocharge().data(),
+                                atoms.elec.pseudocharge_ref().data(),
+                                scf.exc(), scf.Vxc(),
+                                scf.Dxcdgrho(),
+                                scf.energy().Exc,
+                                atoms.elec.Eself() + atoms.elec.Ec(),
+                                config.xc,
+                                Nspin_calc,
+                                atoms.has_nlcc ? atoms.rho_core.data() : nullptr,
+                                scf.vtau(), scf.tau(),
+                                gpu_mgga_ptr, gpu_dot_ptr);
+
+    // Add EXX stress for hybrid functionals
+    if (is_hybrid(config.xc) && scf.exx().is_setup()) {
+        auto stress_exx = scf.exx().compute_stress(wfn, ctx.gradient(), ctx.halo(), ctx.domain());
+        for (int i = 0; i < 6; i++)
+            sigma[i] += stress_exx[i];
+    }
+
+    if (rank == 0) {
+        const double au_to_gpa = 29421.01569650548;
+        std::printf("\nStress tensor (GPa):\n");
+        std::printf("  sigma_xx = %14.6f  sigma_xy = %14.6f  sigma_xz = %14.6f\n",
+                    sigma[0] * au_to_gpa, sigma[1] * au_to_gpa, sigma[2] * au_to_gpa);
+        std::printf("  sigma_yy = %14.6f  sigma_yz = %14.6f  sigma_zz = %14.6f\n",
+                    sigma[3] * au_to_gpa, sigma[4] * au_to_gpa, sigma[5] * au_to_gpa);
+        std::printf("\nPressure: %.6f GPa\n",
+                    -(sigma[0] + sigma[3] + sigma[5]) / 3.0 * au_to_gpa);
     }
 }
 

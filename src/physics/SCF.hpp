@@ -58,6 +58,9 @@ struct SCFParams {
     double precond_tol = 0.0;    // Kerker preconditioner tolerance (must be set before use)
     bool print_eigen = false;
     EXXParams exx_params;     // exact exchange parameters (hybrid functionals)
+
+    /// Build SCFParams from a fully-resolved SystemConfig.
+    static SCFParams from_config(const SystemConfig& config);
 };
 
 class SCF {
@@ -68,32 +71,11 @@ public:
     SCF(SCF&&) = default;
     SCF& operator=(SCF&&) = default;
 
-    /// Simplified setup using LynxContext for all infrastructure.
+    /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx,
                const Hamiltonian& hamiltonian,
                const NonlocalProjector* vnl,
                const SCFParams& params);
-
-    /// Legacy setup with explicit parameters (still supported).
-    void setup(const FDGrid& grid,
-               const Domain& domain,
-               const FDStencil& stencil,
-               const Laplacian& laplacian,
-               const Gradient& gradient,
-               const Hamiltonian& hamiltonian,
-               const HaloExchange& halo,
-               const NonlocalProjector* vnl,
-               const MPIComm& bandcomm,
-               const MPIComm& kptcomm,
-               const MPIComm& spincomm,
-               const SCFParams& params,
-               int Nspin_global = 1,
-               int Nspin_local = 1,
-               int spin_start = 0,
-               const KPoints* kpoints = nullptr,
-               int kpt_start = 0,
-               int Nband_global = 0,
-               int band_start = 0);
 
     // Run self-consistent field loop
     // Returns total energy
@@ -127,6 +109,9 @@ public:
 #endif
 
 private:
+    // Context reference (non-owning, for sub-component setup)
+    const LynxContext* ctx_ = nullptr;
+
     // Operator references (non-owning)
     const FDGrid* grid_ = nullptr;
     const Domain* domain_ = nullptr;

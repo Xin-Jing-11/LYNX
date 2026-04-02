@@ -18,6 +18,7 @@
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 #include "core/constants.hpp"
+#include "core/LynxContext.hpp"
 #include "xc/GPUExactExchange.cuh"
 
 // CPU infrastructure for initial Veff computation
@@ -2684,7 +2685,7 @@ double GPUSCFRunner::run(
     // Lanczos spectrum bounds (CPU — runs once)
     // ============================================================
     EigenSolver eigsolver;
-    eigsolver.setup(hamiltonian, halo, domain, bandcomm, Nband);
+    eigsolver.setup(*ctx_, hamiltonian);
 
     // Per-spin spectral bounds
     std::vector<double> eigval_min_s(std::max(Nspin, 1), 0.0), eigval_max_s(std::max(Nspin, 1), 0.0);

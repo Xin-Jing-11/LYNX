@@ -17,62 +17,52 @@ static bool is_mgga_type(XCType t) {
     return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
 }
 
+SCFParams SCFParams::from_config(const SystemConfig& config) {
+    SCFParams p;
+    p.max_iter = config.max_scf_iter;
+    p.min_iter = config.min_scf_iter;
+    p.tol = config.scf_tol;
+    p.mixing_var = config.mixing_var;
+    p.mixing_precond = config.mixing_precond;
+    p.mixing_history = config.mixing_history;
+    p.mixing_param = config.mixing_param;
+    p.smearing = config.smearing;
+    p.elec_temp = config.elec_temp;
+    p.cheb_degree = config.cheb_degree;
+    p.poisson_tol = config.poisson_tol;
+    p.precond_tol = config.precond_tol;
+    p.rho_trigger = config.rho_trigger;
+    return p;
+}
+
 void SCF::setup(const LynxContext& ctx,
                  const Hamiltonian& hamiltonian,
                  const NonlocalProjector* vnl,
                  const SCFParams& params) {
-    setup(ctx.grid(), ctx.domain(), ctx.stencil(),
-          ctx.laplacian(), ctx.gradient(),
-          hamiltonian, ctx.halo(), vnl,
-          ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
-          params,
-          ctx.Nspin(), ctx.Nspin_local(), ctx.spin_start(),
-          &ctx.kpoints(), ctx.kpt_start(),
-          ctx.Nstates(), ctx.band_start());
-}
-
-void SCF::setup(const FDGrid& grid,
-                 const Domain& domain,
-                 const FDStencil& stencil,
-                 const Laplacian& laplacian,
-                 const Gradient& gradient,
-                 const Hamiltonian& hamiltonian,
-                 const HaloExchange& halo,
-                 const NonlocalProjector* vnl,
-                 const MPIComm& bandcomm,
-                 const MPIComm& kptcomm,
-                 const MPIComm& spincomm,
-                 const SCFParams& params,
-                 int Nspin_global,
-                 int Nspin_local,
-                 int spin_start,
-                 const KPoints* kpoints,
-                 int kpt_start,
-                 int Nband_global,
-                 int band_start) {
-    grid_ = &grid;
-    domain_ = &domain;
-    stencil_ = &stencil;
-    laplacian_ = &laplacian;
-    gradient_ = &gradient;
+    ctx_ = &ctx;
+    grid_ = &ctx.grid();
+    domain_ = &ctx.domain();
+    stencil_ = &ctx.stencil();
+    laplacian_ = &ctx.laplacian();
+    gradient_ = &ctx.gradient();
     hamiltonian_ = &hamiltonian;
-    halo_ = &halo;
+    halo_ = &ctx.halo();
     vnl_ = vnl;
-    bandcomm_ = &bandcomm;
-    kptcomm_ = &kptcomm;
-    spincomm_ = &spincomm;
+    bandcomm_ = &ctx.scf_bandcomm();
+    kptcomm_ = &ctx.kpt_bridge();
+    spincomm_ = &ctx.spin_bridge();
     params_ = params;
-    Nspin_global_ = Nspin_global;
-    Nspin_local_ = Nspin_local;
-    spin_start_ = spin_start;
-    kpoints_ = kpoints;
-    is_kpt_ = kpoints && !kpoints->is_gamma_only();
-    kpt_start_ = kpt_start;
-    Nband_global_ = Nband_global;
-    band_start_ = band_start;
+    Nspin_global_ = ctx.Nspin();
+    Nspin_local_ = ctx.Nspin_local();
+    spin_start_ = ctx.spin_start();
+    kpoints_ = &ctx.kpoints();
+    is_kpt_ = kpoints_ && !kpoints_->is_gamma_only();
+    kpt_start_ = ctx.kpt_start();
+    Nband_global_ = ctx.Nstates();
+    band_start_ = ctx.band_start();
 
     // Setup EffectivePotential builder
-    veff_builder_.setup(domain, grid, stencil, laplacian, gradient, hamiltonian, halo, Nspin_global);
+    veff_builder_.setup(ctx, hamiltonian);
 }
 
 void SCF::set_initial_density(const double* rho_init, int Nd_d,
@@ -152,7 +142,7 @@ double SCF::run(Wavefunction& wfn,
     }
 
     EigenSolver eigsolver;
-    eigsolver.setup(*hamiltonian_, *halo_, *domain_, *bandcomm_, wfn.Nband_global());
+    eigsolver.setup(*ctx_, *hamiltonian_);
 
     SCFState state = SCFInitializer::initialize(
         wfn, density_, arrays_, veff_builder_, params_,
@@ -589,6 +579,7 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
     bool is_gga_gpu = (xc_type_gpu == XCType::GGA_PBE || xc_type_gpu == XCType::GGA_PBEsol ||
                        xc_type_gpu == XCType::GGA_RPBE);
     gpu_runner_ = std::make_unique<GPUSCFRunner>();
+    gpu_runner_->set_context(*ctx_);
     double Etotal = gpu_runner_->run(
         wfn, params_, *grid_, *domain_, *stencil_,
         *hamiltonian_, *halo_, vnl_,

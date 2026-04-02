@@ -134,7 +134,12 @@ public:
     bool converged() const { return converged_; }
     double fermi_energy() const { return Ef_; }
 
+    /// Set LynxContext reference (must be called before run).
+    void set_context(const class LynxContext& ctx) { ctx_ = &ctx; }
+
 private:
+    const class LynxContext* ctx_ = nullptr;
+
     // Grid parameters
     int nx_ = 0, ny_ = 0, nz_ = 0, FDn_ = 0, Nd_ = 0;
     double dV_ = 0.0;

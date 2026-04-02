@@ -144,19 +144,7 @@ static DFTResult run_single_point(const std::string& json_file) {
     hamiltonian.setup(stencil, domain, grid, ctx.halo(), &vnl);
 
     // SCF setup using LynxContext
-    SCFParams scf_params;
-    scf_params.max_iter = config.max_scf_iter;
-    scf_params.min_iter = config.min_scf_iter;
-    scf_params.tol = config.scf_tol;
-    scf_params.mixing_var = config.mixing_var;
-    scf_params.mixing_precond = config.mixing_precond;
-    scf_params.mixing_history = config.mixing_history;
-    scf_params.mixing_param = config.mixing_param;
-    scf_params.smearing = config.smearing;
-    scf_params.elec_temp = config.elec_temp;
-    scf_params.cheb_degree = config.cheb_degree;
-    scf_params.poisson_tol = config.poisson_tol;
-    scf_params.precond_tol = config.precond_tol;
+    auto scf_params = SCFParams::from_config(config);
 
     SCF scf;
     scf.setup(ctx, hamiltonian, &vnl, scf_params);

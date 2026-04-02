@@ -18,6 +18,9 @@
 
 namespace lynx {
 
+struct AtomSetup;  // forward declaration (defined in Driver.hpp)
+class SCF;         // forward declaration
+
 // Force calculation matching reference LYNX.
 // Three contributions:
 //   F_local  = -∫ b_J · ∇φ dV + 0.5 * correction  (electrostatic + pseudocharge)
@@ -27,7 +30,7 @@ class Forces {
 public:
     Forces() = default;
 
-    /// Simplified compute using LynxContext for infrastructure.
+    /// Compute forces using LynxContext for infrastructure.
     std::vector<double> compute(
         const LynxContext& ctx,
         const Wavefunction& wfn,
@@ -43,32 +46,14 @@ public:
         const double* Vxc,
         const double* rho_core);
 
-    /// Legacy compute with explicit infrastructure parameters.
-    std::vector<double> compute(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomInfluence>& influence,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const FDStencil& stencil,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* phi,           // electrostatic potential
-        const double* rho,           // electron density
-        const double* Vloc,          // correction potential Vc = V_ref - V_J
-        const double* b,             // pseudocharge density
-        const double* b_ref,         // reference pseudocharge density
-        const double* Vxc,           // XC potential (for NLCC force)
-        const double* rho_core,      // NLCC core density (nullptr if no NLCC)
-        const std::vector<double>& kpt_weights,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr,
-        int kpt_start = 0,
-        int band_start = 0);
+    /// Compute forces and print results to stdout. High-level entry point for main.
+    static void compute_and_print(const SystemConfig& config,
+                                  const LynxContext& ctx,
+                                  const Wavefunction& wfn,
+                                  const SCF& scf,
+                                  const Crystal& crystal,
+                                  const struct AtomSetup& atoms,
+                                  const NonlocalProjector& vnl);
 
     const std::vector<double>& local_forces() const { return f_local_; }
     const std::vector<double>& nonlocal_forces() const { return f_nloc_; }

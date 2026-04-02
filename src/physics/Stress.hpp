@@ -20,6 +20,9 @@
 
 namespace lynx {
 
+struct AtomSetup;  // forward declaration (defined in Driver.hpp)
+class SCF;         // forward declaration
+
 // Stress tensor calculation matching reference LYNX.
 // Components: kinetic, XC, electrostatic (local), nonlocal.
 // Stored as 6-component Voigt notation:
@@ -31,7 +34,7 @@ class Stress {
 public:
     Stress() = default;
 
-    /// Simplified compute using LynxContext for infrastructure.
+    /// Compute stress using LynxContext for infrastructure.
     std::array<double, 6> compute(
         const LynxContext& ctx,
         const Wavefunction& wfn,
@@ -59,44 +62,14 @@ public:
         const double* gpu_mgga_psi_stress = nullptr,
         const double* gpu_tau_vtau_dot = nullptr);
 
-    /// Legacy compute with explicit infrastructure parameters.
-    std::array<double, 6> compute(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomInfluence>& influence,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const FDStencil& stencil,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* phi,           // electrostatic potential
-        const double* rho,           // total electron density
-        const double* rho_up,        // spin-up density (nullptr for non-spin)
-        const double* rho_dn,        // spin-down density (nullptr for non-spin)
-        const double* Vloc,          // correction potential Vc
-        const double* b,             // pseudocharge density
-        const double* b_ref,         // reference pseudocharge density
-        const double* exc,           // XC energy density
-        const double* Vxc,           // XC potential (Nspin*Nd_d for spin)
-        const double* Dxcdgrho,      // GGA: v2x+v2c (1*Nd_d non-spin, 3*Nd_d spin)
-        double Exc,                  // total XC energy
-        double Esc,                  // self + correction energy (Eself + Ec)
-        XCType xc_type,
-        int Nspin,                   // 1 or 2
-        const double* rho_core,      // NLCC core density (nullptr if no NLCC)
-        const std::vector<double>& kpt_weights,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr,
-        int kpt_start = 0,
-        int band_start = 0,
-        const double* vtau = nullptr,   // mGGA: d(nε)/dτ (Nd_d non-spin, 2*Nd_d spin)
-        const double* tau = nullptr,   // mGGA: kinetic energy density (Nd_d non-spin, 3*Nd_d spin)
-        const double* gpu_mgga_psi_stress = nullptr,  // [6] pre-computed mGGA psi stress from GPU
-        const double* gpu_tau_vtau_dot = nullptr);     // pre-computed ∫τ·vtau dV from GPU
+    /// Compute stress and print results to stdout. High-level entry point for main.
+    static void compute_and_print(const SystemConfig& config,
+                                  const LynxContext& ctx,
+                                  const Wavefunction& wfn,
+                                  SCF& scf,
+                                  const Crystal& crystal,
+                                  const AtomSetup& atoms,
+                                  const NonlocalProjector& vnl);
 
     double pressure() const;
 
