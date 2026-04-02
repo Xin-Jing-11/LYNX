@@ -58,6 +58,14 @@ public:
     int Nd_d() const { return Nd_d_; }
     int Nspin() const { return Nspin_; }
 
+    // Initialize with uniform density rho0 = Nelectron / cell_volume.
+    // Allocates and fills rho for scalar (non-SOC) case.
+    void initialize_uniform(int Nd_d, int Nspin, int Nelectron, double cell_volume);
+
+    // Initialize with uniform density for noncollinear/SOC case.
+    // Allocates noncollinear format with zero magnetization.
+    void initialize_uniform_noncollinear(int Nd_d, int Nelectron, double cell_volume);
+
     // Integrate rho over domain (returns total electron count)
     double integrate(double dV) const;
 

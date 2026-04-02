@@ -20,18 +20,15 @@ void SCFInitializer::auto_compute_params(SCFParams& params, const FDGrid& grid, 
 
 void SCFInitializer::init_density(ElectronDensity& density, int Nd_d, int Nelectron,
                                    int Nspin_global, const FDGrid& grid, bool is_soc) {
+    double volume = grid.Nd() * grid.dV();
+
     if (is_soc) {
         if (density.Nd_d() == 0) {
-            density.allocate_noncollinear(Nd_d);
-            double volume = grid.Nd() * grid.dV();
-            double rho0 = Nelectron / volume;
-            double* rho = density.rho_total().data();
-            for (int i = 0; i < Nd_d; ++i) rho[i] = rho0;
-            std::memcpy(density.rho(0).data(), rho, Nd_d * sizeof(double));
-            density.mag_x().zero();
-            density.mag_y().zero();
-            density.mag_z().zero();
+            // No density set — uniform init in noncollinear format
+            density.initialize_uniform_noncollinear(Nd_d, Nelectron, volume);
         } else if (density.mag_x().size() == 0) {
+            // Density was set (e.g., via set_initial_density) but not in noncollinear format
+            // Convert: keep total density, zero magnetization
             NDArray<double> rho_save = density.rho_total().clone();
             density.allocate_noncollinear(Nd_d);
             std::memcpy(density.rho_total().data(), rho_save.data(), Nd_d * sizeof(double));
@@ -42,23 +39,7 @@ void SCFInitializer::init_density(ElectronDensity& density, int Nd_d, int Nelect
         }
     } else {
         if (density.Nd_d() == 0) {
-            density.allocate(Nd_d, Nspin_global);
-            double volume = grid.Nd() * grid.dV();
-            double rho0 = Nelectron / volume;
-
-            if (Nspin_global == 1) {
-                double* rho = density.rho(0).data();
-                for (int i = 0; i < Nd_d; ++i) rho[i] = rho0;
-            } else {
-                double* rho_up = density.rho(0).data();
-                double* rho_dn = density.rho(1).data();
-                for (int i = 0; i < Nd_d; ++i) {
-                    rho_up[i] = rho0 * 0.5;
-                    rho_dn[i] = rho0 * 0.5;
-                }
-            }
-            double* rho_t = density.rho_total().data();
-            for (int i = 0; i < Nd_d; ++i) rho_t[i] = rho0;
+            density.initialize_uniform(Nd_d, Nspin_global, Nelectron, volume);
         }
     }
 }
