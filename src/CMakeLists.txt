@@ -7,6 +7,7 @@ add_library(lynx_core
     core/NumericalMethods.cpp
     core/ParameterDefaults.cpp
     core/LynxContext.cpp
+    core/Driver.cpp
     parallel/MPIComm.cpp
     parallel/Parallelization.cpp
     parallel/HaloExchange.cpp
