@@ -1,4 +1,5 @@
 #include "solvers/EigenSolver.hpp"
+#include "solvers/Lanczos.hpp"
 #include "solvers/LinearSolver.hpp"
 #include "parallel/Parallelization.hpp"
 #include <cmath>
@@ -35,8 +36,6 @@ extern "C" {
                 const double* alpha, const double* a, const int* lda,
                 const double* b, const int* ldb,
                 const double* beta, double* c, const int* ldc);
-    void dsterf_(const int* n, double* d, double* e, int* info);
-
     // Complex
     void zgemm_(const char* transa, const char* transb,
                 const int* m, const int* n, const int* k,
@@ -668,108 +667,11 @@ void EigenSolver::rotate_orbitals(double* X, const double* Q, int Nd_d, int Nban
 void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
                                   double& eigval_min, double& eigval_max,
                                   double tol_lanczos, int max_iter) {
-    // Reference: Lanczos() in eigenSolver.c
-    // Tolerance-based stopping: converges when both eigmin and eigmax errors < tol
-    int nd_ex = halo_->nd_ex();
-
-    std::vector<double> V_j(Nd_d), V_jm1(Nd_d), V_jp1(Nd_d);
-    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
-
-    // Local comm for dot products (no domain decomposition)
-    MPIComm self_comm(MPI_COMM_SELF);
-
-    // Initial vector: match reference srand(rank*100+1), range [0,1]
-    int rank = 0;  // single domain process
-    std::srand(rank * 100 + 1);
-    for (int i = 0; i < Nd_d; ++i)
-        V_jm1[i] = (double)std::rand() / RAND_MAX;
-
-    // Normalize
-    double vscal = std::sqrt(LinearSolver::dot(V_jm1.data(), V_jm1.data(), Nd_d, self_comm));
-    vscal = 1.0 / vscal;
-    for (int i = 0; i < Nd_d; ++i) V_jm1[i] *= vscal;
-
-    // First H*v
-    std::vector<double> v_ex(nd_ex);
-    halo_->execute(V_jm1.data(), v_ex.data(), 1);
-    H_->apply(V_jm1.data(), Veff, V_j.data(), 1);
-
-    // a[0] = <V_jm1, V_j>
-    a[0] = LinearSolver::dot(V_jm1.data(), V_j.data(), Nd_d, self_comm);
-
-    // Orthogonalize: V_j = V_j - a[0]*V_jm1
-    for (int i = 0; i < Nd_d; ++i)
-        V_j[i] -= a[0] * V_jm1[i];
-
-    // b[0] = ||V_j||
-    b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, self_comm));
-
-    if (b[0] == 0.0) {
-        // Invariant subspace; pick random vector orthogonal to V_jm1
-        for (int i = 0; i < Nd_d; ++i)
-            V_j[i] = -1.0 + 2.0 * ((double)std::rand() / RAND_MAX);
-        double dot_val = LinearSolver::dot(V_j.data(), V_jm1.data(), Nd_d, self_comm);
-        for (int i = 0; i < Nd_d; ++i) V_j[i] -= dot_val * V_jm1[i];
-        b[0] = std::sqrt(LinearSolver::dot(V_j.data(), V_j.data(), Nd_d, self_comm));
-    }
-
-    // Scale V_j
-    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
-    for (int i = 0; i < Nd_d; ++i) V_j[i] *= vscal;
-
-    eigval_min = 0.0;
-    eigval_max = 0.0;
-    double eigmin_pre = 0.0, eigmax_pre = 0.0;
-    double err_eigmin = tol_lanczos + 1.0;
-    double err_eigmax = tol_lanczos + 1.0;
-
-    int j = 0;
-    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
-        // V_{j+1} = H * V_j
-        halo_->execute(V_j.data(), v_ex.data(), 1);
-        H_->apply(V_j.data(), Veff, V_jp1.data(), 1);
-
-        // a[j+1] = <V_j, V_{j+1}>
-        a[j + 1] = LinearSolver::dot(V_j.data(), V_jp1.data(), Nd_d, self_comm);
-
-        // V_{j+1} = V_{j+1} - a[j+1]*V_j - b[j]*V_{j-1}
-        for (int i = 0; i < Nd_d; ++i) {
-            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
-            V_jm1[i] = V_j[i];
-        }
-
-        b[j + 1] = std::sqrt(LinearSolver::dot(V_jp1.data(), V_jp1.data(), Nd_d, self_comm));
-        if (b[j + 1] == 0.0) break;
-
-        vscal = 1.0 / b[j + 1];
-        for (int i = 0; i < Nd_d; ++i) V_j[i] = V_jp1[i] * vscal;
-
-        // Solve tridiagonal eigenvalue problem using dsterf_
-        // Copy a[0..j+1] into d, b[0..j+1] into e
-        int n = j + 2;
-        std::vector<double> d(n), e(n);
-        for (int k = 0; k < n; ++k) { d[k] = a[k]; e[k] = b[k]; }
-
-        int info;
-        dsterf_(&n, d.data(), e.data(), &info);
-        if (info == 0) {
-            eigval_min = d[0];
-            eigval_max = d[n - 1];
-        } else {
-            break;
-        }
-
-        err_eigmin = std::abs(eigval_min - eigmin_pre);
-        err_eigmax = std::abs(eigval_max - eigmax_pre);
-        eigmin_pre = eigval_min;
-        eigmax_pre = eigval_max;
-
-        j++;
-    }
-
-    // Apply safety margins (reference: eigmax *= 1.01, eigmin -= 0.1)
-    eigval_max *= 1.01;
-    eigval_min -= 0.1;
+    auto matvec = [&](const double* x, double* y) {
+        H_->apply(x, Veff, y, 1);
+    };
+    lynx::lanczos_bounds<double>(matvec, Nd_d, eigval_min, eigval_max,
+                                  tol_lanczos, max_iter);
 }
 
 void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
@@ -952,114 +854,11 @@ void EigenSolver::lanczos_bounds_kpt(const double* Veff, int Nd_d,
                                       const Vec3& kpt_cart, const Vec3& cell_lengths,
                                       double& eigval_min, double& eigval_max,
                                       double tol_lanczos, int max_iter) {
-    MPIComm self_comm(MPI_COMM_SELF);
-
-    std::vector<Complex> V_j(Nd_d), V_jm1(Nd_d), V_jp1(Nd_d);
-    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
-
-    // Initial random vector
-    int rank = 0;
-    std::srand(rank * 100 + 1);
-    for (int i = 0; i < Nd_d; ++i)
-        V_jm1[i] = Complex((double)std::rand() / RAND_MAX, (double)std::rand() / RAND_MAX);
-
-    // Normalize: ||v|| = sqrt(Re(<v,v>))
-    double norm2 = 0.0;
-    for (int i = 0; i < Nd_d; ++i)
-        norm2 += std::norm(V_jm1[i]);  // |z|^2
-    double vscal = 1.0 / std::sqrt(norm2);
-    for (int i = 0; i < Nd_d; ++i) V_jm1[i] *= vscal;
-
-    // H * v
-    H_->apply_kpt(V_jm1.data(), Veff, V_j.data(), 1, kpt_cart, cell_lengths);
-
-    // a[0] = Re(<V_jm1, V_j>)
-    Complex dot_val(0.0, 0.0);
-    for (int i = 0; i < Nd_d; ++i)
-        dot_val += std::conj(V_jm1[i]) * V_j[i];
-    a[0] = dot_val.real();
-
-    // V_j -= a[0] * V_jm1
-    for (int i = 0; i < Nd_d; ++i)
-        V_j[i] -= a[0] * V_jm1[i];
-
-    // b[0] = ||V_j||
-    norm2 = 0.0;
-    for (int i = 0; i < Nd_d; ++i)
-        norm2 += std::norm(V_j[i]);
-    b[0] = std::sqrt(norm2);
-
-    if (b[0] == 0.0) {
-        for (int i = 0; i < Nd_d; ++i)
-            V_j[i] = Complex(-1.0 + 2.0 * ((double)std::rand() / RAND_MAX),
-                             -1.0 + 2.0 * ((double)std::rand() / RAND_MAX));
-        dot_val = Complex(0.0, 0.0);
-        for (int i = 0; i < Nd_d; ++i)
-            dot_val += std::conj(V_j[i]) * V_jm1[i];
-        for (int i = 0; i < Nd_d; ++i)
-            V_j[i] -= dot_val * V_jm1[i];
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d; ++i)
-            norm2 += std::norm(V_j[i]);
-        b[0] = std::sqrt(norm2);
-    }
-
-    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
-    for (int i = 0; i < Nd_d; ++i) V_j[i] *= vscal;
-
-    eigval_min = 0.0;
-    eigval_max = 0.0;
-    double eigmin_pre = 0.0, eigmax_pre = 0.0;
-    double err_eigmin = tol_lanczos + 1.0;
-    double err_eigmax = tol_lanczos + 1.0;
-
-    int j = 0;
-    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
-        H_->apply_kpt(V_j.data(), Veff, V_jp1.data(), 1, kpt_cart, cell_lengths);
-
-        dot_val = Complex(0.0, 0.0);
-        for (int i = 0; i < Nd_d; ++i)
-            dot_val += std::conj(V_j[i]) * V_jp1[i];
-        a[j + 1] = dot_val.real();
-
-        for (int i = 0; i < Nd_d; ++i) {
-            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
-            V_jm1[i] = V_j[i];
-        }
-
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d; ++i)
-            norm2 += std::norm(V_jp1[i]);
-        b[j + 1] = std::sqrt(norm2);
-        if (b[j + 1] == 0.0) break;
-
-        vscal = 1.0 / b[j + 1];
-        for (int i = 0; i < Nd_d; ++i) V_j[i] = V_jp1[i] * vscal;
-
-        // Solve tridiagonal eigenvalue problem
-        int n = j + 2;
-        std::vector<double> d(n), e_vec(n);
-        for (int kk = 0; kk < n; ++kk) { d[kk] = a[kk]; e_vec[kk] = b[kk]; }
-
-        int info;
-        dsterf_(&n, d.data(), e_vec.data(), &info);
-        if (info == 0) {
-            eigval_min = d[0];
-            eigval_max = d[n - 1];
-        } else {
-            break;
-        }
-
-        err_eigmin = std::abs(eigval_min - eigmin_pre);
-        err_eigmax = std::abs(eigval_max - eigmax_pre);
-        eigmin_pre = eigval_min;
-        eigmax_pre = eigval_max;
-
-        j++;
-    }
-
-    eigval_max *= 1.01;
-    eigval_min -= 0.1;
+    auto matvec = [&](const Complex* x, Complex* y) {
+        H_->apply_kpt(x, Veff, y, 1, kpt_cart, cell_lengths);
+    };
+    lynx::lanczos_bounds<Complex>(matvec, Nd_d, eigval_min, eigval_max,
+                                   tol_lanczos, max_iter);
 }
 
 // ===========================================================================
@@ -1284,113 +1083,12 @@ void EigenSolver::lanczos_bounds_spinor_kpt(const double* Veff_spinor, int Nd_d,
                                               const Vec3& kpt_cart, const Vec3& cell_lengths,
                                               double& eigval_min, double& eigval_max,
                                               double tol_lanczos, int max_iter) {
-    int Nd_d_spinor = 2 * Nd_d;
-    MPIComm self_comm(MPI_COMM_SELF);
-
-    std::vector<Complex> V_j(Nd_d_spinor), V_jm1(Nd_d_spinor), V_jp1(Nd_d_spinor);
-    std::vector<double> a(max_iter + 1, 0.0), b(max_iter + 1, 0.0);
-
-    // Initial random vector
-    std::srand(1);
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        V_jm1[i] = Complex((double)std::rand() / RAND_MAX, (double)std::rand() / RAND_MAX);
-
-    // Normalize
-    double norm2 = 0.0;
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        norm2 += std::norm(V_jm1[i]);
-    double vscal = 1.0 / std::sqrt(norm2);
-    for (int i = 0; i < Nd_d_spinor; ++i) V_jm1[i] *= vscal;
-
-    // H * v
-    H_->apply_spinor_kpt(V_jm1.data(), Veff_spinor, V_j.data(), 1, Nd_d,
-                          kpt_cart, cell_lengths);
-
-    // a[0] = Re(<V_jm1, V_j>)
-    Complex dot_val(0.0);
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        dot_val += std::conj(V_jm1[i]) * V_j[i];
-    a[0] = dot_val.real();
-
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        V_j[i] -= a[0] * V_jm1[i];
-
-    norm2 = 0.0;
-    for (int i = 0; i < Nd_d_spinor; ++i)
-        norm2 += std::norm(V_j[i]);
-    b[0] = std::sqrt(norm2);
-
-    if (b[0] == 0.0) {
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            V_j[i] = Complex(-1.0 + 2.0 * ((double)std::rand() / RAND_MAX),
-                             -1.0 + 2.0 * ((double)std::rand() / RAND_MAX));
-        dot_val = Complex(0.0);
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            dot_val += std::conj(V_j[i]) * V_jm1[i];
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            V_j[i] -= dot_val * V_jm1[i];
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            norm2 += std::norm(V_j[i]);
-        b[0] = std::sqrt(norm2);
-    }
-
-    vscal = (b[0] == 0.0) ? 1.0 : (1.0 / b[0]);
-    for (int i = 0; i < Nd_d_spinor; ++i) V_j[i] *= vscal;
-
-    eigval_min = 0.0;
-    eigval_max = 0.0;
-    double eigmin_pre = 0.0, eigmax_pre = 0.0;
-    double err_eigmin = tol_lanczos + 1.0;
-    double err_eigmax = tol_lanczos + 1.0;
-
-    int j = 0;
-    while ((err_eigmin > tol_lanczos || err_eigmax > tol_lanczos) && j < max_iter) {
-        H_->apply_spinor_kpt(V_j.data(), Veff_spinor, V_jp1.data(), 1, Nd_d,
-                              kpt_cart, cell_lengths);
-
-        dot_val = Complex(0.0);
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            dot_val += std::conj(V_j[i]) * V_jp1[i];
-        a[j + 1] = dot_val.real();
-
-        for (int i = 0; i < Nd_d_spinor; ++i) {
-            V_jp1[i] -= (a[j + 1] * V_j[i] + b[j] * V_jm1[i]);
-            V_jm1[i] = V_j[i];
-        }
-
-        norm2 = 0.0;
-        for (int i = 0; i < Nd_d_spinor; ++i)
-            norm2 += std::norm(V_jp1[i]);
-        b[j + 1] = std::sqrt(norm2);
-        if (b[j + 1] == 0.0) break;
-
-        vscal = 1.0 / b[j + 1];
-        for (int i = 0; i < Nd_d_spinor; ++i) V_j[i] = V_jp1[i] * vscal;
-
-        int n = j + 2;
-        std::vector<double> d(n), e_vec(n);
-        for (int kk = 0; kk < n; ++kk) { d[kk] = a[kk]; e_vec[kk] = b[kk]; }
-
-        int info;
-        dsterf_(&n, d.data(), e_vec.data(), &info);
-        if (info == 0) {
-            eigval_min = d[0];
-            eigval_max = d[n - 1];
-        } else {
-            break;
-        }
-
-        err_eigmin = std::abs(eigval_min - eigmin_pre);
-        err_eigmax = std::abs(eigval_max - eigmax_pre);
-        eigmin_pre = eigval_min;
-        eigmax_pre = eigval_max;
-
-        j++;
-    }
-
-    eigval_max *= 1.01;
-    eigval_min -= 0.1;
+    int Nd_spinor = 2 * Nd_d;
+    auto matvec = [&](const Complex* x, Complex* y) {
+        H_->apply_spinor_kpt(x, Veff_spinor, y, 1, Nd_d, kpt_cart, cell_lengths);
+    };
+    lynx::lanczos_bounds<Complex>(matvec, Nd_spinor, eigval_min, eigval_max,
+                                   tol_lanczos, max_iter);
 }
 
 } // namespace lynx
