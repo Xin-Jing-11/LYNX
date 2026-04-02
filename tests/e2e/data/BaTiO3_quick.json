@@ -11,19 +11,19 @@
   "atoms": [
     {
       "element": "Ba",
-      "pseudo_file": "psps/56_Ba_10_2.8_2.8_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/SPMS/psp8/56_Ba_10_2.8_2.8_pbe_n_v1.0.psp8",
       "fractional": false,
       "coordinates": [[7.540463013371621, 7.248833728543416, 7.518607464589964]]
     },
     {
       "element": "Ti",
-      "pseudo_file": "psps/22_Ti_12_2.0_2.8_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/SPMS/psp8/22_Ti_12_2.0_2.8_pbe_n_v1.0.psp8",
       "fractional": false,
       "coordinates": [[3.725768164762889, 3.878328962888697, 3.426961342823767]]
     },
     {
       "element": "O",
-      "pseudo_file": "psps/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/SPMS/psp8/08_O_6_1.2_1.4_pbe_n_v1.0.psp8",
       "fractional": false,
       "coordinates": [
         [4.052740031589397, 7.190115020153727, 3.856885000727702],

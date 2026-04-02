@@ -15,7 +15,7 @@
   "atoms": [
     {
       "element": "Si",
-      "pseudo_file": "/home/xx/Desktop/dev_SPARC_GPU/psps/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8",
+      "pseudo_file": "psps/SPMS/psp8/14_Si_4_1.9_1.9_pbe_n_v1.0.psp8",
       "fractional": true,
       "coordinates": [
         [0.0, 0.0, 0.0],

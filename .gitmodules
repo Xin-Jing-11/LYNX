@@ -13,3 +13,6 @@
 [submodule "psps/ONCVPSP-LDA-FR-PDv0.4"]
 	path = psps/ONCVPSP-LDA-FR-PDv0.4
 	url = https://github.com/PseudoDojo/ONCVPSP-LDA-FR-PDv0.4.git
+[submodule "psps/SPMS"]
+	path = psps/SPMS
+	url = https://github.com/SPARC-X/SPMS-psps.git
