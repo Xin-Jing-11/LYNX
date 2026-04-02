@@ -121,6 +121,15 @@ private:
     int local_rows_Hs_ = 0, local_cols_Hs_ = 0;
 #endif
 
+    // --- Template-unified solve ---
+    template<typename T>
+    void solve_impl(T* psi, double* eigvals, const double* Veff,
+                    int Nd_d, int Nband,
+                    double lambda_cutoff, double eigval_min, double eigval_max,
+                    int cheb_degree, int ld,
+                    const Vec3& kpt_cart = {0,0,0},
+                    const Vec3& cell_lengths = {0,0,0});
+
     // --- Template-unified implementations ---
     template<typename T>
     void chebyshev_filter_impl(const T* X, T* Y, const double* Veff,

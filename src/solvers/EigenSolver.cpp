@@ -674,65 +674,75 @@ void EigenSolver::lanczos_bounds(const double* Veff, int Nd_d,
                                   tol_lanczos, max_iter);
 }
 
-void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
-                        int Nd_d, int Nband,
-                        double lambda_cutoff, double eigval_min, double eigval_max,
-                        int cheb_degree, int ld) {
+// ===========================================================================
+// Template-unified solve
+// ===========================================================================
+
+template<typename T>
+void EigenSolver::solve_impl(T* psi, double* eigvals, const double* Veff,
+                              int Nd_d, int Nband,
+                              double lambda_cutoff, double eigval_min, double eigval_max,
+                              int cheb_degree, int ld,
+                              const Vec3& kpt_cart, const Vec3& cell_lengths) {
     if (ld == 0) ld = Nd_d;
     double dV = domain_->global_grid().dV();
-
-    // Nband here is local band count. For serial case, Nband = Nband_global.
     int Nband_loc = Nband;
 
     // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
-    std::vector<double> psi_packed;
-    double* psi_work = psi;
+    std::vector<T> psi_packed;
+    T* psi_work = psi;
     if (ld != Nd_d) {
         psi_packed.resize(Nd_d * Nband_loc);
         for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(double));
+            std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(T));
         psi_work = psi_packed.data();
     }
 
-    // Step 1: Chebyshev filter (embarrassingly parallel — each proc filters its local bands)
-    std::vector<double> Y(Nd_d * Nband_loc);
-    chebyshev_filter(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
-                     lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    // Step 1: Chebyshev filter
+    std::vector<T> Y(Nd_d * Nband_loc);
+    chebyshev_filter_impl<T>(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
+                              lambda_cutoff, eigval_min, eigval_max, cheb_degree,
+                              kpt_cart, cell_lengths);
 
 #ifdef USE_SCALAPACK
     if (npband_ > 1) {
-        // Band-parallel path: distributed subspace operations
-        // Step 2: Orthogonalize (Allgather + Cholesky QR)
-        orthogonalize_scalapack(Y.data(), Nd_d, Nband_loc, dV);
+        // Band-parallel path
+        if constexpr (std::is_same_v<T, Complex>) {
+            orthogonalize_kpt_scalapack(Y.data(), Nd_d, Nband_loc, dV);
 
-        // Step 3+4: Project Hamiltonian + diagonalize (returns ALL eigenvalues)
-        int N = Nband_global_;
-        std::vector<double> eigs_all(N);
-        project_hamiltonian_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV);
+            int N = Nband_global_;
+            std::vector<double> eigs_all(N);
+            project_hamiltonian_kpt_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV,
+                                              kpt_cart, cell_lengths);
 
-        // Step 5: Rotate orbitals (Allgather + dgemm + extract local)
-        rotate_orbitals_scalapack(Y.data(), Nd_d, Nband_loc);
+            rotate_orbitals_kpt_scalapack(Y.data(), Nd_d, Nband_loc);
 
-        // Copy ALL eigenvalues (caller needs them all for Fermi level)
-        // eigvals buffer must be large enough for Nband_global
-        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+            std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+        } else {
+            orthogonalize_scalapack(Y.data(), Nd_d, Nband_loc, dV);
+
+            int N = Nband_global_;
+            std::vector<double> eigs_all(N);
+            project_hamiltonian_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV);
+
+            rotate_orbitals_scalapack(Y.data(), Nd_d, Nband_loc);
+
+            std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
+        }
     } else
 #endif
     {
-        // Serial path: standard LAPACK
-        // Step 2: Orthogonalize filtered vectors
-        orthogonalize(Y.data(), Nd_d, Nband_loc, dV);
+        // Serial path
+        orthogonalize_impl<T>(Y.data(), Nd_d, Nband_loc, dV);
 
-        // Step 3: Project Hamiltonian onto subspace
-        std::vector<double> Hs(Nband_loc * Nband_loc);
-        project_hamiltonian(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV);
+        std::vector<T> Hs(Nband_loc * Nband_loc);
+        project_hamiltonian_impl<T>(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV,
+                                     kpt_cart, cell_lengths);
 
-        // Step 4: Diagonalize subspace Hamiltonian
         std::vector<double> eigs(Nband_loc);
-        diag_subspace(Hs.data(), eigs.data(), Nband_loc);
+        diag_subspace_impl<T>(Hs.data(), eigs.data(), Nband_loc);
 
-        // Step 5: Rotate orbitals
-        rotate_orbitals(Y.data(), Hs.data(), Nd_d, Nband_loc);
+        rotate_orbitals_impl<T>(Y.data(), Hs.data(), Nd_d, Nband_loc);
 
         std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
     }
@@ -740,9 +750,9 @@ void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
     // Unpack from packed layout (stride=Nd_d) back to NDArray layout (stride=ld)
     if (ld != Nd_d) {
         for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(double));
+            std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(T));
     } else {
-        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(double));
+        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(T));
     }
 
     // Update lambda_cutoff: use last global eigenvalue
@@ -750,8 +760,32 @@ void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
     lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
 }
 
+// Explicit instantiations for solve_impl
+template void EigenSolver::solve_impl<double>(double*, double*, const double*,
+    int, int, double, double, double, int, int, const Vec3&, const Vec3&);
+template void EigenSolver::solve_impl<Complex>(Complex*, double*, const double*,
+    int, int, double, double, double, int, int, const Vec3&, const Vec3&);
+
+void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
+                        int Nd_d, int Nband,
+                        double lambda_cutoff, double eigval_min, double eigval_max,
+                        int cheb_degree, int ld) {
+    solve_impl<double>(psi, eigvals, Veff, Nd_d, Nband,
+                        lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld);
+}
+
+void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
+                             int Nd_d, int Nband,
+                             double lambda_cutoff, double eigval_min, double eigval_max,
+                             const Vec3& kpt_cart, const Vec3& cell_lengths,
+                             int cheb_degree, int ld) {
+    solve_impl<Complex>(psi, eigvals, Veff, Nd_d, Nband,
+                         lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld,
+                         kpt_cart, cell_lengths);
+}
+
 // ===========================================================================
-// Complex (k-point) implementations
+// Complex (k-point) thin wrappers (used by spinor solver)
 // ===========================================================================
 
 void EigenSolver::chebyshev_filter_kpt(const Complex* X, Complex* Y, const double* Veff,
@@ -780,74 +814,6 @@ void EigenSolver::diag_subspace_kpt(Complex* Hs, double* eigvals, int N) {
 
 void EigenSolver::rotate_orbitals_kpt(Complex* X, const Complex* Q, int Nd_d, int Nband) {
     rotate_orbitals_impl<Complex>(X, Q, Nd_d, Nband);
-}
-
-void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
-                             int Nd_d, int Nband,
-                             double lambda_cutoff, double eigval_min, double eigval_max,
-                             const Vec3& kpt_cart, const Vec3& cell_lengths,
-                             int cheb_degree, int ld) {
-    if (ld == 0) ld = Nd_d;
-    double dV = domain_->global_grid().dV();
-    int Nband_loc = Nband;
-
-    // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
-    std::vector<Complex> psi_packed;
-    Complex* psi_work = psi;
-    if (ld != Nd_d) {
-        psi_packed.resize(Nd_d * Nband_loc);
-        for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi_packed.data() + j * Nd_d, psi + j * ld, Nd_d * sizeof(Complex));
-        psi_work = psi_packed.data();
-    }
-
-    // Step 1: Chebyshev filter (each proc filters its local bands)
-    std::vector<Complex> Y(Nd_d * Nband_loc);
-    chebyshev_filter_kpt(psi_work, Y.data(), Veff, Nd_d, Nband_loc,
-                         lambda_cutoff, eigval_min, eigval_max,
-                         kpt_cart, cell_lengths, cheb_degree);
-
-#ifdef USE_SCALAPACK
-    if (npband_ > 1) {
-        // Band-parallel path
-        orthogonalize_kpt_scalapack(Y.data(), Nd_d, Nband_loc, dV);
-
-        int N = Nband_global_;
-        std::vector<double> eigs_all(N);
-        project_hamiltonian_kpt_scalapack(Y.data(), Veff, eigs_all.data(), Nd_d, Nband_loc, dV,
-                                          kpt_cart, cell_lengths);
-
-        rotate_orbitals_kpt_scalapack(Y.data(), Nd_d, Nband_loc);
-
-        std::memcpy(eigvals, eigs_all.data(), N * sizeof(double));
-    } else
-#endif
-    {
-        // Serial path
-        orthogonalize_kpt(Y.data(), Nd_d, Nband_loc, dV);
-
-        std::vector<Complex> Hs(Nband_loc * Nband_loc);
-        project_hamiltonian_kpt(Y.data(), Veff, Hs.data(), Nd_d, Nband_loc, dV,
-                                kpt_cart, cell_lengths);
-
-        std::vector<double> eigs(Nband_loc);
-        diag_subspace_kpt(Hs.data(), eigs.data(), Nband_loc);
-
-        rotate_orbitals_kpt(Y.data(), Hs.data(), Nd_d, Nband_loc);
-
-        std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
-    }
-
-    // Unpack
-    if (ld != Nd_d) {
-        for (int j = 0; j < Nband_loc; ++j)
-            std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(Complex));
-    } else {
-        std::memcpy(psi, Y.data(), Nd_d * Nband_loc * sizeof(Complex));
-    }
-
-    int N_eig = (npband_ > 1) ? Nband_global_ : Nband_loc;
-    lambda_cutoff_ = eigvals[N_eig - 1] + 0.1;
 }
 
 void EigenSolver::lanczos_bounds_kpt(const double* Veff, int Nd_d,
