@@ -47,11 +47,66 @@ double Energy::hartree_energy(const double* rho, const double* phi,
     return local_sum;
 }
 
+double Energy::xc_energy_with_nlcc(const double* rho, const double* rho_core,
+                                     const double* exc, int Nd_d, double dV) {
+    double local_sum = 0.0;
+    if (rho_core) {
+        for (int i = 0; i < Nd_d; ++i)
+            local_sum += (rho[i] + rho_core[i]) * exc[i];
+    } else {
+        for (int i = 0; i < Nd_d; ++i)
+            local_sum += rho[i] * exc[i];
+    }
+    return local_sum * dV;
+}
+
+double Energy::double_counting_correction(const ElectronDensity& density,
+                                            const double* Vxc, int Nd_d, double dV, int Nspin) {
+    double E2 = 0.0;
+    if (Nspin == 2) {
+        const double* rho_up = density.rho(0).data();
+        const double* rho_dn = density.rho(1).data();
+        for (int i = 0; i < Nd_d; ++i)
+            E2 += rho_up[i] * Vxc[i] + rho_dn[i] * Vxc[Nd_d + i];
+    } else {
+        const double* rho = density.rho_total().data();
+        for (int i = 0; i < Nd_d; ++i)
+            E2 += rho[i] * Vxc[i];
+    }
+    return E2 * dV;
+}
+
+double Energy::electrostatic_energy(const double* rho, const double* phi, int Nd_d, double dV) {
+    double E3 = 0.0;
+    for (int i = 0; i < Nd_d; ++i)
+        E3 += rho[i] * phi[i];
+    return E3 * dV;
+}
+
+double Energy::mgga_correction(const double* tau, const double* vtau,
+                                 int Nd_d, double dV, int Nspin) {
+    double E3_mgga = 0.0;
+    if (Nspin == 2) {
+        // tau layout: [up|dn|total], vtau layout: [up|dn]
+        for (int i = 0; i < 2 * Nd_d; ++i)
+            E3_mgga += tau[i] * vtau[i];
+    } else {
+        for (int i = 0; i < Nd_d; ++i)
+            E3_mgga += tau[i] * vtau[i];
+    }
+    return E3_mgga * dV;
+}
+
+double Energy::hartree_energy_with_pseudocharge(const double* rho, const double* rho_b,
+                                                  const double* phi, int Nd_d, double dV) {
+    if (!rho_b) return 0.0;
+    double local_sum = 0.0;
+    for (int i = 0; i < Nd_d; ++i)
+        local_sum += (rho[i] + rho_b[i]) * phi[i];
+    return 0.5 * local_sum * dV;
+}
+
 double Energy::total_energy(const EnergyComponents& E) {
-    // Etotal = Eband + Exc - E2 + Ehart + Eself + Ec + Entropy
-    // where E2 = integral rho * Vxc dV (double counting correction)
-    // and E3 = integral rho * phi dV (already in Eband via Veff)
-    // Simplified: Etotal = Eband - E2 + Ehart + Exc + Eself + Ec + Entropy
     return E.Etotal;
 }
 
@@ -86,74 +141,26 @@ EnergyComponents Energy::compute_all(
     // Use Nspin_global for spin_fac; fall back to wfn.Nspin() if not specified
     int Nspin = (Nspin_global > 0) ? Nspin_global : wfn.Nspin();
 
+    const double* rho = density.rho_total().data();
+
     // Band energy (local contribution — will be reduced below)
     E.Eband = band_energy(wfn, kpt_weights, Nspin, kpt_start);
 
-    // XC energy: Exc = ∫ (rho + rho_core) * exc dV (matching reference LYNX)
-    const double* rho = density.rho_total().data();
-    if (rho_core) {
-        // With NLCC, integrate (rho_valence + rho_core) * exc
-        double local_sum = 0.0;
-        for (int i = 0; i < Nd_d; ++i) {
-            local_sum += (rho[i] + rho_core[i]) * exc[i];
-        }
-        local_sum *= dV;
-        E.Exc = local_sum;
-    } else {
-        E.Exc = xc_energy(rho, exc, Nd_d, dV);
-    }
+    // XC energy: Exc = integral (rho + rho_core) * exc dV
+    E.Exc = xc_energy_with_nlcc(rho, rho_core, exc, Nd_d, dV);
 
-    // Double counting: E2 = integral sum_s rho_s * Vxc_s dV
-    // For non-spin: E2 = integral rho * Vxc dV
-    // For spin: E2 = integral (rho_up * Vxc_up + rho_dn * Vxc_dn) dV
-    double E2 = 0.0;
-    if (Nspin == 2) {
-        const double* rho_up = density.rho(0).data();
-        const double* rho_dn = density.rho(1).data();
-        for (int i = 0; i < Nd_d; ++i) {
-            E2 += rho_up[i] * Vxc[i] + rho_dn[i] * Vxc[Nd_d + i];
-        }
-    } else {
-        for (int i = 0; i < Nd_d; ++i) {
-            E2 += rho[i] * Vxc[i];
-        }
-    }
-    E2 *= dV;
+    // Double-counting correction: E2 = integral sum_s rho_s * Vxc_s dV
+    double E2 = double_counting_correction(density, Vxc, Nd_d, dV, Nspin);
 
     // Electrostatic energy: E3 = integral rho * phi dV
-    double E3 = 0.0;
-    for (int i = 0; i < Nd_d; ++i) {
-        E3 += rho[i] * phi[i];
-    }
-    E3 *= dV;
+    double E3 = electrostatic_energy(rho, phi, Nd_d, dV);
 
-    // mGGA double-counting correction: E3_mgga = integral tau * vtau dV
-    // (Eband already includes the vtau contribution through the Hamiltonian)
-    if (tau && vtau) {
-        double E3_mgga = 0.0;
-        if (Nspin == 2) {
-            // tau layout: [up|dn|total], vtau layout: [up|dn]
-            // E3_mgga = integral (tau_up * vtau_up + tau_dn * vtau_dn) dV
-            for (int i = 0; i < 2 * Nd_d; ++i) {
-                E3_mgga += tau[i] * vtau[i];
-            }
-        } else {
-            for (int i = 0; i < Nd_d; ++i) {
-                E3_mgga += tau[i] * vtau[i];
-            }
-        }
-        E3_mgga *= dV;
-        E3 += E3_mgga;
-    }
+    // mGGA double-counting correction (Eband already includes vtau via Hamiltonian)
+    if (tau && vtau)
+        E3 += mgga_correction(tau, vtau, Nd_d, dV, Nspin);
 
     // Hartree energy = 0.5 * integral (rho + b) * phi dV
-    E.Ehart = 0.0;
-    if (rho_b) {
-        for (int i = 0; i < Nd_d; ++i) {
-            E.Ehart += (rho[i] + rho_b[i]) * phi[i];
-        }
-        E.Ehart *= 0.5 * dV;
-    }
+    E.Ehart = hartree_energy_with_pseudocharge(rho, rho_b, phi, Nd_d, dV);
 
     // Entropy (local contribution)
     E.Entropy = Occupation::entropy(wfn, beta, smearing, kpt_weights, Ef, kpt_start, Nspin);
