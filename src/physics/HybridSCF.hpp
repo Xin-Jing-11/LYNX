@@ -12,8 +12,7 @@
 #include "solvers/Mixer.hpp"
 #include "physics/Energy.hpp"
 #include "physics/EffectivePotential.hpp"
-#include "physics/SCFInitializer.hpp"  // for SCFState
-#include "physics/SCF.hpp"             // for SCFParams
+#include "physics/SCF.hpp"  // for SCFState, SCFParams
 #include "parallel/MPIComm.hpp"
 
 #include <vector>
