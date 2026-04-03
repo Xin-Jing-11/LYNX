@@ -548,7 +548,7 @@ void compute_force_stress_gpu(
     // ----------------------------------------------------------------
     // Download results to host
     // ----------------------------------------------------------------
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Force
     if (total_nproj > 0) {
@@ -778,7 +778,7 @@ void compute_soc_force_gpu(
     std::vector<cuDoubleComplex> h_alpha_dn(alpha_elems);
     std::vector<double> h_occ(Nband);
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpyAsync(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaMemcpyAsync(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
@@ -847,7 +847,7 @@ void compute_soc_force_gpu(
         // 3d. Download beta to host
         std::vector<cuDoubleComplex> h_beta_up(alpha_elems);
         std::vector<cuDoubleComplex> h_beta_dn(alpha_elems);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         CUDA_CHECK(cudaMemcpyAsync(h_beta_up.data(), d_beta_up, alpha_bytes, cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaMemcpyAsync(h_beta_dn.data(), d_beta_dn, alpha_bytes, cudaMemcpyDeviceToHost, stream));
 
@@ -1063,7 +1063,7 @@ void compute_soc_stress_gpu(
     std::vector<cuDoubleComplex> h_alpha_dn(alpha_elems);
     std::vector<double> h_occ(Nband);
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpyAsync(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaMemcpyAsync(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
@@ -1147,7 +1147,7 @@ void compute_soc_stress_gpu(
         // Download gradients to host
         h_Dpsi_up_all[dim].resize((size_t)Nd_d * Nband);
         h_Dpsi_dn_all[dim].resize((size_t)Nd_d * Nband);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         CUDA_CHECK(cudaMemcpyAsync(h_Dpsi_up_all[dim].data(), d_Dpsi_up, psi_comp_bytes, cudaMemcpyDeviceToHost, stream));
         CUDA_CHECK(cudaMemcpyAsync(h_Dpsi_dn_all[dim].data(), d_Dpsi_dn, psi_comp_bytes, cudaMemcpyDeviceToHost, stream));
     }
@@ -1569,7 +1569,7 @@ void compute_mgga_stress_gpu(
     }
 
     // Download results
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaMemcpyAsync(h_stress_mgga, d_smgga, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
     double dot_val = 0.0;

@@ -445,7 +445,7 @@ void soc_apply_z_gpu(
             Nd_d, ncol, ncol, 0, dV, n_influence);
     }
 
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 
     // 3. Launch scatter kernel: one block per influence atom
     //    The scatter kernel uses the same bloch_fac array as the gather kernel
@@ -469,7 +469,7 @@ void soc_apply_z_gpu(
             Nd_d, ncol, ncol, 0, n_influence);
     }
 
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 }
 
 
@@ -492,7 +492,7 @@ void spinor_density_gpu(
         d_psi, d_occ, d_rho, d_mag_x, d_mag_y, d_mag_z,
         Nd_d, Nband, weight);
 
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 }
 
 

@@ -2058,7 +2058,7 @@ int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
     // RHS = 4*pi*(rho + pseudocharge)
     poisson_rhs_kernel<<<grid_sz, bs, 0, stream>>>(d_rho, d_pseudocharge_, d_rhs,
                                          4.0 * constants::PI, Nd);
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
     // Mean-subtract RHS
     double rhs_mean = gpu_sum(d_rhs, Nd) / Nd;
@@ -2081,7 +2081,7 @@ int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
     sp.restore(sp_cp);
 
     // Mean-subtract phi
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     double phi_mean = gpu_sum(d_phi, Nd) / Nd;
     mean_subtract_kernel<<<grid_sz, bs, 0, stream>>>(d_phi, phi_mean, Nd);
 
@@ -2138,7 +2138,7 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
         std::vector<double> h_FtF(cols * cols);
         std::vector<double> h_Ftf(cols);
 
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         for (int ii = 0; ii < cols; ii++) {
             double* Fi = d_F + ii * Nd;
             cublasDdot(ctx.cublas, Nd, Fi, 1, d_fk, 1, &h_Ftf[ii]);
@@ -2836,10 +2836,10 @@ double GPUSCFRunner::run(
             std::vector<double> h_all(2 * Nd_spinor * Nb);
             std::memcpy(h_all.data(), wfn.psi_kpt(0, 0).data(), all_bytes);
             CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice, stream));
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             auto t0 = std::chrono::high_resolution_clock::now();
             hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, Nb);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             printf("SOC H*psi benchmark: %d bands, Nd=%d, %.2f ms total (%.3f ms/band)\n",
@@ -2868,7 +2868,7 @@ double GPUSCFRunner::run(
 
         // GPU: apply full spinor H*psi via callback (1 band for validation)
         hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         std::vector<Complex> gpu_Hpsi(Nd_spinor);
         CUDA_CHECK(cudaMemcpyAsync(gpu_Hpsi.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost, stream));
 
@@ -3090,7 +3090,7 @@ double GPUSCFRunner::run(
                     hamiltonian_apply_spinor_z_cb);
 
                 // Download eigenvalues + spinor psi
-                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(cudaStreamSynchronize(stream));
                 {
                     CUDA_CHECK(cudaMemcpyAsync(h_eigvals.data(), d_eigvals,
                                            Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
@@ -3166,7 +3166,7 @@ double GPUSCFRunner::run(
                             hamiltonian_apply_z_cb);
 
                         // Download eigenvalues only (tiny; needed for occupations on CPU)
-                        CUDA_CHECK(cudaDeviceSynchronize());
+                        CUDA_CHECK(cudaStreamSynchronize(stream));
                         CUDA_CHECK(cudaMemcpyAsync(h_eigvals.data(), d_eigvals_arr[s_glob],
                                                Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int n = 0; n < Nband; n++)
@@ -3188,7 +3188,7 @@ double GPUSCFRunner::run(
           } // end non-SOC eigensolver branch
 
             // Update spectral bounds from eigenvalues (per-spin)
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             if (has_soc_) {
                 // SOC: single spin channel
                 const double* eig0 = wfn.eigenvalues(0, 0).data();
@@ -3344,7 +3344,7 @@ double GPUSCFRunner::run(
                 }
             }
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaStreamSynchronize(stream));
 
         // Step 2b: Compute tau for mGGA (after density, before energy)
         if (is_mgga_) {
@@ -3447,7 +3447,7 @@ double GPUSCFRunner::run(
             }
 
             tau_valid_ = true;
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
         }
 
         // ============================================================
@@ -3506,7 +3506,7 @@ double GPUSCFRunner::run(
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
                 add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_in_total, Nd_);
-                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(cudaStreamSynchronize(stream));
                 CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho_in_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 sp_e.restore(sp_e_cp);
             } else {
@@ -3725,7 +3725,7 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaMemcpyAsync(d_mag_z, d_dens_in + 3*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
             clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, 0.0, Nd_);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             double rho_sum = gpu_sum(d_rho_soc, Nd_);
             double Ne_current = rho_sum * dV_;
             if (Ne_current > 1e-10) {
@@ -3741,7 +3741,7 @@ double GPUSCFRunner::run(
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
                 clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho, 0.0, Nd_);
-                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(cudaStreamSynchronize(stream));
                 double rho_sum = gpu_sum(d_rho, Nd_);
                 double Ne_current = rho_sum * dV_;
                 if (Ne_current > 1e-10) {
@@ -3778,7 +3778,7 @@ double GPUSCFRunner::run(
 
             clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho, 0.0, Nd_);
             clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho + Nd_, 0.0, Nd_);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
 
             double rho_up_sum = gpu_sum(d_rho, Nd_);
             double rho_dn_sum = gpu_sum(d_rho + Nd_, Nd_);
@@ -3802,7 +3802,7 @@ double GPUSCFRunner::run(
 
             mag_to_collinear_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, d_mag_x, d_mag_y, d_mag_z,
                                                   d_rho, d_rho + Nd_, Nd_);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
 
             gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
             gpu_poisson_solve(d_rho_soc, d_phi, ctx.buf.b, Nd_, poisson_tol);
@@ -3990,7 +3990,7 @@ double GPUSCFRunner::run(
                                        d_psi_arr[s_glob], Nd_, Nband, exx_Nocc_,
                                        h_occ.data(), dV_,
                                        d_Xi_, stream);
-                    CUDA_CHECK(cudaDeviceSynchronize());
+                    CUDA_CHECK(cudaStreamSynchronize(stream));
 
                     exx_spin_ = s_glob;
                 }
@@ -4040,7 +4040,7 @@ double GPUSCFRunner::run(
                         lambda_cutoff, eigval_min_s[s_glob], eigval_max_s[s_glob],
                         cheb_degree, dV_,
                         hamiltonian_apply_cb);
-                    CUDA_CHECK(cudaDeviceSynchronize());
+                    CUDA_CHECK(cudaStreamSynchronize(stream));
 
                     // Update bounds from eigenvalues
                     // Only update eigval_min and lambda_cutoff.
@@ -4091,7 +4091,7 @@ double GPUSCFRunner::run(
                 }
 
                 // Occupation + Fermi level (CPU, same as initial SCF)
-                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(cudaStreamSynchronize(stream));
                 {
                     for (int s = 0; s < Nspin_local; s++) {
                         int s_glob = spin_start + s;
@@ -4609,7 +4609,7 @@ double GPUSCFRunner::run(
                             d_psi_all_k[kpt_loc], Nd_, Nband, exx_Nocc_,
                             dV_, d_Xi_k, stream);
 
-                        CUDA_CHECK(cudaDeviceSynchronize());
+                        CUDA_CHECK(cudaStreamSynchronize(stream));
                     }
                 }
 
@@ -4728,7 +4728,7 @@ double GPUSCFRunner::run(
                                 hamiltonian_apply_z_cb);
 
                             // Download eigenvalues + psi back to CPU wfn
-                            CUDA_CHECK(cudaDeviceSynchronize());
+                            CUDA_CHECK(cudaStreamSynchronize(stream));
                             {
                                 std::vector<double> h_eigs(Nband);
                                 CUDA_CHECK(cudaMemcpyAsync(h_eigs.data(), d_eigvals_arr[s_glob],
@@ -4751,7 +4751,7 @@ double GPUSCFRunner::run(
                 }
 
                 // Occupation + Fermi level (CPU)
-                CUDA_CHECK(cudaDeviceSynchronize());
+                CUDA_CHECK(cudaStreamSynchronize(stream));
                 {
                     Ef = Occupation::compute(wfn, Nelectron, beta_smearing,
                                             params.smearing,
@@ -5100,7 +5100,7 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
             int gs = gpu::ceildiv(Nd_, bs);
             double* d_temp = ctx.buf.rho_total;
             add_kernel<<<gs, bs, 0, stream>>>(ctx.buf.rho, ctx.buf.rho + Nd_, d_temp, Nd_);
-            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaStreamSynchronize(stream));
             CUDA_CHECK(cudaMemcpyAsync(rho, d_temp, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
         } else {
             CUDA_CHECK(cudaMemcpyAsync(rho, ctx.buf.rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));

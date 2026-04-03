@@ -686,7 +686,7 @@ void eigensolver_solve_z_gpu(
 
     // Debug: check for NaN after CheFSI
     {
-        cudaDeviceSynchronize();
+        cudaStreamSynchronize(stream);
         double y0[2];
         cudaMemcpyAsync(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost, stream);
         if (std::isnan(y0[0]) || std::isnan(y0[1]))
@@ -698,7 +698,7 @@ void eigensolver_solve_z_gpu(
 
     // Debug: check for NaN after orthogonalization
     {
-        cudaDeviceSynchronize();
+        cudaStreamSynchronize(stream);
         double y0[2];
         cudaMemcpyAsync(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost, stream);
         if (std::isnan(y0[0]) || std::isnan(y0[1]))
@@ -711,7 +711,7 @@ void eigensolver_solve_z_gpu(
 
     // Debug: check eigenvalues after diag
     {
-        cudaDeviceSynchronize();
+        cudaStreamSynchronize(stream);
         double eig0;
         cudaMemcpyAsync(&eig0, d_eigvals, sizeof(double), cudaMemcpyDeviceToHost, stream);
         if (std::isnan(eig0))
