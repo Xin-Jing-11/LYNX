@@ -183,7 +183,7 @@ void GPUExchangePoissonSolver::setup(int Nx, int Ny, int Nz,
 
     size_t pois_bytes = Ndc_ * sizeof(double);
     CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
-    CUDA_CHECK(cudaMemcpy(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, 0));
 
     size_t work_bytes = (size_t)Ndc_ * max_ncol * sizeof(cufftDoubleComplex);
     CUDA_CHECK(cudaMalloc(&d_fft_work_, work_bytes));
@@ -217,22 +217,22 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
     // Upload all Poisson constants [Nd * Nkpts_shift]
     size_t pois_bytes = (size_t)Nd_ * Nkpts_shift * sizeof(double);
     CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
-    CUDA_CHECK(cudaMemcpy(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, 0));
 
     // Upload phase factors [Nd * (Nkpts_shift - 1)] complex each
     if (Nkpts_shift > 1) {
         size_t phase_bytes = (size_t)Nd_ * (Nkpts_shift - 1) * sizeof(cuDoubleComplex);
         CUDA_CHECK(cudaMalloc(&d_neg_phase_, phase_bytes));
-        CUDA_CHECK(cudaMemcpy(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice, 0));
         CUDA_CHECK(cudaMalloc(&d_pos_phase_, phase_bytes));
-        CUDA_CHECK(cudaMemcpy(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice, 0));
     }
 
     // Upload Kptshift_map [Nkpts_sym * Nkpts_hf]
     int map_size = Nkpts_sym * Nkpts_hf;
     h_Kptshift_map_.assign(Kptshift_map, Kptshift_map + map_size);
     CUDA_CHECK(cudaMalloc(&d_Kptshift_map_, map_size * sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice, 0));
 
     // Workspace: Z2Z uses [Nd * max_ncol] complex
     size_t work_bytes = (size_t)Nd_ * max_ncol * sizeof(cufftDoubleComplex);
@@ -257,11 +257,11 @@ void GPUExchangePoissonSolver::upload_stress_constants(const double* pois_const_
     size_t bytes = (size_t)Nd_per_shift * (is_kpt_ ? Nkpts_shift_ : 1) * sizeof(double);
     if (pois_const_stress) {
         if (!d_pois_const_stress_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress_, bytes));
-        CUDA_CHECK(cudaMemcpy(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice, 0));
     }
     if (pois_const_stress2) {
         if (!d_pois_const_stress2_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress2_, bytes));
-        CUDA_CHECK(cudaMemcpy(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice, 0));
     }
 }
 
@@ -376,7 +376,7 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
     int l = h_Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
 
     // 1. Copy rhs to scratch
-    CUDA_CHECK(cudaMemcpy(d_kpt_scratch_, d_rhs, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_kpt_scratch_, d_rhs, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
 
     // 2. Apply negative phase factor
     if (l != 0) {

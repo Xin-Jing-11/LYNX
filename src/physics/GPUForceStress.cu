@@ -414,14 +414,14 @@ void compute_force_stress_gpu(
     int* d_IP_displ_phys = nullptr;
     if (total_nproj > 0) {
         d_IP_displ_phys = ctx.scratch_pool.alloc<int>(n_phys_atoms + 1);
-        CUDA_CHECK(cudaMemcpy(d_IP_displ_phys, h_IP_displ_phys,
-                              (n_phys_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_IP_displ_phys, h_IP_displ_phys,
+                              (n_phys_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
 
         // Upload atom positions for stress weighted gather
         if (n_influence > 0 && h_atom_pos) {
             d_atom_pos = ctx.scratch_pool.alloc<double>(n_influence * 3);
-            CUDA_CHECK(cudaMemcpy(d_atom_pos, h_atom_pos,
-                                  n_influence * 3 * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_atom_pos, h_atom_pos,
+                                  n_influence * 3 * sizeof(double), cudaMemcpyHostToDevice, stream));
         }
     }
 
@@ -552,22 +552,22 @@ void compute_force_stress_gpu(
 
     // Force
     if (total_nproj > 0) {
-        CUDA_CHECK(cudaMemcpy(h_f_nloc, d_force,
-                              3 * n_phys_atoms * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_f_nloc, d_force,
+                              3 * n_phys_atoms * sizeof(double), cudaMemcpyDeviceToHost, stream));
     } else {
         std::memset(h_f_nloc, 0, 3 * n_phys_atoms * sizeof(double));
     }
 
     // Kinetic stress
-    CUDA_CHECK(cudaMemcpy(h_stress_k, d_sk, 6 * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_stress_k, d_sk, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
     // Nonlocal stress & energy
     if (total_nproj > 0) {
         double h_snl_raw[6];
-        CUDA_CHECK(cudaMemcpy(h_snl_raw, d_snl, 6 * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_snl_raw, d_snl, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
         double h_enl_raw;
-        CUDA_CHECK(cudaMemcpy(&h_enl_raw, d_enl, sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(&h_enl_raw, d_enl, sizeof(double), cudaMemcpyDeviceToHost, stream));
 
         // Scale: snl *= spn_fac, energy_nl *= occfac * wk
         double energy_nl = h_enl_raw * occfac * wk;
@@ -779,9 +779,9 @@ void compute_soc_force_gpu(
     std::vector<double> h_occ(Nband);
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
     // Initialize output
     std::memset(h_f_soc, 0, 3 * n_phys_atoms * sizeof(double));
@@ -810,16 +810,16 @@ void compute_soc_force_gpu(
         // Scatter Dpsi_up/dn into spinor layout: [up0|dn0|up1|dn1|...]
         {
             for (int n = 0; n < Nband; ++n) {
-                CUDA_CHECK(cudaMemcpy(
+                CUDA_CHECK(cudaMemcpyAsync(
                     d_Dpsi_spinor + n * Nd_d_spinor,
                     d_Dpsi_up + n * Nd_d,
                     Nd_d * sizeof(cuDoubleComplex),
-                    cudaMemcpyDeviceToDevice));
-                CUDA_CHECK(cudaMemcpy(
+                    cudaMemcpyDeviceToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(
                     d_Dpsi_spinor + n * Nd_d_spinor + Nd_d,
                     d_Dpsi_dn + n * Nd_d,
                     Nd_d * sizeof(cuDoubleComplex),
-                    cudaMemcpyDeviceToDevice));
+                    cudaMemcpyDeviceToDevice, stream));
             }
         }
 
@@ -848,8 +848,8 @@ void compute_soc_force_gpu(
         std::vector<cuDoubleComplex> h_beta_up(alpha_elems);
         std::vector<cuDoubleComplex> h_beta_dn(alpha_elems);
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_beta_up.data(), d_beta_up, alpha_bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_beta_dn.data(), d_beta_dn, alpha_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_beta_up.data(), d_beta_up, alpha_bytes, cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaMemcpyAsync(h_beta_dn.data(), d_beta_dn, alpha_bytes, cudaMemcpyDeviceToHost, stream));
 
         // 3e. CPU reduction: accumulate SOC force for this dim
         for (int ia = 0; ia < n_phys_atoms; ++ia) {
@@ -1064,9 +1064,9 @@ void compute_soc_stress_gpu(
     std::vector<double> h_occ(Nband);
 
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_alpha_up.data(), d_alpha_up, alpha_bytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_alpha_dn.data(), d_alpha_dn, alpha_bytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
     // ----------------------------------------------------------------
     // Step 3: Compute SOC energy_nl on CPU
@@ -1148,8 +1148,8 @@ void compute_soc_stress_gpu(
         h_Dpsi_up_all[dim].resize((size_t)Nd_d * Nband);
         h_Dpsi_dn_all[dim].resize((size_t)Nd_d * Nband);
         CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(h_Dpsi_up_all[dim].data(), d_Dpsi_up, psi_comp_bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(h_Dpsi_dn_all[dim].data(), d_Dpsi_dn, psi_comp_bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_Dpsi_up_all[dim].data(), d_Dpsi_up, psi_comp_bytes, cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaMemcpyAsync(h_Dpsi_dn_all[dim].data(), d_Dpsi_dn, psi_comp_bytes, cudaMemcpyDeviceToHost, stream));
     }
 
     // For non-orthogonal: transform gradients to Cartesian
@@ -1570,10 +1570,10 @@ void compute_mgga_stress_gpu(
 
     // Download results
     CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaMemcpy(h_stress_mgga, d_smgga, 6 * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_stress_mgga, d_smgga, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
     double dot_val = 0.0;
-    CUDA_CHECK(cudaMemcpy(&dot_val, d_dot, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&dot_val, d_dot, sizeof(double), cudaMemcpyDeviceToHost, stream));
     *h_tau_vtau_dot = dot_val * dV;
 
     // Cleanup

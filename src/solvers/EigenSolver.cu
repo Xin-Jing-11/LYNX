@@ -192,7 +192,7 @@ void chebyshev_filter_gpu(
     chefsi_init_kernel<<<grid, bs, 0, stream>>>(d_HX, d_X, d_Y, scale, c, total);
 
     // Xold = X
-    CUDA_CHECK(cudaMemcpy(d_Xold, d_X, total * sizeof(double), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_X, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
     // Steps 2..degree
     for (int k = 2; k <= degree; ++k) {
@@ -204,8 +204,8 @@ void chebyshev_filter_gpu(
         chefsi_step_kernel<<<grid, bs, 0, stream>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew (pointer swap via memcpy)
-        CUDA_CHECK(cudaMemcpy(d_Xold, d_Y, total * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_Y, d_Xnew, total * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_Y, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_Y, d_Xnew, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
         sigma = sigma_new;
     }
 }
@@ -336,6 +336,7 @@ void rotate_orbitals_gpu(
     int Nd, int N)
 {
     auto& ctx = GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
     double one = 1.0, zero = 0.0;
 
     // temp = X * Q
@@ -343,8 +344,8 @@ void rotate_orbitals_gpu(
                 Nd, N, N, &one, d_X, Nd, d_Q, N, &zero, d_temp, Nd);
 
     // X = temp
-    CUDA_CHECK(cudaMemcpy(d_X, d_temp, (size_t)Nd * N * sizeof(double),
-                           cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_X, d_temp, (size_t)Nd * N * sizeof(double),
+                           cudaMemcpyDeviceToDevice, stream));
 }
 
 // ============================================================
@@ -386,8 +387,8 @@ void eigensolver_solve_gpu(
     rotate_orbitals_gpu(d_Y, d_Hs, d_psi, Nd, Ns);
 
     // Copy result back to psi
-    CUDA_CHECK(cudaMemcpy(d_psi, d_Y, (size_t)Nd * Ns * sizeof(double),
-                           cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_psi, d_Y, (size_t)Nd * Ns * sizeof(double),
+                           cudaMemcpyDeviceToDevice, stream));
 }
 
 // ============================================================
@@ -506,7 +507,7 @@ void chebyshev_filter_z_gpu(
     chefsi_init_kernel_z<<<grid, bs, 0, stream>>>(d_Y, d_HX, d_X, scale, c, total);
 
     // Xold = X
-    CUDA_CHECK(cudaMemcpy(d_Xold, d_X, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_X, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
 
     // Steps 2..degree
     for (int k = 2; k <= degree; ++k) {
@@ -518,8 +519,8 @@ void chebyshev_filter_z_gpu(
         chefsi_step_kernel_z<<<grid, bs, 0, stream>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew
-        CUDA_CHECK(cudaMemcpy(d_Xold, d_Y, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_Y, d_Xnew, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_Y, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_Y, d_Xnew, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
         sigma = sigma_new;
     }
 }
@@ -642,6 +643,7 @@ void rotate_orbitals_z_gpu(
     int Nd, int N)
 {
     auto& ctx = GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
     cuDoubleComplex one  = make_cuDoubleComplex(1.0, 0.0);
     cuDoubleComplex zero = make_cuDoubleComplex(0.0, 0.0);
 
@@ -650,8 +652,8 @@ void rotate_orbitals_z_gpu(
                 Nd, N, N, &one, d_X, Nd, d_Q, N, &zero, d_temp, Nd);
 
     // X = temp
-    CUDA_CHECK(cudaMemcpy(d_X, d_temp, (size_t)Nd * N * sizeof(cuDoubleComplex),
-                           cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_X, d_temp, (size_t)Nd * N * sizeof(cuDoubleComplex),
+                           cudaMemcpyDeviceToDevice, stream));
 }
 
 // ============================================================
@@ -686,7 +688,7 @@ void eigensolver_solve_z_gpu(
     {
         cudaDeviceSynchronize();
         double y0[2];
-        cudaMemcpy(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpyAsync(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost, stream);
         if (std::isnan(y0[0]) || std::isnan(y0[1]))
             printf("[eigsolver_z] NaN after CheFSI filter! Y[0]=(%.3e,%.3e)\n", y0[0], y0[1]);
     }
@@ -698,7 +700,7 @@ void eigensolver_solve_z_gpu(
     {
         cudaDeviceSynchronize();
         double y0[2];
-        cudaMemcpy(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpyAsync(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost, stream);
         if (std::isnan(y0[0]) || std::isnan(y0[1]))
             printf("[eigsolver_z] NaN after orthogonalize! Y[0]=(%.3e,%.3e)\n", y0[0], y0[1]);
     }
@@ -711,7 +713,7 @@ void eigensolver_solve_z_gpu(
     {
         cudaDeviceSynchronize();
         double eig0;
-        cudaMemcpy(&eig0, d_eigvals, sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpyAsync(&eig0, d_eigvals, sizeof(double), cudaMemcpyDeviceToHost, stream);
         if (std::isnan(eig0))
             printf("[eigsolver_z] NaN eigenvalue after diag! eig[0]=%.3e\n", eig0);
     }
@@ -720,8 +722,8 @@ void eigensolver_solve_z_gpu(
     rotate_orbitals_z_gpu(d_Y_z, d_Hs_z, d_psi_z, Nd, Ns);
 
     // Copy result back to psi
-    CUDA_CHECK(cudaMemcpy(d_psi_z, d_Y_z, (size_t)Nd * Ns * sizeof(cuDoubleComplex),
-                           cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_psi_z, d_Y_z, (size_t)Nd * Ns * sizeof(cuDoubleComplex),
+                           cudaMemcpyDeviceToDevice, stream));
 }
 
 // ============================================================

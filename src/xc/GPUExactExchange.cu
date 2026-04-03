@@ -219,7 +219,7 @@ void build_ACE_gpu(cublasHandle_t cublas,
                           Nocc, d_M, Nocc, d_work, work_size, d_info);
 
         int h_info = 0;
-        CUDA_CHECK(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost, stream));
         if (h_info != 0) {
             std::fprintf(stderr, "WARNING: cusolverDnDpotrf failed in build_ACE_gpu (info=%d, stream)\n", h_info);
         }
@@ -424,7 +424,7 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
                           Nocc, d_M, Nocc, d_work, work_size, d_info);
 
         int h_info = 0;
-        CUDA_CHECK(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost, stream));
         if (h_info != 0) {
             std::fprintf(stderr, "WARNING: cusolverDnZpotrf failed in build_ACE_kpt_finalize_gpu (info=%d, stream)\n", h_info);
         }

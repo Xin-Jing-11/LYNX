@@ -910,6 +910,7 @@ void GPUSCFRunner::GPUNonlocalData::setup(
     int Nband)
 {
     if (!vnl.is_setup() || vnl.total_nproj() == 0) return;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     int ntypes = crystal.n_types();
 
@@ -1017,15 +1018,15 @@ void GPUSCFRunner::GPUNonlocalData::setup(
     CUDA_CHECK(cudaMallocAsync(&d_alpha, (size_t)total_phys_nproj * Nband * sizeof(double), 0));
 
     if (total_chi > 0)
-        CUDA_CHECK(cudaMemcpy(d_Chi_flat, h_Chi_flat.data(), total_chi * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Chi_flat, h_Chi_flat.data(), total_chi * sizeof(double), cudaMemcpyHostToDevice, stream));
     if (total_gpos > 0)
-        CUDA_CHECK(cudaMemcpy(d_gpos_flat, h_gpos_flat.data(), total_gpos * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gpos_offsets, h_gpos_offsets.data(), (n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_chi_offsets, h_chi_offsets.data(), (n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_ndc_arr, h_ndc_arr.data(), n_influence * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_nproj_arr, h_nproj_arr.data(), n_influence * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_IP_displ, h_IP_displ_arr.data(), n_influence * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_Gamma, h_Gamma.data(), total_phys_nproj * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_gpos_flat, h_gpos_flat.data(), total_gpos * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_gpos_offsets, h_gpos_offsets.data(), (n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_chi_offsets, h_chi_offsets.data(), (n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_ndc_arr, h_ndc_arr.data(), n_influence * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_nproj_arr, h_nproj_arr.data(), n_influence * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_IP_displ, h_IP_displ_arr.data(), n_influence * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_Gamma, h_Gamma.data(), total_phys_nproj * sizeof(double), cudaMemcpyHostToDevice, stream));
 
     printf("GPU Vnl: %d influence atoms, %d phys projectors, max_ndc=%d, max_nproj=%d\n",
            n_influence, total_phys_nproj, max_ndc, max_nproj);
@@ -1060,6 +1061,7 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
     int Nband)
 {
     if (!vnl.has_soc()) return;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     int ntypes = crystal.n_types();
 
@@ -1217,15 +1219,15 @@ void GPUSCFRunner::GPUSOCData::setup_soc(
         (size_t)total_soc_nproj * Nband * sizeof(cuDoubleComplex), 0));
 
     if (total_chi_soc > 0)
-        CUDA_CHECK(cudaMemcpy(d_Chi_soc_flat, h_Chi_soc_flat.data(), total_chi_soc * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_gpos_offsets_soc, h_gpos_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_chi_soc_offsets, h_chi_soc_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_ndc_arr_soc, h_ndc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_nproj_soc_arr, h_nproj_soc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_IP_displ_soc, h_IP_displ_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_Gamma_soc, h_Gamma_soc.data(), total_soc_nproj * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_proj_l, h_proj_l.data(), total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_proj_m, h_proj_m.data(), total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Chi_soc_flat, h_Chi_soc_flat.data(), total_chi_soc * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_gpos_offsets_soc, h_gpos_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_chi_soc_offsets, h_chi_soc_offsets.data(), (n_influence_soc + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_ndc_arr_soc, h_ndc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_nproj_soc_arr, h_nproj_soc_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_IP_displ_soc, h_IP_displ_arr.data(), n_influence_soc * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_Gamma_soc, h_Gamma_soc.data(), total_soc_nproj * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_proj_l, h_proj_l.data(), total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_proj_m, h_proj_m.data(), total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     printf("GPU SOC: %d influence atoms, %d SOC projectors, max_ndc=%d, max_nproj_soc=%d\n",
            n_influence_soc, total_soc_nproj, max_ndc_soc, max_nproj_soc);
@@ -2015,6 +2017,7 @@ void GPUSCFRunner::setup_bloch_factors(
     const Crystal& crystal,
     const Vec3& kpt_cart)
 {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int n_influence = gpu_vnl_.n_influence;
     if (n_influence == 0) return;
 
@@ -2038,8 +2041,8 @@ void GPUSCFRunner::setup_bloch_factors(
         }
     }
 
-    CUDA_CHECK(cudaMemcpy(d_bloch_fac_, h_bloch.data(),
-                           n_influence * 2 * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_bloch_fac_, h_bloch.data(),
+                           n_influence * 2 * sizeof(double), cudaMemcpyHostToDevice, stream));
 }
 
 // ============================================================
@@ -2109,7 +2112,7 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
 
     // Save old f_k -> f_km1
     if (mix_iter_ > 0) {
-        CUDA_CHECK(cudaMemcpy(d_mix_fkm1_, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_mix_fkm1_, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
     }
 
     // f_k = g - x
@@ -2176,8 +2179,8 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
         }
 
         // x_wavg = x - R * Gamma, f_wavg = f_k - F * Gamma
-        CUDA_CHECK(cudaMemcpy(d_x_wavg, d_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_f_wavg, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_x_wavg, d_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_f_wavg, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
         for (int j = 0; j < cols; j++) {
             double neg_gj = -Gamma[j];
@@ -2185,8 +2188,8 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
             cublasDaxpy(ctx.cublas, Nd, &neg_gj, d_F + j * Nd, 1, d_f_wavg, 1);
         }
     } else {
-        CUDA_CHECK(cudaMemcpy(d_x_wavg, d_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_f_wavg, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_x_wavg, d_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_f_wavg, d_fk, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
     }
 
     // Kerker preconditioner: Pf = kerker(f_wavg, beta_mix)
@@ -2247,16 +2250,16 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
     if (!kerker_per_col && Nd_kerker < Nd) {
         double b_mag = (beta_mag > 0.0) ? beta_mag : beta_mix;
         int Nd_mag = Nd - Nd_kerker;
-        CUDA_CHECK(cudaMemcpy(d_Pf + Nd_kerker, d_f_wavg + Nd_kerker,
-                              Nd_mag * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Pf + Nd_kerker, d_f_wavg + Nd_kerker,
+                              Nd_mag * sizeof(double), cudaMemcpyDeviceToDevice, stream));
         cublasDscal(ctx.cublas, Nd_mag, &b_mag, d_Pf + Nd_kerker, 1);
     }
 
     // Save x_km1 = x (before update)
-    CUDA_CHECK(cudaMemcpy(d_xkm1, d_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_xkm1, d_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
     // x_{k+1} = x_wavg + Pf
-    CUDA_CHECK(cudaMemcpy(d_x, d_x_wavg, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_x, d_x_wavg, Nd * sizeof(double), cudaMemcpyDeviceToDevice, stream));
     {
         double one = 1.0;
         cublasDaxpy(ctx.cublas, Nd, &one, d_Pf, 1, d_x, 1);
@@ -2401,12 +2404,12 @@ double GPUSCFRunner::run(
     // Upload NLCC core density to GPU
     if (has_nlcc_) {
         CUDA_CHECK(cudaMallocAsync(&d_rho_core_, Nd_ * sizeof(double), 0));
-        CUDA_CHECK(cudaMemcpy(d_rho_core_, rho_core, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_rho_core_, rho_core, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
     }
 
     // Upload pseudocharge to GPU
     CUDA_CHECK(cudaMallocAsync(&d_pseudocharge_, Nd_ * sizeof(double), 0));
-    CUDA_CHECK(cudaMemcpy(d_pseudocharge_, rho_b, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_pseudocharge_, rho_b, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
 
     // Allocate mGGA tau/vtau buffers and Hamiltonian work buffers
     if (is_mgga_) {
@@ -2474,12 +2477,12 @@ double GPUSCFRunner::run(
     // ============================================================
     if (Nspin == 2 && rho_up_init && rho_dn_init) {
         // Spin-polarized: d_rho = [up(Nd) | down(Nd)]
-        CUDA_CHECK(cudaMemcpy(d_rho, rho_up_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_rho + Nd_, rho_dn_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_rho, rho_up_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_rho + Nd_, rho_dn_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
         // Also upload total density for Poisson
-        CUDA_CHECK(cudaMemcpy(d_rho_new, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_rho_new, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
     } else {
-        CUDA_CHECK(cudaMemcpy(d_rho, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_rho, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
     }
 
     // Number of k-points
@@ -2588,8 +2591,8 @@ double GPUSCFRunner::run(
                 for (int j = 0; j < Nband; j++)
                     std::memcpy(h_psi.data() + j * Nd_, wfn.psi(s, 0).col(j), Nd_ * sizeof(double));
                 int s_glob = spin_start_ + s;
-                CUDA_CHECK(cudaMemcpy(d_psi_arr[s_glob], h_psi.data(),
-                                       (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_psi_arr[s_glob], h_psi.data(),
+                                       (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -2631,8 +2634,8 @@ double GPUSCFRunner::run(
                 xcfunc.evaluate(rho_xc.data(), h_Vxc.data(), h_exc.data(), Nd_);
             }
         }
-        CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_Vxc, h_Vxc.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_Vxc, h_Vxc.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice, stream));
 
         // Poisson on CPU — initial only (uses total density)
         std::vector<double> rhs(Nd_);
@@ -2661,8 +2664,8 @@ double GPUSCFRunner::run(
                 h_Veff[s * Nd_ + i] = h_Vxc[s * Nd_ + i] + h_phi[i];
         }
 
-        CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), veff_size * sizeof(double), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_phi, h_phi.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Veff, h_Veff.data(), veff_size * sizeof(double), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_phi, h_phi.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
 
         // SOC: build initial Veff_spinor from scalar Veff (uniform rho, zero magnetization)
         // V_uu = V_dd = Vxc + phi, V_ud = 0
@@ -2674,11 +2677,11 @@ double GPUSCFRunner::run(
                 h_Veff_spinor[Nd_ + i]     = v;   // V_dd
                 // V_ud_re and V_ud_im = 0 (already zero-initialized)
             }
-            CUDA_CHECK(cudaMemcpy(d_Veff_spinor, h_Veff_spinor.data(),
-                                   4 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_Veff_spinor, h_Veff_spinor.data(),
+                                   4 * Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
 
             // Initialize noncollinear density: rho = total, mx = my = mz = 0
-            CUDA_CHECK(cudaMemcpy(d_rho_soc, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_rho_soc, rho_init, Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
             CUDA_CHECK(cudaMemset(d_mag_x, 0, Nd_ * sizeof(double)));
             CUDA_CHECK(cudaMemset(d_mag_y, 0, Nd_ * sizeof(double)));
             CUDA_CHECK(cudaMemset(d_mag_z, 0, Nd_ * sizeof(double)));
@@ -2691,8 +2694,8 @@ double GPUSCFRunner::run(
                 // d_rho holds [up|dn] for XC
                 std::vector<double> h_rho_half(Nd_);
                 for (int i = 0; i < Nd_; i++) h_rho_half[i] = 0.5 * rho_init[i];
-                CUDA_CHECK(cudaMemcpy(d_rho, h_rho_half.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(d_rho + Nd_, h_rho_half.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_rho, h_rho_half.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(d_rho + Nd_, h_rho_half.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -2709,8 +2712,8 @@ double GPUSCFRunner::run(
         if (has_soc_) {
             // SOC: use spinor Lanczos on CPU (4-component Veff_spinor)
             std::vector<double> h_Veff_spinor(4 * Nd_);
-            CUDA_CHECK(cudaMemcpy(h_Veff_spinor.data(), d_Veff_spinor,
-                                   4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_Veff_spinor.data(), d_Veff_spinor,
+                                   4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
             Vec3 kpt0_est = kpoints_->kpts_cart()[kpt_start_];
             Vec3 cell_lengths = grid.lattice().lengths();
             eigsolver.lanczos_bounds_spinor_kpt(h_Veff_spinor.data(), Nd_,
@@ -2718,7 +2721,7 @@ double GPUSCFRunner::run(
                                                  eigval_min_s[0], eigval_max_s[0]);
         } else {
             std::vector<double> h_Veff(Nd_);
-            CUDA_CHECK(cudaMemcpy(h_Veff.data(), d_Veff, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_Veff.data(), d_Veff, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
             if (is_kpt_) {
                 Vec3 kpt0_est = kpoints_->kpts_cart()[kpt_start_];
                 Vec3 cell_lengths = grid.lattice().lengths();
@@ -2752,7 +2755,7 @@ double GPUSCFRunner::run(
             size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
             std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
             std::memcpy(h_psi_z.data(), wfn.psi_kpt(0, 0).data(), psi_bytes);
-            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(), psi_bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_psi_z.data(), psi_bytes, cudaMemcpyHostToDevice, stream));
         }
         // For SOC, the Lanczos may significantly underestimate eigmax.
         // Use a safe bound: compute from stencil coefficients + SOC Gamma.
@@ -2822,7 +2825,7 @@ double GPUSCFRunner::run(
             std::vector<double> h_psi(2 * Nd_spinor);
             auto* pc = wfn.psi_kpt(0, 0).col(0);
             std::memcpy(h_psi.data(), pc, bytes);
-            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi.data(), bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_psi.data(), bytes, cudaMemcpyHostToDevice, stream));
         }
 
         // 3. GPU: benchmark H*psi with all bands
@@ -2832,7 +2835,7 @@ double GPUSCFRunner::run(
             size_t all_bytes = 2 * (size_t)Nd_spinor * Nb * sizeof(double);
             std::vector<double> h_all(2 * Nd_spinor * Nb);
             std::memcpy(h_all.data(), wfn.psi_kpt(0, 0).data(), all_bytes);
-            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice, stream));
             CUDA_CHECK(cudaDeviceSynchronize());
             auto t0 = std::chrono::high_resolution_clock::now();
             hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, Nb);
@@ -2842,7 +2845,7 @@ double GPUSCFRunner::run(
             printf("SOC H*psi benchmark: %d bands, Nd=%d, %.2f ms total (%.3f ms/band)\n",
                    Nb, Nd_, ms, ms / Nb);
             // Re-upload single band for validation
-            CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), 2*(size_t)Nd_spinor*sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_all.data(), 2*(size_t)Nd_spinor*sizeof(double), cudaMemcpyHostToDevice, stream));
         }
 
         // CPU benchmark: same H*psi
@@ -2850,7 +2853,7 @@ double GPUSCFRunner::run(
             int Nb = wfn.Nband();
             const Complex* pp = reinterpret_cast<const Complex*>(wfn.psi_kpt(0, 0).data());
             std::vector<double> h_Veff_tmp(4 * Nd_);
-            CUDA_CHECK(cudaMemcpy(h_Veff_tmp.data(), d_Veff_spinor, 4*Nd_*sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_Veff_tmp.data(), d_Veff_spinor, 4*Nd_*sizeof(double), cudaMemcpyDeviceToHost, stream));
             const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
             const_cast<Hamiltonian&>(hamiltonian).set_vnl_kpt(vnl);
             std::vector<Complex> cpu_out(2*Nd_ * Nb, Complex(0));
@@ -2867,11 +2870,11 @@ double GPUSCFRunner::run(
         hamiltonian_apply_spinor_z_cb(d_psi_spinor, d_Veff_spinor, d_Hpsi_spinor, d_x_ex_spinor, 1);
         CUDA_CHECK(cudaDeviceSynchronize());
         std::vector<Complex> gpu_Hpsi(Nd_spinor);
-        CUDA_CHECK(cudaMemcpy(gpu_Hpsi.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(gpu_Hpsi.data(), d_Hpsi_spinor, Nd_spinor * sizeof(Complex), cudaMemcpyDeviceToHost, stream));
 
         // 4. CPU: apply full spinor H*psi (1 band, with vnl_kpt set)
         std::vector<double> h_Veff_sp(4 * Nd_);
-        CUDA_CHECK(cudaMemcpy(h_Veff_sp.data(), d_Veff_spinor, 4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_Veff_sp.data(), d_Veff_spinor, 4 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
         const Complex* psi_ptr = reinterpret_cast<const Complex*>(wfn.psi_kpt(0, 0).col(0));
         const_cast<NonlocalProjector*>(vnl)->set_kpoint(kpt0v);
         const_cast<Hamiltonian&>(hamiltonian).set_vnl_kpt(vnl);
@@ -2900,13 +2903,13 @@ double GPUSCFRunner::run(
                 size_t all_bytes = 2 * (size_t)Nd_spinor * Nb * sizeof(double);
                 std::vector<double> h_all(2 * Nd_spinor * Nb);
                 std::memcpy(h_all.data(), wfn.psi_kpt(0, 0).data(), all_bytes);
-                CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_all.data(), all_bytes, cudaMemcpyHostToDevice, stream));
             }
             // Set uniform occupations for testing
             std::vector<double> h_occ_test(Nb, 1.0);
             double* d_occ_test;
             CUDA_CHECK(cudaMallocAsync(&d_occ_test, Nb * sizeof(double), 0));
-            CUDA_CHECK(cudaMemcpy(d_occ_test, h_occ_test.data(), Nb * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_occ_test, h_occ_test.data(), Nb * sizeof(double), cudaMemcpyHostToDevice, stream));
             for (int n = 0; n < Nb; n++)
                 wfn.occupations(0, 0)(n) = 1.0;
 
@@ -3032,10 +3035,10 @@ double GPUSCFRunner::run(
         // Allocate persistent buffer for zero-mean Veff (Pulay mixer state)
         CUDA_CHECK(cudaMallocAsync(&d_Veff_mixed, 2 * Nd_ * sizeof(double), 0));
         // Initialize: copy d_Veff, subtract mean per spin channel
-        CUDA_CHECK(cudaMemcpy(d_Veff_mixed, d_Veff, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Veff_mixed, d_Veff, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
         // Compute and subtract mean per spin on host
         std::vector<double> h_Veff_init(2 * Nd_);
-        CUDA_CHECK(cudaMemcpy(h_Veff_init.data(), d_Veff, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_Veff_init.data(), d_Veff, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
         for (int s = 0; s < Nspin; s++) {
             double mean = 0;
             for (int i = 0; i < Nd_; i++) mean += h_Veff_init[s * Nd_ + i];
@@ -3043,7 +3046,7 @@ double GPUSCFRunner::run(
             Veff_mean[s] = mean;
             for (int i = 0; i < Nd_; i++) h_Veff_init[s * Nd_ + i] -= mean;
         }
-        CUDA_CHECK(cudaMemcpy(d_Veff_mixed, h_Veff_init.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_Veff_mixed, h_Veff_init.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
     }
 
     for (int scf_iter = 0; scf_iter < max_iter; scf_iter++) {
@@ -3070,8 +3073,8 @@ double GPUSCFRunner::run(
                     std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
                     auto* psi_c = wfn.psi_kpt(0, k).data();
                     std::memcpy(h_psi_z.data(), psi_c, psi_bytes);
-                    CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(),
-                        psi_bytes, cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_psi_z.data(),
+                        psi_bytes, cudaMemcpyHostToDevice, stream));
                 }
 
                 // Spinor eigensolver: Nd = 2*Nd_d, uses hamiltonian_apply_spinor_z_cb
@@ -3089,8 +3092,8 @@ double GPUSCFRunner::run(
                 // Download eigenvalues + spinor psi
                 CUDA_CHECK(cudaDeviceSynchronize());
                 {
-                    CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals,
-                                           Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_eigvals.data(), d_eigvals,
+                                           Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     if (scf_iter == 0 && k == 0) {
                         printf("  [SOC eigvals] eig[0]=%.6e eig[%d]=%.6e\n",
                                h_eigvals[0], Nband-1, h_eigvals[Nband-1]);
@@ -3101,8 +3104,8 @@ double GPUSCFRunner::run(
                 {
                     size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
                     std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
-                    CUDA_CHECK(cudaMemcpy(h_psi_z.data(), d_psi_spinor,
-                        psi_bytes, cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_psi_z.data(), d_psi_spinor,
+                        psi_bytes, cudaMemcpyDeviceToHost, stream));
                     if (scf_iter == 0 && k == 0) {
                         printf("  [SOC psi] psi[0..3]=%.3e %.3e %.3e %.3e\n",
                                h_psi_z[0], h_psi_z[1], h_psi_z[2], h_psi_z[3]);
@@ -3144,10 +3147,10 @@ double GPUSCFRunner::run(
                             // Per-column upload to handle ld padding
                             size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                             for (int n = 0; n < Nband; n++) {
-                                CUDA_CHECK(cudaMemcpy(
+                                CUDA_CHECK(cudaMemcpyAsync(
                                     reinterpret_cast<char*>(d_psi_sk) + n * col_bytes,
                                     wfn.psi_kpt(s, k).col(n),
-                                    col_bytes, cudaMemcpyHostToDevice));
+                                    col_bytes, cudaMemcpyHostToDevice, stream));
                             }
                         }
 
@@ -3164,8 +3167,8 @@ double GPUSCFRunner::run(
 
                         // Download eigenvalues only (tiny; needed for occupations on CPU)
                         CUDA_CHECK(cudaDeviceSynchronize());
-                        CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals_arr[s_glob],
-                                               Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_eigvals.data(), d_eigvals_arr[s_glob],
+                                               Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int n = 0; n < Nband; n++)
                             wfn.eigenvalues(s, k)(n) = h_eigvals[n];
                     }
@@ -3198,8 +3201,8 @@ double GPUSCFRunner::run(
                     int s_glob = spin_start_ + s;
                     if (!is_kpt_) {
                         // Gamma: download eigenvalues from device
-                        CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals_arr[s_glob],
-                                               Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_eigvals.data(), d_eigvals_arr[s_glob],
+                                               Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int n = 0; n < Nband; n++)
                             wfn.eigenvalues(s, 0)(n) = h_eigvals[n];
                     }
@@ -3225,14 +3228,14 @@ double GPUSCFRunner::run(
         if (has_soc_) {
             for (int n = 0; n < Nband; n++)
                 h_occ[n] = wfn.occupations(0, 0)(n);
-            CUDA_CHECK(cudaMemcpy(d_occ, h_occ.data(), Nband * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ.data(), Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
         } else {
             for (int s = 0; s < Nspin_local_; s++) {
                 int s_glob = spin_start_ + s;
                 for (int n = 0; n < Nband; n++)
                     h_occ[n] = wfn.occupations(s, 0)(n);
-                CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                                       Nband * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[s_glob], h_occ.data(),
+                                       Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
         }
 
@@ -3269,16 +3272,16 @@ double GPUSCFRunner::run(
                     size_t psi_bytes = 2 * (size_t)Nd_spinor * Nband * sizeof(double);
                     std::vector<double> h_psi_z(2 * Nd_spinor * Nband);
                     std::memcpy(h_psi_z.data(), wfn.psi_kpt(0, k).data(), psi_bytes);
-                    CUDA_CHECK(cudaMemcpy(d_psi_spinor, h_psi_z.data(),
-                        psi_bytes, cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, h_psi_z.data(),
+                        psi_bytes, cudaMemcpyHostToDevice, stream));
                 }
                 // Upload per-k occupations
                 {
                     std::vector<double> h_occ_k(Nband);
                     for (int n = 0; n < Nband; n++)
                         h_occ_k[n] = wfn.occupations(0, k)(n);
-                    CUDA_CHECK(cudaMemcpy(d_occ, h_occ_k.data(),
-                                           Nband * sizeof(double), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ_k.data(),
+                                           Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
                 }
                 // SOC density uses occfac=1 (no spin degeneracy since both spins in spinor)
                 gpu::spinor_density_gpu(d_psi_spinor, d_occ,
@@ -3286,7 +3289,7 @@ double GPUSCFRunner::run(
                                          Nd_, Nband, 1.0 * wk, stream);
             }
             // Copy total density for SCF error
-            CUDA_CHECK(cudaMemcpy(d_rho_new_total, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_rho_new_total, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
         } else if (Nspin >= 2) {
             d_rho_new_up = sp_dens.alloc<double>(Nd_);
             d_rho_new_dn = sp_dens.alloc<double>(Nd_);
@@ -3305,8 +3308,8 @@ double GPUSCFRunner::run(
                         // Per-k-point occupations for spin-polarized
                         for (int n = 0; n < Nband; n++)
                             h_occ[n] = wfn.occupations(s, k)(n);
-                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                                               Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[s_glob], h_occ.data(),
+                                               Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
                         gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
                                                    d_rho_spin_target, Nd_, Nband, occfac * wk, stream);
                     }
@@ -3330,8 +3333,8 @@ double GPUSCFRunner::run(
                         // Per-k-point occupations (different k-points can differ near Ef)
                         for (int n = 0; n < Nband; n++)
                             h_occ[n] = wfn.occupations(s, k)(n);
-                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                                               Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[s_glob], h_occ.data(),
+                                               Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
                         gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
                                                    d_rho_new_total, Nd_, Nband, occfac * wk, stream);
                     }
@@ -3459,8 +3462,8 @@ double GPUSCFRunner::run(
             // — it's still in d_Veff, untouched
 
             // Update d_rho to new density for XC/Poisson
-            CUDA_CHECK(cudaMemcpy(d_rho, d_rho_new_up, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_rho + Nd_, d_rho_new_dn, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_rho, d_rho_new_up, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_rho + Nd_, d_rho_new_dn, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
             // XC on new density
             gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
@@ -3493,7 +3496,7 @@ double GPUSCFRunner::run(
 
             // For energy, use total input density
             if (has_soc_) {
-                CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
             } else if (Nspin >= 2) {
                 // For potential mixing: d_rho already updated to new density
                 // For density mixing: d_rho is still old density
@@ -3504,29 +3507,29 @@ double GPUSCFRunner::run(
                 int gs = gpu::ceildiv(Nd_, bs);
                 add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_in_total, Nd_);
                 CUDA_CHECK(cudaDeviceSynchronize());
-                CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho_in_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho_in_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 sp_e.restore(sp_e_cp);
             } else {
-                CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
             }
 
             // For potential mixing, download Veff_new; otherwise download current d_Veff
             if (use_potential_mixing && Nspin >= 2 && d_Veff_new_tmp) {
-                CUDA_CHECK(cudaMemcpy(h_Veff_e.data(), d_Veff_new_tmp, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_Veff_e.data(), d_Veff_new_tmp, veff_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
             } else {
-                CUDA_CHECK(cudaMemcpy(h_Veff_e.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_Veff_e.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
             }
-            CUDA_CHECK(cudaMemcpy(h_phi_e.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_exc_e.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(h_Vxc_e.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_phi_e.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaMemcpyAsync(h_exc_e.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaMemcpyAsync(h_Vxc_e.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
             // Download psi for Eband computation
             if (!is_kpt_ && !has_soc_) {
                 for (int s = 0; s < Nspin_local_; s++) {
                     int s_glob = spin_start_ + s;
                     std::vector<double> h_psi_tmp(Nd_ * Nband);
-                    CUDA_CHECK(cudaMemcpy(h_psi_tmp.data(), d_psi_arr[s_glob],
-                        (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_psi_tmp.data(), d_psi_arr[s_glob],
+                        (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int j = 0; j < Nband; j++)
                         std::memcpy(wfn.psi(s, 0).col(j), h_psi_tmp.data() + j * Nd_, Nd_ * sizeof(double));
                 }
@@ -3537,8 +3540,8 @@ double GPUSCFRunner::run(
             std::memcpy(dens_in.rho_total().data(), h_rho_in.data(), Nd_ * sizeof(double));
             if (has_soc_ || Nspin >= 2) {
                 std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 std::memcpy(dens_in.rho(0).data(), h_rho_up.data(), Nd_ * sizeof(double));
                 std::memcpy(dens_in.rho(1).data(), h_rho_dn.data(), Nd_ * sizeof(double));
             } else {
@@ -3553,8 +3556,8 @@ double GPUSCFRunner::run(
                 int tau_size = Nspin_energy * Nd_;
                 h_tau_e.resize(tau_size);
                 h_vtau_e.resize(tau_size);
-                CUDA_CHECK(cudaMemcpy(h_tau_e.data(), d_tau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_vtau_e.data(), d_vtau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_tau_e.data(), d_tau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_vtau_e.data(), d_vtau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 h_tau_ptr = h_tau_e.data();
                 h_vtau_ptr = h_vtau_e.data();
             }
@@ -3572,7 +3575,7 @@ double GPUSCFRunner::run(
             // For potential mixing: add self-consistency correction Escc
             if (use_potential_mixing && Nspin >= 2) {
                 std::vector<double> h_Veff_in(veff_size);
-                CUDA_CHECK(cudaMemcpy(h_Veff_in.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_Veff_in.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 double Escc = 0.0;
                 for (int s = 0; s < Nspin; s++) {
                     const double* rho_s = dens_in.rho(s).data();
@@ -3589,7 +3592,7 @@ double GPUSCFRunner::run(
             if (use_potential_mixing && Nspin >= 2) {
                 // ||Veff_out - Veff_in|| / ||Veff_out||
                 std::vector<double> h_Veff_in(veff_size);
-                CUDA_CHECK(cudaMemcpy(h_Veff_in.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_Veff_in.data(), d_Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 double sum_sq_diff = 0, sum_sq_out = 0;
                 for (int i = 0; i < veff_size; i++) {
                     double diff = h_Veff_e[i] - h_Veff_in[i];
@@ -3599,7 +3602,7 @@ double GPUSCFRunner::run(
                 scf_error = (sum_sq_out > 0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0;
             } else {
                 std::vector<double> h_rho_new(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_rho_new.data(), d_rho_new_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_new.data(), d_rho_new_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 double sum_sq_diff = 0, sum_sq_out = 0;
                 for (int i = 0; i < Nd_; i++) {
                     double diff = h_rho_new[i] - h_rho_in[i];
@@ -3614,9 +3617,9 @@ double GPUSCFRunner::run(
                 double mag_sum = 0;
                 if (d_mag_x_new && d_mag_y_new && d_mag_z_new) {
                     std::vector<double> h_mx(Nd_), h_my(Nd_), h_mz(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_mx.data(), d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_my.data(), d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_mz.data(), d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_mx.data(), d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_my.data(), d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_mz.data(), d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int i = 0; i < Nd_; i++)
                         mag_sum += std::sqrt(h_mx[i]*h_mx[i] + h_my[i]*h_my[i] + h_mz[i]*h_mz[i]);
                     mag_sum *= dV_;
@@ -3628,8 +3631,8 @@ double GPUSCFRunner::run(
                 double mag_sum = 0;
                 if (d_rho_new_up && d_rho_new_dn) {
                     std::vector<double> h_ru(Nd_), h_rd(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_ru.data(), d_rho_new_up, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_rd.data(), d_rho_new_dn, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_ru.data(), d_rho_new_up, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_rd.data(), d_rho_new_dn, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int i = 0; i < Nd_; i++) mag_sum += h_ru[i] - h_rd[i];
                     mag_sum *= dV_;
                 }
@@ -3667,7 +3670,7 @@ double GPUSCFRunner::run(
             // Step 4a: Shift Veff_new to zero-mean per spin, save mean
             {
                 std::vector<double> h_Veff_new(2 * Nd_);
-                CUDA_CHECK(cudaMemcpy(h_Veff_new.data(), d_Veff_new_tmp, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_Veff_new.data(), d_Veff_new_tmp, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 for (int s = 0; s < Nspin; s++) {
                     double mean = 0;
                     for (int i = 0; i < Nd_; i++) mean += h_Veff_new[s * Nd_ + i];
@@ -3675,7 +3678,7 @@ double GPUSCFRunner::run(
                     Veff_mean[s] = mean;
                     for (int i = 0; i < Nd_; i++) h_Veff_new[s * Nd_ + i] -= mean;
                 }
-                CUDA_CHECK(cudaMemcpy(d_Veff_new_tmp, h_Veff_new.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_Veff_new_tmp, h_Veff_new.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
 
             // Step 4b: Pulay mix on zero-mean Veff.
@@ -3686,13 +3689,13 @@ double GPUSCFRunner::run(
             // Step 4c: d_Veff = d_Veff_mixed + mean (restore mean per spin)
             {
                 std::vector<double> h_Vm(2 * Nd_);
-                CUDA_CHECK(cudaMemcpy(h_Vm.data(), d_Veff_mixed, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_Vm.data(), d_Veff_mixed, 2 * Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 for (int s = 0; s < Nspin; s++) {
                     for (int i = 0; i < Nd_; i++) {
                         h_Vm[s * Nd_ + i] += Veff_mean[s];
                     }
                 }
-                CUDA_CHECK(cudaMemcpy(d_Veff, h_Vm.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_Veff, h_Vm.data(), 2 * Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
 
             // d_rho already updated to new density above
@@ -3704,22 +3707,22 @@ double GPUSCFRunner::run(
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
 
-            CUDA_CHECK(cudaMemcpy(d_dens_in, d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_dens_in + Nd_, d_mag_x, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_dens_in + 2*Nd_, d_mag_y, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_dens_in + 3*Nd_, d_mag_z, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_in, d_rho_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_in + Nd_, d_mag_x, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_in + 2*Nd_, d_mag_y, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_in + 3*Nd_, d_mag_z, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
-            CUDA_CHECK(cudaMemcpy(d_dens_out, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_dens_out + Nd_, d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_dens_out + 2*Nd_, d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_dens_out + 3*Nd_, d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_out, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_out + Nd_, d_mag_x_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_out + 2*Nd_, d_mag_y_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_dens_out + 3*Nd_, d_mag_z_new, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
             gpu_pulay_mix(d_dens_in, d_dens_out, 4 * Nd_, mixing_history, mixing_param);
 
-            CUDA_CHECK(cudaMemcpy(d_rho_soc, d_dens_in, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_mag_x, d_dens_in + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_mag_y, d_dens_in + 2*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
-            CUDA_CHECK(cudaMemcpy(d_mag_z, d_dens_in + 3*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_rho_soc, d_dens_in, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_mag_x, d_dens_in + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_mag_y, d_dens_in + 2*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_mag_z, d_dens_in + 3*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
             clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, 0.0, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -3869,14 +3872,14 @@ double GPUSCFRunner::run(
         // Recompute Veff on CPU with hybrid-scaled XC, upload to GPU
         auto recompute_veff_hybrid = [&]() {
             std::vector<double> h_rho(Nd_);
-            CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_rho.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
             std::vector<double> h_rho_up, h_rho_dn;
             if (Nspin == 2) {
                 h_rho_up.resize(Nd_);
                 h_rho_dn.resize(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 // Total density
                 for (int i = 0; i < Nd_; i++) h_rho[i] = h_rho_up[i] + h_rho_dn[i];
             }
@@ -3913,7 +3916,7 @@ double GPUSCFRunner::run(
 
             // Poisson: rho_total - rho_b -> phi
             std::vector<double> h_phi(Nd_);
-            CUDA_CHECK(cudaMemcpy(h_phi.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_phi.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
             // Veff = Vxc + phi  (per spin)
             std::vector<double> h_Veff(vxc_size);
@@ -3922,12 +3925,12 @@ double GPUSCFRunner::run(
                     h_Veff[s * Nd_ + i] = h_Vxc[s * Nd_ + i] + h_phi[i];
 
             // Upload Veff, Vxc, exc, Dxcdgrho to GPU
-            CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_Vxc, h_Vxc.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_Veff, h_Veff.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_Vxc, h_Vxc.data(), vxc_size * sizeof(double), cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
             if (xcfunc.is_gga() && ctx.buf.Dxcdgrho) {
-                CUDA_CHECK(cudaMemcpy(ctx.buf.Dxcdgrho, h_Dxcdgrho.data(),
-                                       Nd_ * dxc_ncol * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(ctx.buf.Dxcdgrho, h_Dxcdgrho.data(),
+                                       Nd_ * dxc_ncol * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
         };
 
@@ -3946,8 +3949,8 @@ double GPUSCFRunner::run(
                 int Nocc_est = 0;
                 for (int s = 0; s < Nspin_local; s++) {
                     int s_glob = spin_start + s;
-                    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ_arr[s_glob],
-                        Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ_arr[s_glob],
+                        Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int n = 0; n < Nband; n++) {
                         if (h_occ[n] > 1e-6)
                             Nocc_est = std::max(Nocc_est, n + 1);
@@ -3969,8 +3972,8 @@ double GPUSCFRunner::run(
 
                     // Download occupations for this spin
                     std::vector<double> h_occ(Nband);
-                    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ_arr[s_glob],
-                        Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ_arr[s_glob],
+                        Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
                     // Allocate d_Xi_ if needed
                     size_t Xi_bytes = (size_t)Nd_ * exx_Nocc_ * sizeof(double);
@@ -4003,8 +4006,8 @@ double GPUSCFRunner::run(
                 for (int s = 0; s < Nspin_local; s++) {
                     int s_glob = spin_start + s;
                     std::vector<double> h_occ(Nband);
-                    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ_arr[s_glob],
-                        Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ_arr[s_glob],
+                        Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
                     Eexx_est += gpu::compute_energy_gpu(
                         ctx.cublas,
@@ -4043,8 +4046,8 @@ double GPUSCFRunner::run(
                     // Only update eigval_min and lambda_cutoff.
                     // eigval_max must stay at Lanczos spectral bound (Hamiltonian spectral radius).
                     std::vector<double> h_eigs(Nband);
-                    CUDA_CHECK(cudaMemcpy(h_eigs.data(), d_eigvals_arr[s_glob],
-                        Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_eigs.data(), d_eigvals_arr[s_glob],
+                        Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     eigval_min_s[s_glob] = h_eigs[0];
                     // DO NOT overwrite eigval_max_s — it's the Lanczos upper bound
                     lambda_cutoff = h_eigs[Nband - 1] + 0.1;
@@ -4093,8 +4096,8 @@ double GPUSCFRunner::run(
                     for (int s = 0; s < Nspin_local; s++) {
                         int s_glob = spin_start + s;
                         std::vector<double> h_eigs(Nband);
-                        CUDA_CHECK(cudaMemcpy(h_eigs.data(), d_eigvals_arr[s_glob],
-                            Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_eigs.data(), d_eigvals_arr[s_glob],
+                            Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int n = 0; n < Nband; n++)
                             wfn.eigenvalues(s, 0)(n) = h_eigs[n];
                     }
@@ -4108,8 +4111,8 @@ double GPUSCFRunner::run(
                         std::vector<double> h_occ(Nband);
                         for (int n = 0; n < Nband; n++)
                             h_occ[n] = wfn.occupations(s, 0)(n);
-                        CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                            Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[s_glob], h_occ.data(),
+                            Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
                     }
                 }
 
@@ -4158,17 +4161,17 @@ double GPUSCFRunner::run(
                 double scf_error = 0.0;
                 {
                     std::vector<double> h_rho_out(Nd_), h_rho_in(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_rho_out.data(), d_rho_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_rho_in.data(), (Nspin == 2) ? d_rho_new : d_rho,
-                        Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_rho_out.data(), d_rho_new, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), (Nspin == 2) ? d_rho_new : d_rho,
+                        Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     if (Nspin == 2) {
                         // rho_in is the old mixed total density
-                        CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         // For spin-2, d_rho stores [up|dn], total = up + dn
                         std::vector<double> h_rho_in_total(Nd_);
                         std::vector<double> h_rup(Nd_), h_rdn(Nd_);
-                        CUDA_CHECK(cudaMemcpy(h_rup.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                        CUDA_CHECK(cudaMemcpy(h_rdn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rup.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rdn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int i = 0; i < Nd_; i++) h_rho_in[i] = h_rup[i] + h_rdn[i];
                     }
                     double sum_sq_diff = 0, sum_sq_out = 0;
@@ -4196,18 +4199,18 @@ double GPUSCFRunner::run(
                     // exc, Vxc, phi from GPU. Must use input density for all integrals.
                     int vxc_size = Nd_ * Nspin;
                     std::vector<double> h_rho_in(Nd_), h_exc_v(Nd_), h_phi_v(Nd_), h_Vxc_v(vxc_size);
-                    CUDA_CHECK(cudaMemcpy(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_Vxc_v.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_Vxc_v.data(), d_Vxc, vxc_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
                     // Get total input density
                     if (Nspin == 2) {
                         std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
-                        CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                        CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int i = 0; i < Nd_; i++) h_rho_in[i] = h_rho_up[i] + h_rho_dn[i];
                     } else {
-                        CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     }
 
                     // Exc = int(rho * exc) dV (with NLCC: (rho + rho_core) * exc)
@@ -4225,8 +4228,8 @@ double GPUSCFRunner::run(
                     double E2 = 0.0;
                     if (Nspin == 2) {
                         std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
-                        CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                        CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                        CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                         for (int i = 0; i < Nd_; i++)
                             E2 += h_rho_up[i] * h_Vxc_v[i] + h_rho_dn[i] * h_Vxc_v[Nd_ + i];
                     } else {
@@ -4244,7 +4247,7 @@ double GPUSCFRunner::run(
                     // Ehart = 0.5 * int((rho + rho_b) * phi) dV
                     double Ehart = 0.0;
                     std::vector<double> h_rho_b(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_rho_b.data(), d_pseudocharge_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_rho_b.data(), d_pseudocharge_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int i = 0; i < Nd_; i++)
                         Ehart += (h_rho_in[i] + h_rho_b[i]) * h_phi_v[i];
                     Ehart *= 0.5 * dV_;
@@ -4320,8 +4323,8 @@ double GPUSCFRunner::run(
                 for (int s = 0; s < Nspin_local; s++) {
                     int s_glob = spin_start + s;
                     std::vector<double> h_occ(Nband);
-                    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ_arr[s_glob],
-                        Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ_arr[s_glob],
+                        Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     Eexx_new += gpu::compute_energy_gpu(
                         ctx.cublas,
                         d_psi_arr[s_glob], Nd_, Nband, exx_Nocc_,
@@ -4383,10 +4386,10 @@ double GPUSCFRunner::run(
                     d_psi_z_kpt_[s * Nkpts + k]);
                 size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                 for (int n = 0; n < Nband; n++) {
-                    CUDA_CHECK(cudaMemcpy(
+                    CUDA_CHECK(cudaMemcpyAsync(
                         wfn.psi_kpt(s, k).col(n),
                         reinterpret_cast<const char*>(d_psi_sk) + n * col_bytes,
-                        col_bytes, cudaMemcpyDeviceToHost));
+                        col_bytes, cudaMemcpyDeviceToHost, stream));
                 }
             }
         }
@@ -4413,14 +4416,14 @@ double GPUSCFRunner::run(
         // Recompute Veff on CPU with hybrid-scaled XC, upload to GPU
         auto recompute_veff_hybrid_kpt = [&]() {
             std::vector<double> h_rho(Nd_);
-            CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_rho.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
             std::vector<double> h_rho_up, h_rho_dn;
             if (Nspin == 2) {
                 h_rho_up.resize(Nd_);
                 h_rho_dn.resize(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 for (int i = 0; i < Nd_; i++) h_rho[i] = h_rho_up[i] + h_rho_dn[i];
             }
 
@@ -4454,19 +4457,19 @@ double GPUSCFRunner::run(
             }
 
             std::vector<double> h_phi(Nd_);
-            CUDA_CHECK(cudaMemcpy(h_phi.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_phi.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
             std::vector<double> h_Veff(Nd_ * Nspin);
             for (int s = 0; s < Nspin; s++)
                 for (int i = 0; i < Nd_; i++)
                     h_Veff[s * Nd_ + i] = h_Vxc[s * Nd_ + i] + h_phi[i];
 
-            CUDA_CHECK(cudaMemcpy(d_Veff, h_Veff.data(), Nd_ * Nspin * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_Vxc, h_Vxc.data(), Nd_ * Nspin * sizeof(double), cudaMemcpyHostToDevice));
-            CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_Veff, h_Veff.data(), Nd_ * Nspin * sizeof(double), cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_Vxc, h_Vxc.data(), Nd_ * Nspin * sizeof(double), cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_exc, h_exc.data(), Nd_ * sizeof(double), cudaMemcpyHostToDevice, stream));
             if (xcfunc.is_gga() && ctx.buf.Dxcdgrho) {
-                CUDA_CHECK(cudaMemcpy(ctx.buf.Dxcdgrho, h_Dxcdgrho.data(),
-                                       Nd_ * dxc_ncol_kpt * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(ctx.buf.Dxcdgrho, h_Dxcdgrho.data(),
+                                       Nd_ * dxc_ncol_kpt * sizeof(double), cudaMemcpyHostToDevice, stream));
             }
         };
 
@@ -4484,8 +4487,8 @@ double GPUSCFRunner::run(
                 for (int s = 0; s < Nspin_local_; s++) {
                     int s_glob = spin_start + s;
                     std::vector<double> h_occ(Nband);
-                    CUDA_CHECK(cudaMemcpy(h_occ.data(), d_occ_arr[s_glob],
-                        Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_occ.data(), d_occ_arr[s_glob],
+                        Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int n = 0; n < Nband; n++) {
                         if (h_occ[n] > 1e-6)
                             Nocc_est = std::max(Nocc_est, n + 1);
@@ -4538,10 +4541,10 @@ double GPUSCFRunner::run(
                     for (int k = 0; k < Nkpts; k++) {
                         size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                         for (int n = 0; n < Nband; n++) {
-                            CUDA_CHECK(cudaMemcpy(
+                            CUDA_CHECK(cudaMemcpyAsync(
                                 reinterpret_cast<char*>(d_psi_all_k[k]) + n * col_bytes,
                                 wfn.psi_kpt(s, k).col(n),
-                                col_bytes, cudaMemcpyHostToDevice));
+                                col_bytes, cudaMemcpyHostToDevice, stream));
                         }
                     }
 
@@ -4580,8 +4583,8 @@ double GPUSCFRunner::run(
 
                             // If time-reversed, conjugate psi_q
                             if (q_pn == 0) {
-                                CUDA_CHECK(cudaMemcpy(d_psi_q_conj, d_psi_q_src,
-                                    2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToDevice));
+                                CUDA_CHECK(cudaMemcpyAsync(d_psi_q_conj, d_psi_q_src,
+                                    2 * (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToDevice, stream));
                                 // Conjugate: negate imaginary parts (stride 2 in double view)
                                 double neg_one = -1.0;
                                 double* d_imag = reinterpret_cast<double*>(d_psi_q_conj) + 1;
@@ -4639,10 +4642,10 @@ double GPUSCFRunner::run(
                         {
                             size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                             for (int n = 0; n < Nband; n++) {
-                                CUDA_CHECK(cudaMemcpy(
+                                CUDA_CHECK(cudaMemcpyAsync(
                                     reinterpret_cast<char*>(d_psi_tmp) + n * col_bytes,
                                     wfn.psi_kpt(s, k).col(n),
-                                    col_bytes, cudaMemcpyHostToDevice));
+                                    col_bytes, cudaMemcpyHostToDevice, stream));
                             }
                         }
 
@@ -4706,10 +4709,10 @@ double GPUSCFRunner::run(
                                 int ld = wfn.psi_kpt(s, k).ld();
                                 size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                                 for (int n = 0; n < Nband; n++) {
-                                    CUDA_CHECK(cudaMemcpy(
+                                    CUDA_CHECK(cudaMemcpyAsync(
                                         reinterpret_cast<char*>(d_psi_z) + n * col_bytes,
                                         wfn.psi_kpt(s, k).col(n),
-                                        col_bytes, cudaMemcpyHostToDevice));
+                                        col_bytes, cudaMemcpyHostToDevice, stream));
                                 }
                             }
 
@@ -4728,8 +4731,8 @@ double GPUSCFRunner::run(
                             CUDA_CHECK(cudaDeviceSynchronize());
                             {
                                 std::vector<double> h_eigs(Nband);
-                                CUDA_CHECK(cudaMemcpy(h_eigs.data(), d_eigvals_arr[s_glob],
-                                    Nband * sizeof(double), cudaMemcpyDeviceToHost));
+                                CUDA_CHECK(cudaMemcpyAsync(h_eigs.data(), d_eigvals_arr[s_glob],
+                                    Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
                                 for (int n = 0; n < Nband; n++)
                                     wfn.eigenvalues(s, k)(n) = h_eigs[n];
                             }
@@ -4737,10 +4740,10 @@ double GPUSCFRunner::run(
                             {
                                 size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                                 for (int n = 0; n < Nband; n++) {
-                                    CUDA_CHECK(cudaMemcpy(
+                                    CUDA_CHECK(cudaMemcpyAsync(
                                         wfn.psi_kpt(s, k).col(n),
                                         reinterpret_cast<const char*>(d_psi_z) + n * col_bytes,
-                                        col_bytes, cudaMemcpyDeviceToHost));
+                                        col_bytes, cudaMemcpyDeviceToHost, stream));
                                 }
                             }
                         }
@@ -4760,8 +4763,8 @@ double GPUSCFRunner::run(
                             std::vector<double> h_occ(Nband);
                             for (int n = 0; n < Nband; n++)
                                 h_occ[n] = wfn.occupations(s, k)(n);
-                            CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                                Nband * sizeof(double), cudaMemcpyHostToDevice));
+                            CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[s_glob], h_occ.data(),
+                                Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
                         }
                     }
                 }
@@ -4785,18 +4788,18 @@ double GPUSCFRunner::run(
                             {
                                 size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                                 for (int n = 0; n < Nband; n++) {
-                                    CUDA_CHECK(cudaMemcpy(
+                                    CUDA_CHECK(cudaMemcpyAsync(
                                         reinterpret_cast<char*>(d_psi_z) + n * col_bytes,
                                         wfn.psi_kpt(s, k).col(n),
-                                        col_bytes, cudaMemcpyHostToDevice));
+                                        col_bytes, cudaMemcpyHostToDevice, stream));
                                 }
                             }
 
                             std::vector<double> h_occ(Nband);
                             for (int n = 0; n < Nband; n++)
                                 h_occ[n] = wfn.occupations(s, k)(n);
-                            CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
-                                Nband * sizeof(double), cudaMemcpyHostToDevice));
+                            CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[s_glob], h_occ.data(),
+                                Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
                             gpu::compute_density_z_gpu(
                                 d_psi_z, d_occ_arr[s_glob],
@@ -4818,18 +4821,18 @@ double GPUSCFRunner::run(
                         {
                             size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                             for (int n = 0; n < Nband; n++) {
-                                CUDA_CHECK(cudaMemcpy(
+                                CUDA_CHECK(cudaMemcpyAsync(
                                     reinterpret_cast<char*>(d_psi_z) + n * col_bytes,
                                     wfn.psi_kpt(0, k).col(n),
-                                    col_bytes, cudaMemcpyHostToDevice));
+                                    col_bytes, cudaMemcpyHostToDevice, stream));
                             }
                         }
 
                         std::vector<double> h_occ(Nband);
                         for (int n = 0; n < Nband; n++)
                             h_occ[n] = wfn.occupations(0, k)(n);
-                        CUDA_CHECK(cudaMemcpy(d_occ_arr[0], h_occ.data(),
-                            Nband * sizeof(double), cudaMemcpyHostToDevice));
+                        CUDA_CHECK(cudaMemcpyAsync(d_occ_arr[0], h_occ.data(),
+                            Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
                         gpu::compute_density_z_gpu(
                             d_psi_z, d_occ_arr[0],
@@ -4853,13 +4856,13 @@ double GPUSCFRunner::run(
 
                 // Download input density (mixed rho used for Veff)
                 std::vector<double> h_rho_in(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_in.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 // For non-spin: h_rho_in = total density from d_rho
 
                 std::vector<double> h_exc_v(Nd_), h_Vxc_v(Nd_ * Nspin), h_phi_v(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_Vxc_v.data(), d_Vxc, Nd_ * Nspin * sizeof(double), cudaMemcpyDeviceToHost));
-                CUDA_CHECK(cudaMemcpy(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_exc_v.data(), d_exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_Vxc_v.data(), d_Vxc, Nd_ * Nspin * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                CUDA_CHECK(cudaMemcpyAsync(h_phi_v.data(), d_phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
                 // Exc = int(rho * exc) dV (with NLCC)
                 double Exc = 0.0;
@@ -4876,8 +4879,8 @@ double GPUSCFRunner::run(
                 double E2 = 0.0;
                 if (Nspin == 2) {
                     std::vector<double> h_rho_up(Nd_), h_rho_dn(Nd_);
-                    CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
-                    CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
+                    CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho + Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                     for (int i = 0; i < Nd_; i++)
                         E2 += h_rho_up[i] * h_Vxc_v[i] + h_rho_dn[i] * h_Vxc_v[Nd_ + i];
                 } else {
@@ -4895,7 +4898,7 @@ double GPUSCFRunner::run(
                 // Ehart = 0.5 * int((rho + rho_b) * phi) dV
                 double Ehart = 0.0;
                 std::vector<double> h_rho_b(Nd_);
-                CUDA_CHECK(cudaMemcpy(h_rho_b.data(), d_pseudocharge_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_rho_b.data(), d_pseudocharge_, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
                 for (int i = 0; i < Nd_; i++)
                     Ehart += (h_rho_in[i] + h_rho_b[i]) * h_phi_v[i];
                 Ehart *= 0.5 * dV_;
@@ -4986,10 +4989,10 @@ double GPUSCFRunner::run(
                         {
                             size_t col_bytes = (size_t)Nd_ * sizeof(cuDoubleComplex);
                             for (int n = 0; n < Nband; n++) {
-                                CUDA_CHECK(cudaMemcpy(
+                                CUDA_CHECK(cudaMemcpyAsync(
                                     reinterpret_cast<char*>(d_psi_tmp) + n * col_bytes,
                                     wfn.psi_kpt(s, k).col(n),
-                                    col_bytes, cudaMemcpyHostToDevice));
+                                    col_bytes, cudaMemcpyHostToDevice, stream));
                             }
                         }
 
@@ -5079,15 +5082,15 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
     int dxc_ncol = is_gga_ ? ((Nspin_ == 2) ? 3 : 1) : 0;
 
     if (phi)
-        CUDA_CHECK(cudaMemcpy(phi, ctx.buf.phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(phi, ctx.buf.phi, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
     if (Vxc) {
         double* d_Vxc_src = (Nspin_ >= 2 || has_soc_) ? ctx.buf.Vxc : ctx.buf.Vc;
-        CUDA_CHECK(cudaMemcpy(Vxc, d_Vxc_src, vxc_size * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(Vxc, d_Vxc_src, vxc_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
     }
     if (exc)
-        CUDA_CHECK(cudaMemcpy(exc, ctx.buf.exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(exc, ctx.buf.exc, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
     if (Veff)
-        CUDA_CHECK(cudaMemcpy(Veff, ctx.buf.Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(Veff, ctx.buf.Veff, veff_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
     // Download total density
     if (rho) {
@@ -5098,16 +5101,16 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
             double* d_temp = ctx.buf.rho_total;
             add_kernel<<<gs, bs, 0, stream>>>(ctx.buf.rho, ctx.buf.rho + Nd_, d_temp, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
-            CUDA_CHECK(cudaMemcpy(rho, d_temp, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(rho, d_temp, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
         } else {
-            CUDA_CHECK(cudaMemcpy(rho, ctx.buf.rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(rho, ctx.buf.rho, Nd_ * sizeof(double), cudaMemcpyDeviceToHost, stream));
         }
     }
 
     // Download Dxcdgrho if GGA
     if (Dxcdgrho && dxc_ncol > 0 && ctx.buf.Dxcdgrho) {
-        CUDA_CHECK(cudaMemcpy(Dxcdgrho, ctx.buf.Dxcdgrho,
-                               Nd_ * dxc_ncol * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(Dxcdgrho, ctx.buf.Dxcdgrho,
+                               Nd_ * dxc_ncol * sizeof(double), cudaMemcpyDeviceToHost, stream));
     }
 
     // Download wavefunctions (real for gamma, complex already in wfn for k-point)
@@ -5116,8 +5119,8 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
         for (int s = 0; s < Nspin_local_; s++) {
             int s_glob = spin_start_ + s;
             std::vector<double> h_psi(Nd_ * Nband);
-            CUDA_CHECK(cudaMemcpy(h_psi.data(), d_psi_arr[s_glob],
-                (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpyAsync(h_psi.data(), d_psi_arr[s_glob],
+                (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
             for (int j = 0; j < Nband; j++)
                 std::memcpy(wfn.psi(s, 0).col(j), h_psi.data() + j * Nd_, Nd_ * sizeof(double));
         }
@@ -5133,8 +5136,8 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
                 auto& psi_sk = wfn.psi_kpt(s, k);
                 auto* d_src = static_cast<const char*>(d_psi_z_kpt_[s * Nkpts + k]);
                 for (int n = 0; n < Nband; n++) {
-                    CUDA_CHECK(cudaMemcpy(psi_sk.col(n), d_src + n * col_bytes,
-                                           col_bytes, cudaMemcpyDeviceToHost));
+                    CUDA_CHECK(cudaMemcpyAsync(psi_sk.col(n), d_src + n * col_bytes,
+                                           col_bytes, cudaMemcpyDeviceToHost, stream));
                 }
             }
         }
@@ -5282,8 +5285,8 @@ void GPUSCFRunner::compute_mgga_stress(
             const auto& psi_mat = wfn.psi(s, 0);
             int ld_cpu = psi_mat.ld();
             if (ld_cpu == Nd_) {
-                CUDA_CHECK(cudaMemcpy(ctx.buf.psi, psi_mat.data(),
-                                      (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(ctx.buf.psi, psi_mat.data(),
+                                      (size_t)Nd_ * Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
             } else {
                 // Strided copy: CPU stride ld_cpu, GPU stride Nd_
                 CUDA_CHECK(cudaMemcpy2D(
@@ -5294,8 +5297,8 @@ void GPUSCFRunner::compute_mgga_stress(
             }
 
             const auto& occ = wfn.occupations(s, 0);
-            CUDA_CHECK(cudaMemcpy(ctx.buf.occupations, occ.data() + 0,
-                                  Nband * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(ctx.buf.occupations, occ.data() + 0,
+                                  Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
             // Only compute tau·vtau dot once (covers both spins)
             int dot_len_s = (s == 0) ? tau_dot_len : 0;
@@ -5332,10 +5335,12 @@ void GPUSCFRunner::compute_mgga_stress(
 // Download mGGA tau/vtau from GPU
 // ============================================================
 void GPUSCFRunner::download_tau_vtau(double* tau, double* vtau, int tau_size, int vtau_size) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     if (d_tau_ && tau && tau_size > 0)
-        CUDA_CHECK(cudaMemcpy(tau, d_tau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(tau, d_tau_, tau_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
     if (d_vtau_ && vtau && vtau_size > 0)
-        CUDA_CHECK(cudaMemcpy(vtau, d_vtau_, vtau_size * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(vtau, d_vtau_, vtau_size * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 // ============================================================
@@ -5343,10 +5348,12 @@ void GPUSCFRunner::download_tau_vtau(double* tau, double* vtau, int tau_size, in
 // ============================================================
 void GPUSCFRunner::download_spin_densities(double* rho_up, double* rho_dn, int size) {
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     if (rho_up && size > 0)
-        CUDA_CHECK(cudaMemcpy(rho_up, ctx.buf.rho, size * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(rho_up, ctx.buf.rho, size * sizeof(double), cudaMemcpyDeviceToHost, stream));
     if (rho_dn && size > 0)
-        CUDA_CHECK(cudaMemcpy(rho_dn, ctx.buf.rho + Nd_, size * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(rho_dn, ctx.buf.rho + Nd_, size * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 // ============================================================
@@ -5454,13 +5461,13 @@ void GPUSCFRunner::compute_soc_force(
         size_t psi_bytes = (size_t)Nd_d_spinor * Nband * sizeof(cuDoubleComplex);
         cuDoubleComplex* d_psi_spinor = nullptr;
         CUDA_CHECK(cudaMallocAsync(&d_psi_spinor, psi_bytes, 0));
-        CUDA_CHECK(cudaMemcpy(d_psi_spinor, psi_sk.data(), psi_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, psi_sk.data(), psi_bytes, cudaMemcpyHostToDevice, stream));
 
         // Upload occupations
         const NDArray<double>& occ_k = wfn.occupations(0, k);
         double* d_occ = nullptr;
         CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), 0));
-        CUDA_CHECK(cudaMemcpy(d_occ, occ_k.data(), Nband * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_occ, occ_k.data(), Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
         // SOC force for this k-point
         std::vector<double> f_soc_k(3 * n_phys, 0.0);
@@ -5669,8 +5676,8 @@ void GPUSCFRunner::compute_soc_stress(
 
         // Download bloch factors to host for CPU beta computation
         std::vector<double> h_bloch_fac(n_influence_soc * 2);
-        CUDA_CHECK(cudaMemcpy(h_bloch_fac.data(), d_bloch_fac_,
-                              n_influence_soc * 2 * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(h_bloch_fac.data(), d_bloch_fac_,
+                              n_influence_soc * 2 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
         // Upload psi spinor to GPU
         const NDArray<Complex>& psi_sk = wfn.psi_kpt(0, k);
@@ -5678,13 +5685,13 @@ void GPUSCFRunner::compute_soc_stress(
         size_t psi_bytes = (size_t)Nd_d_spinor * Nband * sizeof(cuDoubleComplex);
         cuDoubleComplex* d_psi_spinor = nullptr;
         CUDA_CHECK(cudaMallocAsync(&d_psi_spinor, psi_bytes, 0));
-        CUDA_CHECK(cudaMemcpy(d_psi_spinor, psi_sk.data(), psi_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_psi_spinor, psi_sk.data(), psi_bytes, cudaMemcpyHostToDevice, stream));
 
         // Upload occupations
         const NDArray<double>& occ_k = wfn.occupations(0, k);
         double* d_occ = nullptr;
         CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), 0));
-        CUDA_CHECK(cudaMemcpy(d_occ, occ_k.data(), Nband * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_occ, occ_k.data(), Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
         // Lattice vectors for non-orth transforms
         double uvec_data[9] = {0}, uvec_inv_data[9] = {0};

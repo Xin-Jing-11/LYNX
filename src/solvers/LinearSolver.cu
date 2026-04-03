@@ -164,7 +164,7 @@ int aar_gpu(
     int grid = ceildiv(N, bs);
 
     // x_old = x
-    CUDA_CHECK(cudaMemcpy(d_x_old, d_x, N * sizeof(double), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_x_old, d_x, N * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
     // Small device buffers for fused Gram and norm kernels.
     // Reuse d_Ax (size N doubles) which is idle during Gram/norm phases.
@@ -180,7 +180,7 @@ int aar_gpu(
     int norm_bs = 256;
     norm2_kernel<<<1, norm_bs, norm_bs * sizeof(double), stream>>>(d_b, d_norm2_buf, N);
     double b_norm2;
-    CUDA_CHECK(cudaMemcpy(&b_norm2, d_norm2_buf, sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(&b_norm2, d_norm2_buf, sizeof(double), cudaMemcpyDeviceToHost, stream));
     double abs_tol = tol * std::sqrt(b_norm2);
 
     // Initial residual: r = b - A*x
@@ -201,7 +201,7 @@ int aar_gpu(
         if (precond_gpu) {
             precond_gpu(d_r, d_f);
         } else {
-            CUDA_CHECK(cudaMemcpy(d_f, d_r, N * sizeof(double), cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_f, d_r, N * sizeof(double), cudaMemcpyDeviceToDevice, stream));
         }
 
         // Store history
@@ -212,8 +212,8 @@ int aar_gpu(
         }
 
         // Save current state
-        CUDA_CHECK(cudaMemcpy(d_x_old, d_x, N * sizeof(double), cudaMemcpyDeviceToDevice));
-        CUDA_CHECK(cudaMemcpy(d_f_old, d_f, N * sizeof(double), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_x_old, d_x, N * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_f_old, d_f, N * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 
         if ((iter_count + 1) % p == 0 && iter_count > 0) {
             // Anderson extrapolation
@@ -237,15 +237,15 @@ int aar_gpu(
                     n_jobs++;
                 }
 
-                CUDA_CHECK(cudaMemcpy(d_pair_i, h_pair_i.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(d_pair_j, h_pair_j.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpyAsync(d_pair_i, h_pair_i.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(d_pair_j, h_pair_j.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream));
 
                 int gram_bs = std::min(256, N);
                 fused_gram_kernel<<<n_jobs, gram_bs, gram_bs * sizeof(double), stream>>>(
                     d_F_hist, d_f, d_gram_out, d_pair_i, d_pair_j, N, cols, n_jobs);
 
                 // Single D2H: download all dot products at once
-                CUDA_CHECK(cudaMemcpy(h_gram_out.data(), d_gram_out, n_jobs * sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(h_gram_out.data(), d_gram_out, n_jobs * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
                 // Unpack into h_FTF (symmetric) and h_gamma
                 int k = 0;
@@ -292,8 +292,8 @@ int aar_gpu(
             // Upload gamma to first 'cols' elements of d_Ax (safe: Anderson
             // kernel reads gamma before the next op_gpu overwrites d_Ax)
             double* d_gamma = d_Ax;
-            CUDA_CHECK(cudaMemcpy(d_gamma, h_gamma.data(), cols * sizeof(double),
-                                   cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_gamma, h_gamma.data(), cols * sizeof(double),
+                                   cudaMemcpyHostToDevice, stream));
 
             anderson_kernel<<<grid, bs, 0, stream>>>(d_x_old, d_f, d_X_hist, d_F_hist,
                                            d_gamma, d_x, beta, cols, N);
@@ -304,7 +304,7 @@ int aar_gpu(
             {
                 norm2_kernel<<<1, norm_bs, norm_bs * sizeof(double), stream>>>(d_r, d_norm2_buf, N);
                 double r_norm2;
-                CUDA_CHECK(cudaMemcpy(&r_norm2, d_norm2_buf, sizeof(double), cudaMemcpyDeviceToHost));
+                CUDA_CHECK(cudaMemcpyAsync(&r_norm2, d_norm2_buf, sizeof(double), cudaMemcpyDeviceToHost, stream));
                 r_2norm = std::sqrt(r_norm2);
             }
         } else {

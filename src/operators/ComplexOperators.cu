@@ -870,11 +870,11 @@ void nonlocal_projector_apply_z_gpu(
     CUDA_CHECK(cudaMallocAsync(&d_nproj, n_atoms * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_ip, n_atoms * sizeof(int), 0));
 
-    CUDA_CHECK(cudaMemcpy(d_gpos_off, h_gpos_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_chi_off, h_chi_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_ndc, h_ndc_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_nproj, h_nproj_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_ip, h_IP_displ, n_atoms * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_gpos_off, h_gpos_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_chi_off, h_chi_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_ndc, h_ndc_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_nproj, h_nproj_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_ip, h_IP_displ, n_atoms * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     nonlocal_projector_apply_z_gpu(
         d_psi, d_Hpsi, d_Chi_flat, d_gpos_flat,
