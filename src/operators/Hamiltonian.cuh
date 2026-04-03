@@ -1,6 +1,8 @@
 #pragma once
 #ifdef USE_CUDA
 
+#include <cuda_runtime.h>
+
 namespace lynx {
 namespace gpu {
 
@@ -19,7 +21,8 @@ void hamiltonian_apply_local_gpu(
     bool is_orthogonal,
     bool periodic_x, bool periodic_y, bool periodic_z,
     double diag_coeff,
-    bool has_xy, bool has_xz, bool has_yz);
+    bool has_xy, bool has_xz, bool has_yz,
+    cudaStream_t stream = 0);
 
 } // namespace gpu
 } // namespace lynx
