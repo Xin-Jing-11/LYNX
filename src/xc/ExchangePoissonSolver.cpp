@@ -1,4 +1,5 @@
 #include "xc/ExchangePoissonSolver.hpp"
+#include "core/LynxContext.hpp"
 #include "core/constants.hpp"
 #include <cmath>
 #include <cstring>
@@ -8,10 +9,8 @@
 
 #ifdef USE_CUDA
 #include <cufftw.h>
-#else
-#ifdef USE_MKL
-#include <fftw/fftw3.h>
-#endif
+#elif defined(USE_MKL)
+#include <mkl_dfti.h>
 #endif
 
 namespace lynx {
@@ -415,30 +414,18 @@ void ExchangePoissonSolver::setup(const FDGrid& grid, const Lattice& lattice,
     }
 }
 
-#ifndef USE_MKL
-// Stub implementations when MKL is not available (EXX requires MKL DFTI for FFT)
-void ExchangePoissonSolver::solve_batch(double*, int, double*) {
-    throw std::runtime_error("ExchangePoissonSolver::solve_batch requires MKL (build with -DUSE_MKL=ON)");
-}
-void ExchangePoissonSolver::solve_batch_stress(double*, int, double*, int) {
-    throw std::runtime_error("ExchangePoissonSolver::solve_batch_stress requires MKL");
-}
-void ExchangePoissonSolver::solve_batch_kpt(const Complex*, int, Complex*, int, int) {
-    throw std::runtime_error("ExchangePoissonSolver::solve_batch_kpt requires MKL");
-}
-void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex*, int, Complex*, int, int, int) {
-    throw std::runtime_error("ExchangePoissonSolver::solve_batch_kpt_stress requires MKL");
-}
-#else // USE_MKL
+#if defined(USE_CUDA)
+// When CUDA is enabled, ExchangePoissonSolver CPU methods use cufftw (FFTW-compatible API from cuFFT).
+// GPU path (GPUExchangePoissonSolver.cu) uses cuFFT directly.
+
 // ---------------------------------------------------------------------------
-// Solve batch — gamma-point (real FFT)
+// Solve batch — gamma-point (real FFT) via cufftw
 // ---------------------------------------------------------------------------
 void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
     if (ncol == 0) return;
 
     std::vector<Complex> rhs_bar(Ndc_ * ncol);
 
-    // Forward FFT (real to complex) via FFTW3
     {
         int n[3] = {Nz_, Ny_, Nx_};
         fftw_plan plan = fftw_plan_many_dft_r2c(
@@ -450,7 +437,6 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
         fftw_destroy_plan(plan);
     }
 
-    // Multiply by Poisson constants (last shift = zero shift for gamma)
     const double* alpha = pois_const_.data() + (Nkpts_shift_ - 1) * Ndc_;
     for (int n = 0; n < ncol; n++) {
         Complex* bar = rhs_bar.data() + n * Ndc_;
@@ -458,7 +444,6 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
     }
 
-    // Inverse FFT (complex to real) via FFTW3
     {
         int n[3] = {Nz_, Ny_, Nx_};
         fftw_plan plan = fftw_plan_many_dft_c2r(
@@ -470,21 +455,16 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
         fftw_destroy_plan(plan);
     }
 
-    // Normalize (FFTW produces unnormalized output)
     double inv_Nd = 1.0 / Nd_;
     for (int i = 0; i < Nd_ * ncol; i++)
         sol[i] *= inv_Nd;
 }
 
-// ---------------------------------------------------------------------------
-// Solve batch — gamma stress (real FFT, stress Poisson constants)
-// ---------------------------------------------------------------------------
 void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* sol, int option) {
     if (ncol == 0) return;
 
     std::vector<Complex> rhs_bar(Ndc_ * ncol);
 
-    // Forward FFT (real to complex) via FFTW3
     {
         int n[3] = {Nz_, Ny_, Nx_};
         fftw_plan plan = fftw_plan_many_dft_r2c(
@@ -496,7 +476,6 @@ void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* so
         fftw_destroy_plan(plan);
     }
 
-    // Multiply by stress Poisson constants (last shift = zero shift for gamma)
     const auto& pconst = (option == 2) ? pois_const_stress2_ : pois_const_stress_;
     const double* alpha = pconst.data() + (Nkpts_shift_ - 1) * Ndc_;
     for (int n = 0; n < ncol; n++) {
@@ -505,7 +484,6 @@ void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* so
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
     }
 
-    // Inverse FFT (complex to real) via FFTW3
     {
         int n[3] = {Nz_, Ny_, Nx_};
         fftw_plan plan = fftw_plan_many_dft_c2r(
@@ -522,21 +500,14 @@ void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* so
         sol[i] *= inv_Nd;
 }
 
-// ---------------------------------------------------------------------------
-// Solve batch — k-point (complex FFT)
-// ---------------------------------------------------------------------------
 void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Complex* sol,
                                              int kpt_k, int kpt_q) {
     if (ncol == 0) return;
 
-    // Work copy of rhs (apply_phase_factor modifies in-place)
     std::vector<Complex> rhs_copy(Nd_ * ncol);
     std::memcpy(rhs_copy.data(), rhs, sizeof(Complex) * Nd_ * ncol);
-
-    // Apply negative phase factor: rhs *= exp(-i*(k-q)*r)
     apply_phase_factor(rhs_copy.data(), ncol, false, kpt_k, kpt_q);
 
-    // Forward FFT (complex to complex) via FFTW3
     std::vector<Complex> rhs_bar(Nd_ * ncol);
     {
         int n[3] = {Nz_, Ny_, Nx_};
@@ -548,6 +519,179 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
         fftw_execute(plan);
         fftw_destroy_plan(plan);
     }
+
+    int l = Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
+    const double* alpha;
+    if (l == 0) {
+        alpha = pois_const_.data() + Nd_ * (Nkpts_shift_ - 1);
+    } else {
+        alpha = pois_const_.data() + Nd_ * (l - 1);
+    }
+
+    for (int n = 0; n < ncol; n++) {
+        Complex* bar = rhs_bar.data() + n * Nd_;
+        for (int i = 0; i < Nd_; i++)
+            bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
+    }
+
+    {
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(sol), nullptr, 1, Nd_,
+            FFTW_BACKWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
+    }
+
+    double inv_Nd = 1.0 / Nd_;
+    for (int i = 0; i < Nd_ * ncol; i++)
+        sol[i] *= inv_Nd;
+
+    apply_phase_factor(sol, ncol, true, kpt_k, kpt_q);
+}
+
+void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol, Complex* sol,
+                                                    int kpt_k, int kpt_q, int option) {
+    if (ncol == 0) return;
+
+    std::vector<Complex> rhs_copy(Nd_ * ncol);
+    std::memcpy(rhs_copy.data(), rhs, sizeof(Complex) * Nd_ * ncol);
+    apply_phase_factor(rhs_copy.data(), ncol, false, kpt_k, kpt_q);
+
+    std::vector<Complex> rhs_bar(Nd_ * ncol);
+    {
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_copy.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            FFTW_FORWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
+    }
+
+    int l = Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
+    const double* alpha;
+    const auto& pconst = (option == 2) ? pois_const_stress2_ : pois_const_stress_;
+    if (l == 0) {
+        alpha = pconst.data() + Nd_ * (Nkpts_shift_ - 1);
+    } else {
+        alpha = pconst.data() + Nd_ * (l - 1);
+    }
+
+    for (int n = 0; n < ncol; n++) {
+        Complex* bar = rhs_bar.data() + n * Nd_;
+        for (int i = 0; i < Nd_; i++)
+            bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
+    }
+
+    {
+        int n[3] = {Nz_, Ny_, Nx_};
+        fftw_plan plan = fftw_plan_many_dft(
+            3, n, ncol,
+            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
+            reinterpret_cast<fftw_complex*>(sol), nullptr, 1, Nd_,
+            FFTW_BACKWARD, FFTW_ESTIMATE);
+        fftw_execute(plan);
+        fftw_destroy_plan(plan);
+    }
+
+    double inv_Nd = 1.0 / Nd_;
+    for (int i = 0; i < Nd_ * ncol; i++)
+        sol[i] *= inv_Nd;
+
+    apply_phase_factor(sol, ncol, true, kpt_k, kpt_q);
+}
+
+#elif defined(USE_MKL)
+// ---------------------------------------------------------------------------
+// MKL DFTI native implementation (no FFTW wrapper dependency)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Solve batch — gamma-point (real FFT) via MKL DFTI
+// ---------------------------------------------------------------------------
+void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
+    if (ncol == 0) return;
+
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
+
+    std::vector<Complex> rhs_bar(Ndc_ * ncol);
+
+    // Forward R2C FFT
+    DftiComputeForward(ctx.dfti_r2c(), rhs, rhs_bar.data());
+
+    // Multiply by Poisson constants (last shift = zero shift for gamma)
+    const double* alpha = pois_const_.data() + (Nkpts_shift_ - 1) * Ndc_;
+    for (int n = 0; n < ncol; n++) {
+        Complex* bar = rhs_bar.data() + n * Ndc_;
+        for (int i = 0; i < Ndc_; i++)
+            bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
+    }
+
+    // Backward C2R FFT
+    DftiComputeBackward(ctx.dfti_c2r(), rhs_bar.data(), sol);
+
+    // Normalize (MKL DFTI default: no normalization, same as FFTW)
+    double inv_Nd = 1.0 / Nd_;
+    for (int i = 0; i < Nd_ * ncol; i++)
+        sol[i] *= inv_Nd;
+}
+
+// ---------------------------------------------------------------------------
+// Solve batch — gamma stress (real FFT, stress Poisson constants) via MKL DFTI
+// ---------------------------------------------------------------------------
+void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* sol, int option) {
+    if (ncol == 0) return;
+
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
+
+    std::vector<Complex> rhs_bar(Ndc_ * ncol);
+
+    // Forward R2C FFT
+    DftiComputeForward(ctx.dfti_r2c(), rhs, rhs_bar.data());
+
+    // Multiply by stress Poisson constants
+    const auto& pconst = (option == 2) ? pois_const_stress2_ : pois_const_stress_;
+    const double* alpha = pconst.data() + (Nkpts_shift_ - 1) * Ndc_;
+    for (int n = 0; n < ncol; n++) {
+        Complex* bar = rhs_bar.data() + n * Ndc_;
+        for (int i = 0; i < Ndc_; i++)
+            bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
+    }
+
+    // Backward C2R FFT
+    DftiComputeBackward(ctx.dfti_c2r(), rhs_bar.data(), sol);
+
+    double inv_Nd = 1.0 / Nd_;
+    for (int i = 0; i < Nd_ * ncol; i++)
+        sol[i] *= inv_Nd;
+}
+
+// ---------------------------------------------------------------------------
+// Solve batch — k-point (complex FFT) via MKL DFTI
+// ---------------------------------------------------------------------------
+void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Complex* sol,
+                                             int kpt_k, int kpt_q) {
+    if (ncol == 0) return;
+
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
+
+    // Work copy of rhs (apply_phase_factor modifies in-place)
+    std::vector<Complex> rhs_copy(Nd_ * ncol);
+    std::memcpy(rhs_copy.data(), rhs, sizeof(Complex) * Nd_ * ncol);
+
+    // Apply negative phase factor: rhs *= exp(-i*(k-q)*r)
+    apply_phase_factor(rhs_copy.data(), ncol, false, kpt_k, kpt_q);
+
+    // Forward C2C FFT
+    std::vector<Complex> rhs_bar(Nd_ * ncol);
+    DftiComputeForward(ctx.dfti_fwd(), rhs_copy.data(), rhs_bar.data());
 
     // Multiply by Poisson constants
     int l = Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
@@ -560,57 +704,39 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
 
     for (int n = 0; n < ncol; n++) {
         Complex* bar = rhs_bar.data() + n * Nd_;
-        for (int i = 0; i < Nd_; i++) {
+        for (int i = 0; i < Nd_; i++)
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
-        }
     }
 
-    // Inverse FFT (complex to complex) via FFTW3
-    {
-        int n[3] = {Nz_, Ny_, Nx_};
-        fftw_plan plan = fftw_plan_many_dft(
-            3, n, ncol,
-            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
-            reinterpret_cast<fftw_complex*>(sol), nullptr, 1, Nd_,
-            FFTW_BACKWARD, FFTW_ESTIMATE);
-        fftw_execute(plan);
-        fftw_destroy_plan(plan);
-    }
+    // Backward C2C FFT
+    DftiComputeBackward(ctx.dfti_inv(), rhs_bar.data(), sol);
 
     // Normalize
     double inv_Nd = 1.0 / Nd_;
-    for (int i = 0; i < Nd_ * ncol; i++) {
+    for (int i = 0; i < Nd_ * ncol; i++)
         sol[i] *= inv_Nd;
-    }
 
     // Apply positive phase factor: sol *= exp(+i*(k-q)*r)
     apply_phase_factor(sol, ncol, true, kpt_k, kpt_q);
 }
 
 // ---------------------------------------------------------------------------
-// Solve batch — k-point with stress Poisson constants
+// Solve batch — k-point with stress Poisson constants via MKL DFTI
 // option=1: pois_const_stress_, option=2: pois_const_stress2_
 // ---------------------------------------------------------------------------
 void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol, Complex* sol,
                                                     int kpt_k, int kpt_q, int option) {
     if (ncol == 0) return;
 
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
+
     std::vector<Complex> rhs_copy(Nd_ * ncol);
     std::memcpy(rhs_copy.data(), rhs, sizeof(Complex) * Nd_ * ncol);
-
     apply_phase_factor(rhs_copy.data(), ncol, false, kpt_k, kpt_q);
 
     std::vector<Complex> rhs_bar(Nd_ * ncol);
-    {
-        int n[3] = {Nz_, Ny_, Nx_};
-        fftw_plan plan = fftw_plan_many_dft(
-            3, n, ncol,
-            reinterpret_cast<fftw_complex*>(rhs_copy.data()), nullptr, 1, Nd_,
-            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
-            FFTW_FORWARD, FFTW_ESTIMATE);
-        fftw_execute(plan);
-        fftw_destroy_plan(plan);
-    }
+    DftiComputeForward(ctx.dfti_fwd(), rhs_copy.data(), rhs_bar.data());
 
     // Select appropriate stress constants
     int l = Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
@@ -624,21 +750,11 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
 
     for (int n = 0; n < ncol; n++) {
         Complex* bar = rhs_bar.data() + n * Nd_;
-        for (int i = 0; i < Nd_; i++) {
+        for (int i = 0; i < Nd_; i++)
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
-        }
     }
 
-    {
-        int n[3] = {Nz_, Ny_, Nx_};
-        fftw_plan plan = fftw_plan_many_dft(
-            3, n, ncol,
-            reinterpret_cast<fftw_complex*>(rhs_bar.data()), nullptr, 1, Nd_,
-            reinterpret_cast<fftw_complex*>(sol), nullptr, 1, Nd_,
-            FFTW_BACKWARD, FFTW_ESTIMATE);
-        fftw_execute(plan);
-        fftw_destroy_plan(plan);
-    }
+    DftiComputeBackward(ctx.dfti_inv(), rhs_bar.data(), sol);
 
     double inv_Nd = 1.0 / Nd_;
     for (int i = 0; i < Nd_ * ncol; i++)
@@ -646,6 +762,21 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
 
     apply_phase_factor(sol, ncol, true, kpt_k, kpt_q);
 }
-#endif // USE_MKL
+
+#else
+// Stub implementations when neither MKL nor CUDA is available
+void ExchangePoissonSolver::solve_batch(double*, int, double*) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch requires MKL (build with -DUSE_MKL=ON)");
+}
+void ExchangePoissonSolver::solve_batch_stress(double*, int, double*, int) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch_stress requires MKL");
+}
+void ExchangePoissonSolver::solve_batch_kpt(const Complex*, int, Complex*, int, int) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch_kpt requires MKL");
+}
+void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex*, int, Complex*, int, int, int) {
+    throw std::runtime_error("ExchangePoissonSolver::solve_batch_kpt_stress requires MKL");
+}
+#endif
 
 } // namespace lynx

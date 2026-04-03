@@ -20,6 +20,13 @@ namespace lynx {
 class ExchangePoissonSolver {
 public:
     ExchangePoissonSolver() = default;
+    ~ExchangePoissonSolver() = default;
+
+    // Non-copyable
+    ExchangePoissonSolver(const ExchangePoissonSolver&) = delete;
+    ExchangePoissonSolver& operator=(const ExchangePoissonSolver&) = delete;
+    ExchangePoissonSolver(ExchangePoissonSolver&&) = default;
+    ExchangePoissonSolver& operator=(ExchangePoissonSolver&&) = default;
 
     // Setup the solver and precompute FFT Poisson constants.
     // For gamma-point: Nkpts_shift=1, no phase factors.
@@ -127,6 +134,7 @@ private:
 
     // Apply phase factor to complex array
     void apply_phase_factor(Complex* data, int ncol, bool positive, int kpt_k, int kpt_q) const;
+
 };
 
 } // namespace lynx

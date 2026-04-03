@@ -33,7 +33,8 @@ add_executable(lynx_compare_tests
 target_link_libraries(lynx_compare_tests PRIVATE lynx_core GTest::gtest)
 add_test(NAME CompareRef
     COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_compare_tests>)
-set_tests_properties(CompareRef PROPERTIES TIMEOUT 120 LABELS "unit")
+set_tests_properties(CompareRef PROPERTIES TIMEOUT 120 LABELS "unit"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # libxc comparison tests
 add_executable(lynx_libxc_tests unit/test_LibxcCompare.cpp)

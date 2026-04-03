@@ -153,7 +153,7 @@ protected:
 
     static void SetUpTestSuite() {
         sys = new SystemSetup();
-        sys->init("../tests/e2e/data/BaTiO3_quick.json");
+        sys->init("tests/e2e/data/BaTiO3_quick.json");
     }
     static void TearDownTestSuite() {
         delete sys;
