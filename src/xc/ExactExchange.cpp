@@ -31,7 +31,23 @@ extern "C" {
 namespace lynx {
 
 // ---------------------------------------------------------------------------
-// Setup
+// Setup (LynxContext overload)
+// ---------------------------------------------------------------------------
+void ExactExchange::setup(const LynxContext& ctx,
+                           const EXXParams& params,
+                           int Kx_hf, int Ky_hf, int Kz_hf) {
+    ctx_ = &ctx;
+    int npband = ctx.scf_bandcomm().size();
+    int npkpt = ctx.kpt_bridge().size();
+    setup(ctx.grid(), ctx.lattice(), &ctx.kpoints(),
+          ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
+          params, ctx.Nspin(), ctx.Nstates(), ctx.Nband_local(), ctx.band_start(),
+          npband, npkpt, ctx.kpt_start(), ctx.spin_start(),
+          Kx_hf, Ky_hf, Kz_hf);
+}
+
+// ---------------------------------------------------------------------------
+// Setup (explicit params)
 // ---------------------------------------------------------------------------
 void ExactExchange::setup(const FDGrid& grid, const Lattice& lattice,
                            const KPoints* kpoints,
@@ -725,6 +741,11 @@ double ExactExchange::compute_energy(const Wavefunction& wfn) {
 // Compute EXX stress tensor (k-point case)
 // Matching SPARC's Calculate_exact_exchange_stress_kpt + assembly
 // ---------------------------------------------------------------------------
+std::array<double, 6> ExactExchange::compute_stress(const Wavefunction& wfn) {
+    assert(ctx_ && "Must call setup(LynxContext&, ...) before compute_stress(wfn)");
+    return compute_stress(wfn, ctx_->gradient(), ctx_->halo(), ctx_->domain());
+}
+
 std::array<double, 6> ExactExchange::compute_stress(
     const Wavefunction& wfn,
     const Gradient& gradient,

@@ -23,6 +23,7 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "io/InputParser.hpp"
+#include "core/LynxContext.hpp"
 
 #include <vector>
 #include <functional>
@@ -36,7 +37,34 @@
 namespace lynx {
 
 class ExactExchange;  // forward declaration
-struct SCFState;      // forward declaration (defined in SCFInitializer.hpp)
+struct AtomSetup;     // forward declaration (defined in AtomSetup.hpp)
+struct SCFResult;     // forward declaration (defined below SCF class)
+
+// Bundles the initialized state needed to start the SCF loop.
+struct SCFState {
+    // Spectral bounds per local spin channel
+    std::vector<double> eigval_min;
+    std::vector<double> eigval_max;
+    double lambda_cutoff = 0.0;
+
+    // K-point weights (global)
+    std::vector<double> kpt_weights;
+
+    // Derived parameters
+    double kBT = 0.0;
+    double beta = 0.0;  // 1/(kBT)
+    int Nband = 0;       // global band count
+    int Nband_loc = 0;   // local bands on this process
+    int Nspin_local = 0; // spins on this process
+    int Nkpts = 0;       // local k-points
+    int Nelectron = 0;   // total electron count (for occupations)
+
+    // Potential mixing state
+    bool use_potential_mixing = false;
+    NDArray<double> Veff_mixed;   // zero-mean Veff for mixer (persistent)
+    std::vector<double> Veff_mean; // per-spin Veff mean
+    NDArray<double> Veff_out;     // Veff from rho_out (potential mixing), shared between energy & convergence
+};
 
 /// All fields must be fully resolved before passing to SCF.
 /// Call ParameterDefaults::update_default() in main.cpp after parsing to fill auto-defaults.
@@ -57,6 +85,9 @@ struct SCFParams {
     double precond_tol = 0.0;    // Kerker preconditioner tolerance (must be set before use)
     bool print_eigen = false;
     EXXParams exx_params;     // exact exchange parameters (hybrid functionals)
+
+    /// Build SCFParams from a fully-resolved SystemConfig.
+    static SCFParams from_config(const SystemConfig& config);
 };
 
 class SCF {
@@ -67,25 +98,19 @@ public:
     SCF(SCF&&) = default;
     SCF& operator=(SCF&&) = default;
 
-    void setup(const FDGrid& grid,
-               const Domain& domain,
-               const FDStencil& stencil,
-               const Laplacian& laplacian,
-               const Gradient& gradient,
+    /// High-level entry point: initialize density and run SCF to convergence.
+    static SCFResult run_calculation(const SystemConfig& config,
+                                     const LynxContext& ctx,
+                                     const Crystal& crystal,
+                                     AtomSetup& atoms,
+                                     const Hamiltonian& hamiltonian,
+                                     const NonlocalProjector& vnl);
+
+    /// Setup using LynxContext for all infrastructure.
+    void setup(const LynxContext& ctx,
                const Hamiltonian& hamiltonian,
-               const HaloExchange& halo,
                const NonlocalProjector* vnl,
-               const MPIComm& bandcomm,
-               const MPIComm& kptcomm,
-               const MPIComm& spincomm,
-               const SCFParams& params,
-               int Nspin_global = 1,
-               int Nspin_local = 1,
-               int spin_start = 0,
-               const KPoints* kpoints = nullptr,
-               int kpt_start = 0,
-               int Nband_global = 0,
-               int band_start = 0);
+               const SCFParams& params);
 
     // Run self-consistent field loop
     // Returns total energy
@@ -119,6 +144,9 @@ public:
 #endif
 
 private:
+    // Context reference (non-owning, for sub-component setup)
+    const LynxContext* ctx_ = nullptr;
+
     // Operator references (non-owning)
     const FDGrid* grid_ = nullptr;
     const Domain* domain_ = nullptr;
@@ -178,6 +206,28 @@ private:
     // Kinetic energy density (mGGA)
     KineticEnergyDensity tau_;
 
+    // SCF initialization helpers (merged from SCFInitializer)
+    static SCFState initialize_scf(
+        const LynxContext& ctx,
+        Wavefunction& wfn, ElectronDensity& density,
+        VeffArrays& arrays, EffectivePotential& veff_builder,
+        SCFParams& params, const Hamiltonian& hamiltonian,
+        const NonlocalProjector* vnl, EigenSolver& eigsolver, Mixer& mixer,
+        int Nelectron, XCType xc_type,
+        const double* rho_b, const double* rho_core);
+
+    static void init_density(ElectronDensity& density, int Nd_d, int Nelectron,
+                             int Nspin_global, const FDGrid& grid, bool is_soc);
+    static void randomize_wavefunctions(Wavefunction& wfn, int Nspin_local, int spin_start,
+                                         const MPIComm& spincomm, const MPIComm& bandcomm, bool is_kpt);
+    static void estimate_spectral_bounds(
+        SCFState& state, EigenSolver& eigsolver,
+        const double* Veff, const double* Veff_spinor,
+        int Nd_d, int Nspin_local, int spin_start,
+        bool is_kpt, bool is_soc, const KPoints* kpoints, int kpt_start,
+        const Vec3& cell_lengths, const Hamiltonian& hamiltonian,
+        const NonlocalProjector* vnl, int rank_world);
+
 #ifdef USE_CUDA
     std::unique_ptr<GPUSCFRunner> gpu_runner_;
 
@@ -216,6 +266,12 @@ public:
     void set_exx(ExactExchange* exx) { exx_ = exx; }
     const ExactExchange& exx() const { return *exx_; }
     ExactExchange& exx() { return *exx_; }
+};
+
+/// Result of an SCF calculation.
+struct SCFResult {
+    Wavefunction wfn;
+    SCF scf;
 };
 
 } // namespace lynx

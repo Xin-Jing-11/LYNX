@@ -5,6 +5,7 @@
 #include "core/Lattice.hpp"
 #include "core/KPoints.hpp"
 #include "core/NDArray.hpp"
+#include "core/LynxContext.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "operators/Gradient.hpp"
 #include "parallel/MPIComm.hpp"
@@ -27,6 +28,12 @@ class ExactExchange {
 public:
     ExactExchange() = default;
 
+    // Setup with LynxContext (preferred).
+    void setup(const LynxContext& ctx,
+               const EXXParams& params,
+               int Kx_hf = 1, int Ky_hf = 1, int Kz_hf = 1);
+
+    // Setup with explicit params (backward compat).
     void setup(const FDGrid& grid, const Lattice& lattice,
                const KPoints* kpoints,
                const MPIComm& bandcomm,
@@ -53,8 +60,10 @@ public:
     // Compute exact exchange energy
     double compute_energy(const Wavefunction& wfn);
 
-    // Compute EXX stress tensor (6 Voigt components in Ha/Bohr³)
-    // Must be called after build_ACE and compute_energy.
+    // Compute EXX stress tensor using stored ctx_ (preferred, call after setup with ctx).
+    std::array<double, 6> compute_stress(const Wavefunction& wfn);
+
+    // Compute EXX stress tensor (explicit params — backward compat).
     std::array<double, 6> compute_stress(const Wavefunction& wfn,
                                           const Gradient& gradient,
                                           const HaloExchange& halo,
@@ -81,6 +90,7 @@ public:
     int Nd_d() const { return Nd_d_; }
 
 private:
+    const LynxContext* ctx_ = nullptr;
     bool setup_done_ = false;
     bool is_gamma_ = true;
 

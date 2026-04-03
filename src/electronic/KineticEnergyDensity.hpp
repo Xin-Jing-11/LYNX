@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/KPoints.hpp"
+#include "core/LynxContext.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "operators/Gradient.hpp"
 #include "parallel/MPIComm.hpp"
@@ -25,8 +26,12 @@ public:
     // For Nspin==2: tau has 3*Nd_d elements [up | down | total].
     void allocate(int Nd_d, int Nspin);
 
-    // Compute tau from wavefunctions and occupations.
-    // This is the exact algorithm from SCF::compute_tau().
+    // Compute tau from wavefunctions and occupations (with LynxContext — preferred).
+    void compute(const LynxContext& ctx,
+                 const Wavefunction& wfn,
+                 const std::vector<double>& kpt_weights);
+
+    // Compute tau from wavefunctions and occupations (explicit params).
     void compute(const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights,
                  const FDGrid& grid,

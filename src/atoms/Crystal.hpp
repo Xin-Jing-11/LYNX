@@ -8,6 +8,10 @@
 
 namespace lynx {
 
+class LynxContext;
+struct SystemConfig;
+struct AtomSetup;
+
 // Influence of an atom type on a local domain — atoms whose rc-sphere
 // overlaps with this process's domain (includes periodic images)
 struct AtomInfluence {
@@ -57,6 +61,9 @@ public:
     // Also compute spherical grid_pos for each influencing atom
     void compute_nloc_influence(const Domain& domain,
                                 std::vector<AtomNlocInfluence>& nloc_influence) const;
+
+    /// Factory: load atoms, create Crystal, compute electrostatics.
+    static struct AtomSetup setup(SystemConfig& config, const LynxContext& ctx);
 
 private:
     std::vector<AtomType> types_;

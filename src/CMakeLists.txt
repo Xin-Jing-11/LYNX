@@ -6,6 +6,7 @@ add_library(lynx_core
     core/KPoints.cpp
     core/NumericalMethods.cpp
     core/ParameterDefaults.cpp
+    core/LynxContext.cpp
     parallel/MPIComm.cpp
     parallel/Parallelization.cpp
     parallel/HaloExchange.cpp
@@ -34,7 +35,6 @@ add_library(lynx_core
     solvers/EigenSolver.cpp
     physics/Energy.cpp
     physics/EffectivePotential.cpp
-    physics/SCFInitializer.cpp
     physics/HybridSCF.cpp
     physics/SCF.cpp
     physics/Forces.cpp

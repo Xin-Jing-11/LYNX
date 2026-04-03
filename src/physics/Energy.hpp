@@ -4,6 +4,7 @@
 #include "core/NDArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/LynxContext.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "electronic/ElectronDensity.hpp"
 #include "xc/XCFunctional.hpp"
@@ -73,9 +74,28 @@ public:
     // Compute total energy from components
     static double total_energy(const EnergyComponents& E);
 
-    // Compute all energy components
-    // Nspin_global: global spin count (for correct spin_fac and E2)
-    // bandcomm: for band-parallel allreduce of Eband (optional, nullptr for serial)
+    // Compute all energy components (with LynxContext — preferred for CPU callers).
+    // Extracts Nd_d, dV, kpt_start, kptcomm, spincomm, Nspin_global from ctx.
+    static EnergyComponents compute_all(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const ElectronDensity& density,
+        const double* Veff,
+        const double* phi,          // electrostatic potential
+        const double* exc,          // XC energy density
+        const double* Vxc,          // XC potential
+        const double* rho_b,        // pseudocharge density
+        double Eself,
+        double Ec,
+        double beta,
+        SmearingType smearing,
+        const std::vector<double>& kpt_weights,
+        const double* rho_core = nullptr,
+        double Ef = 0.0,
+        const double* tau = nullptr,      // mGGA kinetic energy density
+        const double* vtau = nullptr);    // mGGA d(nε)/dτ potential
+
+    // Compute all energy components (explicit params — used by GPU code paths).
     static EnergyComponents compute_all(
         const Wavefunction& wfn,
         const ElectronDensity& density,

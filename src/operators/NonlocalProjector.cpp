@@ -1,7 +1,9 @@
 #include "operators/NonlocalProjector.hpp"
+#include "core/LynxContext.hpp"
 #include "core/constants.hpp"
 #include "core/math_utils.hpp"
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include <algorithm>
 #include <omp.h>
@@ -617,6 +619,26 @@ void NonlocalProjector::apply_soc_kpt(const Complex* psi, Complex* Hpsi, int nco
             }
         }
     }
+}
+
+NonlocalProjector NonlocalProjector::create(const LynxContext& ctx,
+                                            const Crystal& crystal,
+                                            const std::vector<AtomNlocInfluence>& nloc_influence) {
+    const auto& domain = ctx.domain();
+    const auto& grid = ctx.grid();
+    int rank = ctx.rank();
+
+    NonlocalProjector vnl;
+    vnl.setup(crystal, nloc_influence, domain, grid);
+    if (ctx.is_soc()) {
+        vnl.setup_soc(crystal, nloc_influence, domain, grid);
+        if (rank == 0)
+            std::printf("SOC projectors: %s\n", vnl.has_soc() ? "enabled" : "none");
+    }
+    if (rank == 0)
+        std::printf("Nonlocal projectors: %d total\n", vnl.total_nproj());
+
+    return vnl;
 }
 
 } // namespace lynx

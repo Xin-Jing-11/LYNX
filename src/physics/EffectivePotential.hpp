@@ -12,6 +12,7 @@
 #include "electronic/ElectronDensity.hpp"
 #include "xc/XCFunctional.hpp"
 #include "solvers/PoissonSolver.hpp"
+#include "core/LynxContext.hpp"
 
 namespace lynx {
 
@@ -38,14 +39,8 @@ class EffectivePotential {
 public:
     EffectivePotential() = default;
 
-    void setup(const Domain& domain,
-               const FDGrid& grid,
-               const FDStencil& stencil,
-               const Laplacian& laplacian,
-               const Gradient& gradient,
-               const Hamiltonian& hamiltonian,
-               const HaloExchange& halo,
-               int Nspin_global);
+    /// Setup using LynxContext for all infrastructure.
+    void setup(const LynxContext& ctx, const Hamiltonian& hamiltonian);
 
     // Compute Veff for standard (scalar) case.
     // density: electron density (with spin-resolved components)

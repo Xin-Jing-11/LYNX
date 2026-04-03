@@ -1,5 +1,8 @@
 #include "physics/Forces.hpp"
+#include "physics/SCF.hpp"
 #include "physics/Electrostatics.hpp"
+#include "atoms/AtomSetup.hpp"
+#include "io/InputParser.hpp"
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -13,31 +16,51 @@
 
 namespace lynx {
 
-std::vector<double> Forces::compute(
+// ---------------------------------------------------------------------------
+// High-level entry point: extract data from SCF/atoms and delegate.
+// ---------------------------------------------------------------------------
+void Forces::compute(
+    const LynxContext& ctx,
+    const SystemConfig& /*config*/,
+    const Wavefunction& wfn,
+    const SCF& scf,
+    const AtomSetup& atoms,
+    const NonlocalProjector& vnl) {
+
+    compute_impl(ctx, wfn, atoms.crystal,
+                 atoms.influence, atoms.nloc_influence, vnl,
+                 scf.phi(), scf.density().rho_total().data(),
+                 atoms.Vloc.data(),
+                 atoms.elec.pseudocharge().data(),
+                 atoms.elec.pseudocharge_ref().data(),
+                 scf.Vxc(),
+                 atoms.has_nlcc ? atoms.rho_core.data() : nullptr);
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    print(rank, ctx.is_soc(), atoms.has_nlcc, atoms.Natom);
+}
+
+// ---------------------------------------------------------------------------
+// Detailed implementation (private).
+// ---------------------------------------------------------------------------
+std::vector<double> Forces::compute_impl(
+    const LynxContext& ctx,
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
     const std::vector<AtomNlocInfluence>& nloc_influence,
     const NonlocalProjector& vnl,
-    const FDStencil& stencil,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* phi,
     const double* rho,
     const double* Vloc,
     const double* b,
     const double* b_ref,
     const double* Vxc,
-    const double* rho_core,
-    const std::vector<double>& kpt_weights,
-    const MPIComm& bandcomm,
-    const MPIComm& kptcomm,
-    const MPIComm& spincomm,
-    const KPoints* kpoints,
-    int kpt_start,
-    int band_start) {
+    const double* rho_core) {
+    ctx_ = &ctx;
+    std::vector<double> kpt_weights = ctx.kpoints().normalized_weights();
+    const auto& grid = ctx.grid();
 
     int n_atom = crystal.n_atom_total();
     f_local_.assign(3 * n_atom, 0.0);
@@ -47,17 +70,14 @@ std::vector<double> Forces::compute(
     f_total_.assign(3 * n_atom, 0.0);
 
     // Local force using pseudocharge-based formula (matches reference)
-    compute_local(crystal, influence, stencil, gradient, halo,
-                  domain, grid, phi, Vloc, b, b_ref);
+    compute_local(crystal, influence, phi, Vloc, b, b_ref);
 
     // Nonlocal force from KB projectors
-    compute_nonlocal(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                     domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
+    compute_nonlocal(wfn, crystal, nloc_influence, vnl, kpt_weights);
 
     // SOC nonlocal force from spin-orbit coupling projectors
     if (vnl.has_soc() && wfn.Nspinor() == 2) {
-        compute_nonlocal_soc(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                             domain, grid, kpt_weights, bandcomm, kptcomm, kpoints, kpt_start, band_start);
+        compute_nonlocal_soc(ctx, wfn, crystal, nloc_influence, vnl, kpt_weights);
     }
 
     // Sum local + nonlocal + SOC
@@ -67,7 +87,7 @@ std::vector<double> Forces::compute(
 
     // NLCC XC force correction
     if (rho_core != nullptr) {
-        compute_xc_nlcc(crystal, influence, stencil, domain, grid, Vxc);
+        compute_xc_nlcc(crystal, influence, Vxc);
         for (int i = 0; i < 3 * n_atom; ++i) {
             f_total_[i] += f_xc_[i];
         }
@@ -131,15 +151,16 @@ std::vector<double> Forces::compute(
 void Forces::compute_local(
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
-    const FDStencil& stencil,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* phi,
     const double* Vloc,
     const double* b_total,
     const double* b_ref_total) {
+
+    const auto& stencil = ctx_->stencil();
+    const auto& gradient = ctx_->gradient();
+    const auto& halo = ctx_->halo();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
 
     int n_atom = crystal.n_atom_total();
     f_local_.assign(3 * n_atom, 0.0);
@@ -371,17 +392,18 @@ void Forces::compute_nonlocal(
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
     const NonlocalProjector& vnl,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
-    const std::vector<double>& kpt_weights,
-    const MPIComm& bandcomm,
-    const MPIComm& kptcomm,
-    const MPIComm& spincomm,
-    const KPoints* kpoints,
-    int kpt_start,
-    int band_start) {
+    const std::vector<double>& kpt_weights) {
+
+    const auto& gradient = ctx_->gradient();
+    const auto& halo = ctx_->halo();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
+    const auto& bandcomm = ctx_->scf_bandcomm();
+    const auto& kptcomm = ctx_->kpt_bridge();
+    const auto& spincomm = ctx_->spin_bridge();
+    const KPoints* kpoints = &ctx_->kpoints();
+    int kpt_start = ctx_->kpt_start();
+    int band_start = ctx_->band_start();
 
     int n_atom = crystal.n_atom_total();
     int Nspin_local = wfn.Nspin();
@@ -644,6 +666,19 @@ void Forces::compute_nonlocal(
 // operators L+S-/L-S+) matching the apply_soc_kpt structure.
 // ---------------------------------------------------------------------------
 void Forces::compute_nonlocal_soc(
+    const LynxContext& ctx,
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const std::vector<double>& kpt_weights) {
+    compute_nonlocal_soc(wfn, crystal, nloc_influence, vnl,
+                         ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
+                         kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(),
+                         &ctx.kpoints(), ctx.kpt_start(), ctx.band_start());
+}
+
+void Forces::compute_nonlocal_soc(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
@@ -897,10 +932,11 @@ void Forces::compute_nonlocal_soc(
 void Forces::compute_xc_nlcc(
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
-    const FDStencil& stencil,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* Vxc) {
+
+    const auto& stencil = ctx_->stencil();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
 
     int n_atom = crystal.n_atom_total();
     f_xc_.assign(3 * n_atom, 0.0);
@@ -1073,6 +1109,44 @@ void Forces::symmetrize(std::vector<double>& forces, int n_atom) {
             forces[i * 3 + d] -= avg;
         }
     }
+}
+
+void Forces::print(int rank, bool is_soc, bool has_nlcc, int Natom) const {
+    if (rank != 0) return;
+
+    std::printf("\nLocal forces (Ha/Bohr):\n");
+    const auto& fl = f_local_;
+    for (int i = 0; i < Natom; ++i)
+        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                    i + 1, fl[3*i], fl[3*i+1], fl[3*i+2]);
+
+    std::printf("\nNonlocal forces (Ha/Bohr):\n");
+    const auto& fn = f_nloc_;
+    for (int i = 0; i < Natom; ++i)
+        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                    i + 1, fn[3*i], fn[3*i+1], fn[3*i+2]);
+
+    if (is_soc) {
+        std::printf("\nSOC forces (Ha/Bohr):\n");
+        const auto& fs = f_soc_;
+        for (int i = 0; i < Natom; ++i)
+            std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                        i + 1, fs[3*i], fs[3*i+1], fs[3*i+2]);
+    }
+
+    if (has_nlcc) {
+        std::printf("\nNLCC XC forces (Ha/Bohr):\n");
+        const auto& fxc = f_xc_;
+        for (int i = 0; i < Natom; ++i)
+            std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                        i + 1, fxc[3*i], fxc[3*i+1], fxc[3*i+2]);
+    }
+
+    std::printf("\nTotal forces (Ha/Bohr):\n");
+    const auto& ft = f_total_;
+    for (int i = 0; i < Natom; ++i)
+        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                    i + 1, ft[3*i], ft[3*i+1], ft[3*i+2]);
 }
 
 } // namespace lynx

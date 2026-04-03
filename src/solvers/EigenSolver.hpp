@@ -6,6 +6,7 @@
 #include "operators/Hamiltonian.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
+#include "core/LynxContext.hpp"
 #include <complex>
 
 namespace lynx {
@@ -21,14 +22,8 @@ public:
     EigenSolver() = default;
     ~EigenSolver();
 
-    // Setup with Nband_global for band-parallel mode.
-    // bandcomm groups processes that share bands for the same (spin,kpt).
-    // Nband_global: total number of bands across all band-parallel processes.
-    void setup(const Hamiltonian& H,
-               const HaloExchange& halo,
-               const Domain& domain,
-               const MPIComm& bandcomm,
-               int Nband_global = 0);
+    /// Setup using LynxContext for all infrastructure.
+    void setup(const LynxContext& ctx, const Hamiltonian& H);
 
     // --- Real (Gamma-point) interface ---
     // Nband here is the LOCAL band count (Nband_local).

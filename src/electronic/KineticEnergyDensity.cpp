@@ -161,4 +161,14 @@ void KineticEnergyDensity::compute(const Wavefunction& wfn,
     valid_ = true;
 }
 
+void KineticEnergyDensity::compute(const LynxContext& ctx,
+                                    const Wavefunction& wfn,
+                                    const std::vector<double>& kpt_weights) {
+    compute(wfn, kpt_weights,
+            ctx.grid(), ctx.domain(), ctx.halo(), ctx.gradient(),
+            &ctx.kpoints(), ctx.scf_bandcomm(), ctx.kpt_bridge(),
+            &ctx.spin_bridge(), ctx.spin_start(), ctx.kpt_start(),
+            ctx.band_start(), ctx.Nspin());
+}
+
 } // namespace lynx

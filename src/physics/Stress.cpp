@@ -1,5 +1,13 @@
 #include "physics/Stress.hpp"
+#include "physics/SCF.hpp"
 #include "physics/Electrostatics.hpp"
+#include "xc/ExactExchange.hpp"
+#include "atoms/AtomSetup.hpp"
+#include "io/InputParser.hpp"
+
+#ifdef USE_CUDA
+#include "physics/GPUSCF.cuh"
+#endif
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -43,17 +51,80 @@ static void nonCart2Cart_grad_arrays(const Mat3& uvec_inv, double* gx, double* g
     }
 }
 
-std::array<double, 6> Stress::compute(
+// ---------------------------------------------------------------------------
+// High-level entry point: extract data, handle GPU mGGA and EXX, then print.
+// ---------------------------------------------------------------------------
+void Stress::compute(
+    const LynxContext& ctx,
+    const SystemConfig& config,
+    const Wavefunction& wfn,
+    SCF& scf,
+    const AtomSetup& atoms,
+    const NonlocalProjector& vnl) {
+
+    int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 :
+                     (config.spin_type == SpinType::NonCollinear) ? 1 : 1;
+    const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
+    const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
+
+    // GPU mGGA stress
+    const double* gpu_mgga_ptr = nullptr;
+    const double* gpu_dot_ptr = nullptr;
+    [[maybe_unused]] std::array<double, 6> gpu_mgga_stress = {};
+    [[maybe_unused]] double gpu_tau_vtau_dot_val = 0.0;
+#ifdef USE_CUDA
+    {
+        bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
+                        config.xc == XCType::MGGA_RSCAN ||
+                        config.xc == XCType::MGGA_R2SCAN);
+        if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
+            scf.gpu_runner()->compute_mgga_stress(
+                wfn, ctx.domain(), ctx.grid(), Nspin_calc,
+                gpu_mgga_stress.data(), &gpu_tau_vtau_dot_val);
+            gpu_mgga_ptr = gpu_mgga_stress.data();
+            gpu_dot_ptr = &gpu_tau_vtau_dot_val;
+        }
+    }
+#endif
+
+    compute_impl(ctx, wfn, atoms.crystal,
+                 atoms.influence, atoms.nloc_influence, vnl,
+                 scf.phi(), scf.density().rho_total().data(),
+                 rho_up_ptr, rho_dn_ptr,
+                 atoms.Vloc.data(),
+                 atoms.elec.pseudocharge().data(),
+                 atoms.elec.pseudocharge_ref().data(),
+                 scf.exc(), scf.Vxc(),
+                 scf.Dxcdgrho(),
+                 scf.energy().Exc,
+                 atoms.elec.Eself() + atoms.elec.Ec(),
+                 config.xc,
+                 Nspin_calc,
+                 atoms.has_nlcc ? atoms.rho_core.data() : nullptr,
+                 scf.vtau(), scf.tau(),
+                 gpu_mgga_ptr, gpu_dot_ptr);
+
+    // Add EXX stress for hybrid functionals
+    if (is_hybrid(config.xc) && scf.exx().is_setup()) {
+        auto stress_exx = scf.exx().compute_stress(wfn);
+        add_to_total(stress_exx);
+    }
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    print(rank);
+}
+
+// ---------------------------------------------------------------------------
+// Detailed implementation (private).
+// ---------------------------------------------------------------------------
+std::array<double, 6> Stress::compute_impl(
+    const LynxContext& ctx,
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
     const std::vector<AtomNlocInfluence>& nloc_influence,
     const NonlocalProjector& vnl,
-    const FDStencil& stencil,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* phi,
     const double* rho,
     const double* rho_up,
@@ -69,17 +140,13 @@ std::array<double, 6> Stress::compute(
     XCType xc_type,
     int Nspin,
     const double* rho_core,
-    const std::vector<double>& kpt_weights,
-    const MPIComm& bandcomm,
-    const MPIComm& kptcomm,
-    const MPIComm& spincomm,
-    const KPoints* kpoints,
-    int kpt_start,
-    int band_start,
     const double* vtau,
     const double* tau,
     const double* gpu_mgga_psi_stress,
     const double* gpu_tau_vtau_dot) {
+    ctx_ = &ctx;
+    std::vector<double> kpt_weights = ctx.kpoints().normalized_weights();
+    const auto& grid = ctx.grid();
 
     stress_k_.fill(0.0);
     stress_xc_.fill(0.0);
@@ -97,20 +164,18 @@ std::array<double, 6> Stress::compute(
     if (grid.bcz() == BCType::Periodic) cell_measure_ *= L.z;
 
     // 1. XC stress (pass GPU tau_vtau_dot if available to skip CPU reduction)
-    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, gradient, halo, domain, grid, vtau, tau, gpu_tau_vtau_dot);
+    compute_xc_stress(rho, rho_up, rho_dn, exc, Vxc, Dxcdgrho, Exc, xc_type, Nspin, rho_core, vtau, tau, gpu_tau_vtau_dot);
 
     // 1b. NLCC XC stress correction
     if (rho_core) {
-        compute_xc_nlcc_stress(crystal, influence, stencil, domain, grid, Vxc, Nspin);
+        compute_xc_nlcc_stress(crystal, influence, Vxc, Nspin);
     }
 
     // 2. Electrostatic (local) stress
-    compute_electrostatic(crystal, influence, stencil, gradient, halo,
-                          domain, grid, phi, rho, Vloc, b, b_ref, Esc);
+    compute_electrostatic(crystal, influence, phi, rho, Vloc, b, b_ref, Esc);
 
     // 3. Nonlocal + kinetic stress
-    compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, gradient, halo,
-                             domain, grid, kpt_weights, bandcomm, kptcomm, spincomm, kpoints, kpt_start, band_start);
+    compute_nonlocal_kinetic(ctx, wfn, crystal, nloc_influence, vnl, kpt_weights);
 
     // 4. mGGA psi stress term: σ_ij += -occfac · Σ_n g_n · ∫ vtau · ∇_i ψ · ∇_j ψ dV
     if (gpu_mgga_psi_stress && is_mgga_type(xc_type)) {
@@ -118,11 +183,20 @@ std::array<double, 6> Stress::compute(
         for (int i = 0; i < 6; i++)
             stress_xc_[i] += gpu_mgga_psi_stress[i];
     } else if (vtau && is_mgga_type(xc_type)) {
-        int Nd_d = domain.Nd_d();
+        const auto& gradient_m = ctx_->gradient();
+        const auto& halo_m = ctx_->halo();
+        const auto& bandcomm_m = ctx_->scf_bandcomm();
+        const auto& kptcomm_m = ctx_->kpt_bridge();
+        const auto& spincomm_m = ctx_->spin_bridge();
+        const KPoints* kpoints_m = &ctx_->kpoints();
+        int kpt_start_m = ctx_->kpt_start();
+        int band_start_m = ctx_->band_start();
+
+        int Nd_d = ctx_->domain().Nd_d();
         int Nband_loc = wfn.Nband();
         int Nspin_local = wfn.Nspin();
         int Nkpts = wfn.Nkpts();
-        int nd_ex = halo.nd_ex();
+        int nd_ex = halo_m.nd_ex();
         bool is_orth = grid.lattice().is_orthogonal();
         const Mat3& uvec_inv_mgga = grid.lattice().lat_uvec_inv();
         double spin_fac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
@@ -136,10 +210,10 @@ std::array<double, 6> Stress::compute(
 
             for (int k = 0; k < Nkpts; ++k) {
                 const auto& occ = wfn.occupations(s, k);
-                double wk = kpt_weights[kpt_start + k];
+                double wk = kpt_weights[kpt_start_m + k];
 
                 for (int n = 0; n < Nband_loc; ++n) {
-                    double fn = occ(band_start + n);
+                    double fn = occ(band_start_m + n);
                     if (fn < 1e-16) continue;
                     double g_nk = spin_fac * wk * fn;
 
@@ -150,11 +224,11 @@ std::array<double, 6> Stress::compute(
                         std::vector<Complex> dpsi[3];
                         for (int d = 0; d < 3; d++) dpsi[d].resize(Nd_d);
 
-                        Vec3 kpt = kpoints->kpts_cart()[kpt_start + k];
+                        Vec3 kpt = kpoints_m->kpts_cart()[kpt_start_m + k];
                         Vec3 cell_lengths = grid.lattice().lengths();
-                        halo.execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
+                        halo_m.execute_kpt(col, psi_ex.data(), 1, kpt, cell_lengths);
                         for (int d = 0; d < 3; d++)
-                            gradient.apply(psi_ex.data(), dpsi[d].data(), d, 1);
+                            gradient_m.apply(psi_ex.data(), dpsi[d].data(), d, 1);
 
                         // Accumulate stress: σ_ij += -g_nk * ∫ vtau * Re(conj(∇_i ψ) * ∇_j ψ) dV
                         // Voigt: [xx=0, xy=1, xz=2, yy=3, yz=4, zz=5]
@@ -183,9 +257,9 @@ std::array<double, 6> Stress::compute(
                         std::vector<double> dpsi[3];
                         for (int d = 0; d < 3; d++) dpsi[d].resize(Nd_d);
 
-                        halo.execute(col, psi_ex.data(), 1);
+                        halo_m.execute(col, psi_ex.data(), 1);
                         for (int d = 0; d < 3; d++)
-                            gradient.apply(psi_ex.data(), dpsi[d].data(), d, 1);
+                            gradient_m.apply(psi_ex.data(), dpsi[d].data(), d, 1);
 
                         int voigt[3][3] = {{0,1,2},{1,3,4},{2,4,5}};
                         for (int a = 0; a < 3; a++) {
@@ -211,12 +285,12 @@ std::array<double, 6> Stress::compute(
         }
 
         // Allreduce over band, kpt, spin communicators
-        if (!bandcomm.is_null() && bandcomm.size() > 1)
-            bandcomm.allreduce_sum(stress_mgga.data(), 6);
-        if (!kptcomm.is_null() && kptcomm.size() > 1)
-            kptcomm.allreduce_sum(stress_mgga.data(), 6);
-        if (!spincomm.is_null() && spincomm.size() > 1)
-            spincomm.allreduce_sum(stress_mgga.data(), 6);
+        if (!bandcomm_m.is_null() && bandcomm_m.size() > 1)
+            bandcomm_m.allreduce_sum(stress_mgga.data(), 6);
+        if (!kptcomm_m.is_null() && kptcomm_m.size() > 1)
+            kptcomm_m.allreduce_sum(stress_mgga.data(), 6);
+        if (!spincomm_m.is_null() && spincomm_m.size() > 1)
+            spincomm_m.allreduce_sum(stress_mgga.data(), 6);
 
         // Normalize by cell_measure and add to stress_xc
         for (int i = 0; i < 6; i++) {
@@ -251,13 +325,14 @@ void Stress::compute_xc_stress(
     XCType xc_type,
     int Nspin,
     const double* rho_core,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* vtau,
     const double* tau,
     const double* gpu_tau_vtau_dot) {
+
+    const auto& gradient = ctx_->gradient();
+    const auto& halo = ctx_->halo();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
 
     int Nd_d = domain.Nd_d();
     double dV = grid.dV();
@@ -388,11 +463,12 @@ void Stress::compute_xc_stress(
 void Stress::compute_xc_nlcc_stress(
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
-    const FDStencil& stencil,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* Vxc,
     int Nspin) {
+
+    const auto& stencil = ctx_->stencil();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
 
     int FDn = stencil.FDn();
     int order = 2 * FDn;
@@ -580,17 +656,18 @@ void Stress::compute_xc_nlcc_stress(
 void Stress::compute_electrostatic(
     const Crystal& crystal,
     const std::vector<AtomInfluence>& influence,
-    const FDStencil& stencil,
-    const Gradient& gradient,
-    const HaloExchange& halo,
-    const Domain& domain,
-    const FDGrid& grid,
     const double* phi,
     const double* rho,
     const double* Vloc,
     const double* b_total,
     const double* b_ref_total,
     double Esc) {
+
+    const auto& stencil = ctx_->stencil();
+    const auto& gradient = ctx_->gradient();
+    const auto& halo = ctx_->halo();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
 
     int FDn = stencil.FDn();
     int order = 2 * FDn;
@@ -830,6 +907,20 @@ void Stress::compute_electrostatic(
 // ---------------------------------------------------------------------------
 // Nonlocal + kinetic stress (matching reference Calculate_nonlocal_kinetic_stress_linear)
 // ---------------------------------------------------------------------------
+void Stress::compute_nonlocal_kinetic(
+    const LynxContext& ctx,
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const std::vector<double>& kpt_weights) {
+    compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl,
+                             ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
+                             kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(),
+                             ctx.spin_bridge(), &ctx.kpoints(),
+                             ctx.kpt_start(), ctx.band_start());
+}
+
 void Stress::compute_nonlocal_kinetic(
     const Wavefunction& wfn,
     const Crystal& crystal,
@@ -1572,6 +1663,20 @@ void Stress::compute_nonlocal_kinetic(
         stress_k_[i] /= cell_measure_;
         stress_soc_[i] /= cell_measure_;
     }
+}
+
+void Stress::print(int rank) const {
+    if (rank != 0) return;
+
+    const double au_to_gpa = 29421.01569650548;
+    const auto& sigma = stress_total_;
+    std::printf("\nStress tensor (GPa):\n");
+    std::printf("  sigma_xx = %14.6f  sigma_xy = %14.6f  sigma_xz = %14.6f\n",
+                sigma[0] * au_to_gpa, sigma[1] * au_to_gpa, sigma[2] * au_to_gpa);
+    std::printf("  sigma_yy = %14.6f  sigma_yz = %14.6f  sigma_zz = %14.6f\n",
+                sigma[3] * au_to_gpa, sigma[4] * au_to_gpa, sigma[5] * au_to_gpa);
+    std::printf("\nPressure: %.6f GPa\n",
+                -(sigma[0] + sigma[3] + sigma[5]) / 3.0 * au_to_gpa);
 }
 
 } // namespace lynx

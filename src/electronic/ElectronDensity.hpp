@@ -2,6 +2,7 @@
 
 #include "core/NDArray.hpp"
 #include "core/types.hpp"
+#include "core/LynxContext.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "parallel/MPIComm.hpp"
 
@@ -18,12 +19,12 @@ public:
 
     void allocate(int Nd_d, int Nspin);
 
-    // Compute density from wavefunctions and occupations
-    // kpt_weights: weight of each k-point (usually 1/Nkpts for uniform grid)
-    // Nspin_global: global spin count (for correct spin_fac)
-    // spin_start: global index of first local spin channel
-    // spincomm: communicator for exchanging spin densities across processes
-    // band_start: global index of first local band (for band parallelism)
+    // Compute density from wavefunctions and occupations (with LynxContext — preferred).
+    void compute(const LynxContext& ctx,
+                 const Wavefunction& wfn,
+                 const std::vector<double>& kpt_weights);
+
+    // Compute density from wavefunctions and occupations (explicit params — GPU code paths).
     void compute(const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights,
                  double dV,
@@ -72,8 +73,12 @@ public:
     // Allocate for noncollinear (spinor) — 1 spin channel + vector magnetization
     void allocate_noncollinear(int Nd_d);
 
-    // Compute density from spinor wavefunctions (SOC/noncollinear)
-    // Each band is a 2-component spinor: [psi_up(Nd_d) | psi_dn(Nd_d)]
+    // Compute density from spinor wavefunctions (SOC/noncollinear, with LynxContext).
+    void compute_spinor(const LynxContext& ctx,
+                        const Wavefunction& wfn,
+                        const std::vector<double>& kpt_weights);
+
+    // Compute density from spinor wavefunctions (SOC/noncollinear, explicit params).
     void compute_spinor(const Wavefunction& wfn,
                         const std::vector<double>& kpt_weights,
                         double dV,

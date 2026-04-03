@@ -1,5 +1,10 @@
 #include "atoms/Crystal.hpp"
+#include "atoms/AtomSetup.hpp"
+#include "core/LynxContext.hpp"
+#include "core/ParameterDefaults.hpp"
+#include "io/InputParser.hpp"
 #include <cmath>
+#include <cstdio>
 #include <algorithm>
 
 namespace lynx {
@@ -247,6 +252,134 @@ void Crystal::compute_nloc_influence(const Domain& domain,
             }
         }
     }
+}
+
+AtomSetup Crystal::setup(SystemConfig& config, const LynxContext& ctx) {
+    const auto& lattice = ctx.lattice();
+    const auto& grid = ctx.grid();
+    const auto& domain = ctx.domain();
+    const auto& stencil = ctx.stencil();
+    int rank = ctx.rank();
+
+    // Load pseudopotentials and create Crystal
+    std::vector<AtomType> atom_types;
+    std::vector<Vec3> all_positions;
+    std::vector<int> type_indices;
+    int total_Nelectron = 0;
+
+    for (size_t it = 0; it < config.atom_types.size(); ++it) {
+        const auto& at_in = config.atom_types[it];
+        int n_atoms = static_cast<int>(at_in.coords.size());
+
+        Pseudopotential psd_tmp;
+        psd_tmp.load_psp8(at_in.pseudo_file);
+        double Zval = psd_tmp.Zval();
+        double mass = 1.0;
+
+        AtomType atype(at_in.element, mass, Zval, n_atoms);
+        atype.psd().load_psp8(at_in.pseudo_file);
+
+        for (int ia = 0; ia < n_atoms; ++ia) {
+            Vec3 pos = at_in.coords[ia];
+            if (at_in.fractional) {
+                if (lattice.is_orthogonal()) {
+                    pos = lattice.frac_to_cart(pos);
+                } else {
+                    Vec3 L = lattice.lengths();
+                    pos = {pos.x * L.x, pos.y * L.y, pos.z * L.z};
+                }
+            } else {
+                if (!lattice.is_orthogonal()) {
+                    pos = lattice.cart_to_nonCart(pos);
+                }
+            }
+            all_positions.push_back(pos);
+            type_indices.push_back(static_cast<int>(it));
+        }
+
+        total_Nelectron += static_cast<int>(Zval) * n_atoms;
+        atom_types.push_back(std::move(atype));
+    }
+
+    int Nelectron = (config.Nelectron > 0) ? config.Nelectron : total_Nelectron;
+    int Natom = static_cast<int>(all_positions.size());
+
+    // Resolve all auto-default parameters
+    ParameterDefaults::update_default(config, grid, Nelectron,
+                                      (ctx.Nspin() == 2), ctx.is_soc());
+    if (rank == 0) {
+        double h_eff = ParameterDefaults::compute_h_eff(grid.dx(), grid.dy(), grid.dz());
+        std::printf("Parameters resolved: h_eff=%.6f, cheb_degree=%d, elec_temp=%.1f K, "
+                    "poisson_tol=%.2e, precond_tol=%.2e, Nstates=%d\n",
+                    h_eff, config.cheb_degree, config.elec_temp,
+                    config.poisson_tol, config.precond_tol, config.Nstates);
+    }
+
+    Crystal crystal(std::move(atom_types), all_positions, type_indices, lattice);
+
+    if (rank == 0) {
+        std::printf("Atoms: %d total, %d electrons, %d types\n",
+                    Natom, Nelectron, crystal.n_types());
+    }
+
+    // Compute atom influence
+    double rc_max = 0.0;
+    for (int it = 0; it < crystal.n_types(); ++it) {
+        const auto& psd = crystal.types()[it].psd();
+        for (auto rc : psd.rc()) rc_max = std::max(rc_max, rc);
+        if (!psd.radial_grid().empty())
+            rc_max = std::max(rc_max, psd.radial_grid().back());
+    }
+    double h_max = std::max({grid.dx(), grid.dy(), grid.dz()});
+    rc_max += 8.0 * h_max;
+
+    std::vector<AtomInfluence> influence;
+    crystal.compute_atom_influence(domain, rc_max, influence);
+
+    std::vector<AtomNlocInfluence> nloc_influence;
+    crystal.compute_nloc_influence(domain, nloc_influence);
+
+    if (rank == 0) {
+        int total_inf = 0;
+        for (auto& inf : influence) total_inf += inf.n_atom;
+        std::printf("Atom influence computed (rc_max = %.4f Bohr, %d entries)\n", rc_max, total_inf);
+        std::printf("Computing pseudocharge...\n");
+        std::fflush(stdout);
+    }
+
+    // Electrostatics: pseudocharge + Vloc
+    Electrostatics elec;
+    elec.compute_pseudocharge(crystal, influence, domain, grid, stencil);
+
+    int Nd_d = domain.Nd_d();
+    std::vector<double> Vloc(Nd_d, 0.0);
+    elec.compute_Vloc(crystal, influence, domain, grid, Vloc.data());
+    elec.compute_Ec(Vloc.data(), Nd_d, grid.dV());
+
+    if (rank == 0) {
+        std::printf("Pseudocharge: int(b) = %.6f (expected: %.1f)\n",
+                    elec.int_b(), -static_cast<double>(Nelectron));
+        std::printf("Eself = %.6f, Ec = %.6f, Esc = %.6f Ha\n",
+                    elec.Eself(), elec.Ec(), elec.Eself() + elec.Ec());
+    }
+
+    // NLCC core density
+    std::vector<double> rho_core(Nd_d, 0.0);
+    bool has_nlcc = elec.compute_core_density(crystal, influence, domain, grid,
+                                               rho_core.data());
+    if (rank == 0) {
+        if (has_nlcc) {
+            double rc_sum = 0;
+            for (int i = 0; i < Nd_d; ++i) rc_sum += rho_core[i];
+            std::printf("NLCC: core charge integral = %.6f\n", rc_sum * grid.dV());
+        } else {
+            std::printf("NLCC: not present for any atom type\n");
+        }
+    }
+
+    return AtomSetup{std::move(crystal), std::move(elec), std::move(Vloc),
+                     std::move(rho_core), std::move(influence), std::move(nloc_influence),
+                     has_nlcc, Nelectron, Natom};
 }
 
 } // namespace lynx

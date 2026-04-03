@@ -13,11 +13,16 @@
 #include "xc/XCFunctional.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
+#include "core/LynxContext.hpp"
 
 #include <vector>
 #include <array>
 
 namespace lynx {
+
+struct AtomSetup;      // forward declaration (defined in AtomSetup.hpp)
+struct SystemConfig;   // forward declaration (defined in InputParser.hpp)
+class SCF;             // forward declaration
 
 // Stress tensor calculation matching reference LYNX.
 // Components: kinetic, XC, electrostatic (local), nonlocal.
@@ -30,44 +35,13 @@ class Stress {
 public:
     Stress() = default;
 
-    // Compute full stress tensor. Returns 6-component Voigt stress in Ha/Bohr³.
-    std::array<double, 6> compute(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomInfluence>& influence,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const FDStencil& stencil,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* phi,           // electrostatic potential
-        const double* rho,           // total electron density
-        const double* rho_up,        // spin-up density (nullptr for non-spin)
-        const double* rho_dn,        // spin-down density (nullptr for non-spin)
-        const double* Vloc,          // correction potential Vc
-        const double* b,             // pseudocharge density
-        const double* b_ref,         // reference pseudocharge density
-        const double* exc,           // XC energy density
-        const double* Vxc,           // XC potential (Nspin*Nd_d for spin)
-        const double* Dxcdgrho,      // GGA: v2x+v2c (1*Nd_d non-spin, 3*Nd_d spin)
-        double Exc,                  // total XC energy
-        double Esc,                  // self + correction energy (Eself + Ec)
-        XCType xc_type,
-        int Nspin,                   // 1 or 2
-        const double* rho_core,      // NLCC core density (nullptr if no NLCC)
-        const std::vector<double>& kpt_weights,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr,
-        int kpt_start = 0,
-        int band_start = 0,
-        const double* vtau = nullptr,   // mGGA: d(nε)/dτ (Nd_d non-spin, 2*Nd_d spin)
-        const double* tau = nullptr,   // mGGA: kinetic energy density (Nd_d non-spin, 3*Nd_d spin)
-        const double* gpu_mgga_psi_stress = nullptr,  // [6] pre-computed mGGA psi stress from GPU
-        const double* gpu_tau_vtau_dot = nullptr);     // pre-computed ∫τ·vtau dV from GPU
+    /// High-level entry point: compute stress (including GPU mGGA and EXX) and print results.
+    void compute(const LynxContext& ctx,
+                 const SystemConfig& config,
+                 const Wavefunction& wfn,
+                 SCF& scf,
+                 const AtomSetup& atoms,
+                 const NonlocalProjector& vnl);
 
     double pressure() const;
 
@@ -80,64 +54,16 @@ public:
     double soc_energy() const { return energy_soc_; }
     void set_cell_measure(double cm) { cell_measure_ = cm; }
 
-private:
-    std::array<double, 6> stress_k_ = {};
-    std::array<double, 6> stress_xc_ = {};
-    std::array<double, 6> stress_el_ = {};
-    std::array<double, 6> stress_nl_ = {};
-    std::array<double, 6> stress_soc_ = {};
-    std::array<double, 6> stress_total_ = {};
-    double cell_measure_ = 0.0;
-    double energy_soc_ = 0.0;
-
-    // XC stress: diagonal = (Exc - Exc_corr), GGA correction = -∫ Dxcdgrho * ∂ρ/∂x_α * ∂ρ/∂x_β dV
-    void compute_xc_stress(
-        const double* rho,
-        const double* rho_up,
-        const double* rho_dn,
-        const double* exc,
-        const double* Vxc,
-        const double* Dxcdgrho,
-        double Exc,
-        XCType xc_type,
-        int Nspin,
-        const double* rho_core,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* vtau = nullptr,
-        const double* tau = nullptr,
-        const double* gpu_tau_vtau_dot = nullptr);
-
-    // Electrostatic stress: uses ∇φ, ∇bJ, ∇VJ, etc. (matching reference)
-    void compute_electrostatic(
+    // Nonlocal+kinetic stress combined (with LynxContext — preferred).
+    void compute_nonlocal_kinetic(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
         const Crystal& crystal,
-        const std::vector<AtomInfluence>& influence,
-        const FDStencil& stencil,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* phi,
-        const double* rho,
-        const double* Vloc,
-        const double* b,
-        const double* b_ref,
-        double Esc);
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const std::vector<double>& kpt_weights);
 
-    // NLCC XC stress correction: ∫ ∇(ρ_core_J) · (x-R_J) · Vxc dV
-    void compute_xc_nlcc_stress(
-        const Crystal& crystal,
-        const std::vector<AtomInfluence>& influence,
-        const FDStencil& stencil,
-        const Domain& domain,
-        const FDGrid& grid,
-        const double* Vxc,
-        int Nspin);
-
-public:
-    // Nonlocal+kinetic stress combined (matching reference)
+    // Nonlocal+kinetic stress combined (explicit params — used by GPUSCF).
     void compute_nonlocal_kinetic(
         const Wavefunction& wfn,
         const Crystal& crystal,
@@ -154,6 +80,87 @@ public:
         const KPoints* kpoints = nullptr,
         int kpt_start = 0,
         int band_start = 0);
+
+private:
+    const LynxContext* ctx_ = nullptr;
+
+    std::array<double, 6> stress_k_ = {};
+    std::array<double, 6> stress_xc_ = {};
+    std::array<double, 6> stress_el_ = {};
+    std::array<double, 6> stress_nl_ = {};
+    std::array<double, 6> stress_soc_ = {};
+    std::array<double, 6> stress_total_ = {};
+    double cell_measure_ = 0.0;
+    double energy_soc_ = 0.0;
+
+    /// Detailed compute (implementation -- called by the high-level overload).
+    std::array<double, 6> compute_impl(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const double* phi,
+        const double* rho,
+        const double* rho_up,
+        const double* rho_dn,
+        const double* Vloc,
+        const double* b,
+        const double* b_ref,
+        const double* exc,
+        const double* Vxc,
+        const double* Dxcdgrho,
+        double Exc,
+        double Esc,
+        XCType xc_type,
+        int Nspin,
+        const double* rho_core,
+        const double* vtau = nullptr,
+        const double* tau = nullptr,
+        const double* gpu_mgga_psi_stress = nullptr,
+        const double* gpu_tau_vtau_dot = nullptr);
+
+    /// Print computed stress tensor to stdout (called at end of compute).
+    void print(int rank) const;
+
+    void add_to_total(const std::array<double, 6>& extra) {
+        for (int i = 0; i < 6; ++i) stress_total_[i] += extra[i];
+    }
+
+    // XC stress: diagonal = (Exc - Exc_corr), GGA correction = -∫ Dxcdgrho * ∂ρ/∂x_α * ∂ρ/∂x_β dV
+    void compute_xc_stress(
+        const double* rho,
+        const double* rho_up,
+        const double* rho_dn,
+        const double* exc,
+        const double* Vxc,
+        const double* Dxcdgrho,
+        double Exc,
+        XCType xc_type,
+        int Nspin,
+        const double* rho_core,
+        const double* vtau = nullptr,
+        const double* tau = nullptr,
+        const double* gpu_tau_vtau_dot = nullptr);
+
+    // Electrostatic stress: uses ∇φ, ∇bJ, ∇VJ, etc. (matching reference)
+    void compute_electrostatic(
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const double* phi,
+        const double* rho,
+        const double* Vloc,
+        const double* b,
+        const double* b_ref,
+        double Esc);
+
+    // NLCC XC stress correction: ∫ ∇(ρ_core_J) · (x-R_J) · Vxc dV
+    void compute_xc_nlcc_stress(
+        const Crystal& crystal,
+        const std::vector<AtomInfluence>& influence,
+        const double* Vxc,
+        int Nspin);
 };
 
 } // namespace lynx
