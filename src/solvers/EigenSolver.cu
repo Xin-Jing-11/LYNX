@@ -174,7 +174,8 @@ void chebyshev_filter_gpu(
     int degree,
     // Hamiltonian apply function pointer (callback):
     // apply(d_input, d_Veff, d_output, d_x_ex, Ns)
-    void (*apply_H)(const double*, const double*, double*, double*, int))
+    void (*apply_H)(const double*, const double*, double*, double*, int),
+    cudaStream_t stream)
 {
     double e = (eigval_max - lambda_cutoff) / 2.0;
     double c = (eigval_max + lambda_cutoff) / 2.0;
@@ -188,7 +189,7 @@ void chebyshev_filter_gpu(
     // Step 1: Y = (H*X - c*X) * (sigma/e)
     apply_H(d_X, d_Veff, d_HX, d_x_ex, Ns);
     double scale = sigma / e;
-    chefsi_init_kernel<<<grid, bs>>>(d_HX, d_X, d_Y, scale, c, total);
+    chefsi_init_kernel<<<grid, bs, 0, stream>>>(d_HX, d_X, d_Y, scale, c, total);
 
     // Xold = X
     CUDA_CHECK(cudaMemcpy(d_Xold, d_X, total * sizeof(double), cudaMemcpyDeviceToDevice));
@@ -200,7 +201,7 @@ void chebyshev_filter_gpu(
         double ss = sigma * sigma_new;
 
         apply_H(d_Y, d_Veff, d_HX, d_x_ex, Ns);
-        chefsi_step_kernel<<<grid, bs>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
+        chefsi_step_kernel<<<grid, bs, 0, stream>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew (pointer swap via memcpy)
         CUDA_CHECK(cudaMemcpy(d_Xold, d_Y, total * sizeof(double), cudaMemcpyDeviceToDevice));
@@ -213,13 +214,14 @@ void chebyshev_filter_gpu(
 void compute_ata_gpu(
     const double* d_X,  // (Nd, N) on device
     double* d_S,        // (N, N) on device
-    int Nd, int N, double dV)
+    int Nd, int N, double dV,
+    cudaStream_t stream)
 {
     if (N <= 200) {
         // Custom dot kernel — much faster for small N
         int bs = 256;
         dim3 grid(N, N);
-        ata_dot_kernel<<<grid, bs, bs * sizeof(double)>>>(d_X, d_S, Nd, N, dV);
+        ata_dot_kernel<<<grid, bs, bs * sizeof(double), stream>>>(d_X, d_S, Nd, N, dV);
     } else {
         // Fallback to cuBLAS for very large N
         auto& ctx = GPUContext::instance();
@@ -234,12 +236,13 @@ void compute_atb_gpu(
     const double* d_X,   // (Nd, N) on device
     const double* d_HX,  // (Nd, N) on device
     double* d_Hs,        // (N, N) on device
-    int Nd, int N, double dV)
+    int Nd, int N, double dV,
+    cudaStream_t stream)
 {
     if (N <= 200) {
         int bs = 256;
         dim3 grid(N, N);
-        atb_dot_kernel<<<grid, bs, bs * sizeof(double)>>>(d_X, d_HX, d_Hs, Nd, N, dV);
+        atb_dot_kernel<<<grid, bs, bs * sizeof(double), stream>>>(d_X, d_HX, d_Hs, Nd, N, dV);
     } else {
         auto& ctx = GPUContext::instance();
         double beta = 0.0;
@@ -249,19 +252,20 @@ void compute_atb_gpu(
 }
 
 // Symmetrize Hs on GPU
-void symmetrize_gpu(double* d_Hs, int N) {
+void symmetrize_gpu(double* d_Hs, int N, cudaStream_t stream) {
     dim3 grid(N, N);
-    symmetrize_kernel<<<grid, 1>>>(d_Hs, N);
+    symmetrize_kernel<<<grid, 1, 0, stream>>>(d_Hs, N);
 }
 
 // Orthogonalize via Cholesky QR on GPU:
 // S = X^T * X * dV → Cholesky S = R^T*R → X = X * R^{-1}
 void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV) {
     auto& ctx = GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
 
     // S = X^T * X * dV
     size_t _scratch_cp = ctx.scratch_pool.checkpoint();
-    compute_ata_gpu(d_X, d_S, Nd, N, dV);
+    compute_ata_gpu(d_X, d_S, Nd, N, dV, stream);
 
     // Cholesky factorization: S = R^T * R (upper triangular)
     int lwork = 0;
@@ -295,6 +299,7 @@ void project_and_diag_gpu(
     void (*apply_H)(const double*, const double*, double*, double*, int))
 {
     auto& ctx = GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
 
     size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
@@ -302,10 +307,10 @@ void project_and_diag_gpu(
     apply_H(d_X, d_Veff, d_HX, d_x_ex, N);
 
     // Hs = X^T * HX * dV
-    compute_atb_gpu(d_X, d_HX, d_Hs, Nd, N, dV);
+    compute_atb_gpu(d_X, d_HX, d_Hs, Nd, N, dV, stream);
 
     // Symmetrize
-    symmetrize_gpu(d_Hs, N);
+    symmetrize_gpu(d_Hs, N, stream);
 
     // Diagonalize with cuSOLVER dsyevd (all on GPU — no CPU LAPACK)
     int lwork = 0;
@@ -362,11 +367,13 @@ void eigensolver_solve_gpu(
     int cheb_degree, double dV,
     void (*apply_H)(const double*, const double*, double*, double*, int))
 {
+    cudaStream_t stream = GPUContext::instance().compute_stream;
+
     // Step 1: Chebyshev filter
     chebyshev_filter_gpu(d_psi, d_Y, d_Xold, d_Xnew, d_HX, d_x_ex,
                           d_Veff, Nd, Ns,
                           lambda_cutoff, eigval_min, eigval_max,
-                          cheb_degree, apply_H);
+                          cheb_degree, apply_H, stream);
 
     // Step 2: Orthogonalize filtered vectors (Cholesky QR)
     orthogonalize_gpu(d_Y, d_Ms, Nd, Ns, dV);
@@ -480,7 +487,8 @@ void chebyshev_filter_z_gpu(
     int Nd, int Ns,
     double lambda_cutoff, double eigval_min, double eigval_max,
     int degree,
-    void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int))
+    void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int),
+    cudaStream_t stream)
 {
     double e = (eigval_max - lambda_cutoff) / 2.0;
     double c = (eigval_max + lambda_cutoff) / 2.0;
@@ -495,7 +503,7 @@ void chebyshev_filter_z_gpu(
     apply_H_z(d_X, d_Veff, d_HX, d_x_ex, Ns);
 
     double scale = sigma / e;
-    chefsi_init_kernel_z<<<grid, bs>>>(d_Y, d_HX, d_X, scale, c, total);
+    chefsi_init_kernel_z<<<grid, bs, 0, stream>>>(d_Y, d_HX, d_X, scale, c, total);
 
     // Xold = X
     CUDA_CHECK(cudaMemcpy(d_Xold, d_X, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
@@ -507,7 +515,7 @@ void chebyshev_filter_z_gpu(
         double ss = sigma * sigma_new;
 
         apply_H_z(d_Y, d_Veff, d_HX, d_x_ex, Ns);
-        chefsi_step_kernel_z<<<grid, bs>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
+        chefsi_step_kernel_z<<<grid, bs, 0, stream>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew
         CUDA_CHECK(cudaMemcpy(d_Xold, d_Y, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
@@ -548,12 +556,12 @@ void compute_atb_z_gpu(
 }
 
 // Hermitianize Hs on GPU
-void hermitianize_z_gpu(cuDoubleComplex* d_Hs, int N) {
+void hermitianize_z_gpu(cuDoubleComplex* d_Hs, int N, cudaStream_t stream) {
     dim3 grid(N, N);
-    hermitianize_kernel_z<<<grid, 1>>>(d_Hs, N);
+    hermitianize_kernel_z<<<grid, 1, 0, stream>>>(d_Hs, N);
     int bs = 256;
     int g = ceildiv(N, bs);
-    force_real_diag_kernel_z<<<g, bs>>>(d_Hs, N);
+    force_real_diag_kernel_z<<<g, bs, 0, stream>>>(d_Hs, N);
 }
 
 // Orthogonalize via Cholesky QR on GPU (complex):
@@ -597,6 +605,7 @@ void project_and_diag_z_gpu(
     void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int))
 {
     auto& ctx = GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
 
     size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
@@ -607,7 +616,7 @@ void project_and_diag_z_gpu(
     compute_atb_z_gpu(d_X, d_HX, d_Hs, Nd, N, dV);
 
     // Hermitianize
-    hermitianize_z_gpu(d_Hs, N);
+    hermitianize_z_gpu(d_Hs, N, stream);
 
     // Diagonalize with cuSOLVER zheevd
     int lwork = 0;
@@ -665,11 +674,13 @@ void eigensolver_solve_z_gpu(
     int cheb_degree, double dV,
     void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int))
 {
+    cudaStream_t stream = GPUContext::instance().compute_stream;
+
     // Step 1: Chebyshev filter
     chebyshev_filter_z_gpu(d_psi_z, d_Y_z, d_Xold_z, d_Xnew_z, d_HX_z, d_x_ex_z,
                             d_Veff, Nd, Ns,
                             lambda_cutoff, eigval_min, eigval_max,
-                            cheb_degree, apply_H_z);
+                            cheb_degree, apply_H_z, stream);
 
     // Debug: check for NaN after CheFSI
     {
@@ -717,10 +728,11 @@ void eigensolver_solve_z_gpu(
 // Complex density computation wrapper
 // ============================================================
 void compute_density_z_gpu(const cuDoubleComplex* d_psi, const double* d_occ,
-                            double* d_rho, int Nd, int Ns, double weight) {
+                            double* d_rho, int Nd, int Ns, double weight,
+                            cudaStream_t stream) {
     int bs = 256;
     int grid = ceildiv(Nd, bs);
-    compute_density_z_kernel<<<grid, bs>>>(d_psi, d_occ, d_rho, Nd, Ns, weight);
+    compute_density_z_kernel<<<grid, bs, 0, stream>>>(d_psi, d_occ, d_rho, Nd, Ns, weight);
 }
 
 } // namespace gpu

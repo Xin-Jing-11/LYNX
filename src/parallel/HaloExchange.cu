@@ -97,7 +97,8 @@ void halo_exchange_gpu(
     const double* d_x,
     double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z)
+    bool periodic_x, bool periodic_y, bool periodic_z,
+    cudaStream_t stream)
 {
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
@@ -112,7 +113,7 @@ void halo_exchange_gpu(
     for (int n = 0; n < ncol; ++n) {
         CUDA_CHECK(cudaMemset(d_x_ex + n * nd_ex, 0, nd_ex * sizeof(double)));
 
-        halo_copy_interior_kernel<<<grid, block>>>(
+        halo_copy_interior_kernel<<<grid, block, 0, stream>>>(
             d_x + n * nd, d_x_ex + n * nd_ex,
             nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
 
@@ -120,25 +121,25 @@ void halo_exchange_gpu(
         if (periodic_z) {
             int total_z = nxny_ex * FDn;
             int gz = ceildiv(total_z, bs);
-            halo_periodic_bc_kernel<<<gz, bs>>>(d_x_ex + n * nd_ex,
+            halo_periodic_bc_kernel<<<gz, bs, 0, stream>>>(d_x_ex + n * nd_ex,
                 nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, 0);
-            halo_periodic_bc_kernel<<<gz, bs>>>(d_x_ex + n * nd_ex,
+            halo_periodic_bc_kernel<<<gz, bs, 0, stream>>>(d_x_ex + n * nd_ex,
                 nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, 1);
         }
         if (periodic_y) {
             int total_y = nz_ex * FDn * nx_ex;
             int gy = ceildiv(total_y, bs);
-            halo_periodic_bc_kernel<<<gy, bs>>>(d_x_ex + n * nd_ex,
+            halo_periodic_bc_kernel<<<gy, bs, 0, stream>>>(d_x_ex + n * nd_ex,
                 nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, 2);
-            halo_periodic_bc_kernel<<<gy, bs>>>(d_x_ex + n * nd_ex,
+            halo_periodic_bc_kernel<<<gy, bs, 0, stream>>>(d_x_ex + n * nd_ex,
                 nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, 3);
         }
         if (periodic_x) {
             int total_x = nz_ex * ny_ex * FDn;
             int gx = ceildiv(total_x, bs);
-            halo_periodic_bc_kernel<<<gx, bs>>>(d_x_ex + n * nd_ex,
+            halo_periodic_bc_kernel<<<gx, bs, 0, stream>>>(d_x_ex + n * nd_ex,
                 nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, 4);
-            halo_periodic_bc_kernel<<<gx, bs>>>(d_x_ex + n * nd_ex,
+            halo_periodic_bc_kernel<<<gx, bs, 0, stream>>>(d_x_ex + n * nd_ex,
                 nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, 5);
         }
     }
@@ -238,7 +239,8 @@ void halo_exchange_batched_gpu(
     const double* d_x,
     double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z)
+    bool periodic_x, bool periodic_y, bool periodic_z,
+    cudaStream_t stream)
 {
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
@@ -254,7 +256,7 @@ void halo_exchange_batched_gpu(
     {
         dim3 block(32, 8);
         dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
-        halo_copy_interior_batched_kernel<<<grid, block>>>(
+        halo_copy_interior_batched_kernel<<<grid, block, 0, stream>>>(
             d_x, d_x_ex, nx, ny, nz, FDn,
             nx_ex, ny_ex, nxny_ex, nd, nd_ex);
     }
@@ -263,23 +265,23 @@ void halo_exchange_batched_gpu(
     int bs = 256;
     if (periodic_z) {
         int total = nxny_ex * FDn * ncol;
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 0, ncol);
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 1, ncol);
     }
     if (periodic_y) {
         int total = nz_ex * FDn * nx_ex * ncol;
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 2, ncol);
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 3, ncol);
     }
     if (periodic_x) {
         int total = nz_ex * ny_ex * FDn * ncol;
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 4, ncol);
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 5, ncol);
     }
     CUDA_CHECK(cudaGetLastError());
@@ -295,7 +297,8 @@ void halo_exchange_batched_nomemset_gpu(
     const double* d_x,
     double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z)
+    bool periodic_x, bool periodic_y, bool periodic_z,
+    cudaStream_t stream)
 {
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
@@ -308,7 +311,7 @@ void halo_exchange_batched_nomemset_gpu(
     {
         dim3 block(32, 8);
         dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
-        halo_copy_interior_batched_kernel<<<grid, block>>>(
+        halo_copy_interior_batched_kernel<<<grid, block, 0, stream>>>(
             d_x, d_x_ex, nx, ny, nz, FDn,
             nx_ex, ny_ex, nxny_ex, nd, nd_ex);
     }
@@ -317,23 +320,23 @@ void halo_exchange_batched_nomemset_gpu(
     int bs = 256;
     if (periodic_z) {
         int total = nxny_ex * FDn * ncol;
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 0, ncol);
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 1, ncol);
     }
     if (periodic_y) {
         int total = nz_ex * FDn * nx_ex * ncol;
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 2, ncol);
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 3, ncol);
     }
     if (periodic_x) {
         int total = nz_ex * ny_ex * FDn * ncol;
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 4, ncol);
-        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 5, ncol);
     }
     CUDA_CHECK(cudaGetLastError());

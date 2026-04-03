@@ -25,24 +25,24 @@ namespace gpu {
 void halo_exchange_gpu(
     const double* d_x, double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z);
+    bool periodic_x, bool periodic_y, bool periodic_z, cudaStream_t stream = 0);
 
 void halo_exchange_batched_nomemset_gpu(
     const double* d_x, double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z);
+    bool periodic_x, bool periodic_y, bool periodic_z, cudaStream_t stream = 0);
 
 void gradient_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 void gradient_v3_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 // fused_gather_chitpsi_kernel from NonlocalProjector.cu
 // With CUDA_SEPARABLE_COMPILATION ON, __global__ functions have external linkage.
@@ -363,7 +363,8 @@ void compute_force_stress_gpu(
     double* h_f_nloc,       // [3 * n_phys_atoms]
     double* h_stress_k,     // [6] kinetic stress (Voigt: xx,xy,xz,yy,yz,zz)
     double* h_stress_nl,    // [6] nonlocal stress (Voigt)
-    double* h_energy_nl)    // scalar
+    double* h_energy_nl,
+    cudaStream_t stream)    // scalar
 {
     auto& ctx = GPUContext::instance();
 
@@ -430,14 +431,14 @@ void compute_force_stress_gpu(
     // ----------------------------------------------------------------
     // Step 1: Halo exchange all bands (once)
     // ----------------------------------------------------------------
-    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
+    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true, stream);
 
     // ----------------------------------------------------------------
     // Step 2: Compute 3 gradient directions (batched V2 — single launch per direction)
     // ----------------------------------------------------------------
-    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
-    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
-    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
 
     // ----------------------------------------------------------------
     // Step 3: Kinetic stress (6 Voigt pairs)
@@ -453,7 +454,7 @@ void compute_force_stress_gpu(
         double neg_occfac_dV = -occfac * dV;
 
         for (int v = 0; v < 6; ++v) {
-            kinetic_stress_kernel<<<Nband, bs, smem>>>(
+            kinetic_stress_kernel<<<Nband, bs, smem, stream>>>(
                 d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
                 d_occ, d_sk + v, Nd, Nband, neg_occfac_dV);
             CUDA_CHECK(cudaGetLastError());
@@ -471,7 +472,7 @@ void compute_force_stress_gpu(
         size_t smem_tiled = (NL_TILE_FS + block_size / 32) * sizeof(double);
 
         dim3 grid_nl(n_influence, Nband);
-        fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled>>>(
+        fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled, stream>>>(
             d_psi, d_Chi_flat, d_gpos_flat,
             d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
             d_alpha, Nd, Nband, Nband, 0, dV, n_influence);
@@ -482,7 +483,7 @@ void compute_force_stress_gpu(
         // energy_nl = wk * sum_n(g_n * sum(Gamma * alpha^2))
         // Note: alpha here has NOT been Gamma-scaled yet (raw dV*Chi^T*psi)
         // ----------------------------------------------------------------
-        nonlocal_energy_kernel<<<1, 1>>>(
+        nonlocal_energy_kernel<<<1, 1, 0, stream>>>(
             d_alpha, d_occ, d_Gamma, d_IP_displ_phys,
             n_phys_atoms, Nband, total_nproj, d_enl);
         CUDA_CHECK(cudaGetLastError());
@@ -498,13 +499,13 @@ void compute_force_stress_gpu(
             for (int dim = 0; dim < 3; ++dim) {
                 CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
-                fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled>>>(
+                fused_gather_chitpsi_kernel<<<grid_nl, block_size, smem_tiled, stream>>>(
                     d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
                     d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
                     d_beta, Nd, Nband, Nband, 0, dV, n_influence);
                 CUDA_CHECK(cudaGetLastError());
 
-                nonlocal_force_reduce_kernel<<<ceildiv(n_phys_atoms, bs_force), bs_force>>>(
+                nonlocal_force_reduce_kernel<<<ceildiv(n_phys_atoms, bs_force), bs_force, 0, stream>>>(
                     d_alpha, d_beta, d_occ, d_Gamma, d_IP_displ_phys,
                     n_phys_atoms, Nband, spn_fac * wk, d_force, dim);
                 CUDA_CHECK(cudaGetLastError());
@@ -527,7 +528,7 @@ void compute_force_stress_gpu(
 
                 CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
 
-                weighted_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled>>>(
+                weighted_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled, stream>>>(
                     d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
                     d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
                     d_atom_pos, d_beta,
@@ -536,7 +537,7 @@ void compute_force_stress_gpu(
                     nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2);
                 CUDA_CHECK(cudaGetLastError());
 
-                nonlocal_stress_reduce_kernel<<<1, 1>>>(
+                nonlocal_stress_reduce_kernel<<<1, 1, 0, stream>>>(
                     d_alpha, d_beta, d_occ, d_Gamma, d_IP_displ_phys,
                     n_phys_atoms, Nband, wk, d_snl + v);
                 CUDA_CHECK(cudaGetLastError());
@@ -604,13 +605,13 @@ void halo_exchange_z_gpu(
     const cuDoubleComplex* d_x, cuDoubleComplex* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
     bool periodic_x, bool periodic_y, bool periodic_z,
-    double kx_Lx, double ky_Ly, double kz_Lz);
+    double kx_Lx, double ky_Ly, double kz_Lz, cudaStream_t stream = 0);
 
 void gradient_z_gpu(
     const cuDoubleComplex* d_x_ex, cuDoubleComplex* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 // SOC gather kernel (defined in SOCOperators.cu, external linkage via separable compilation)
 __global__
@@ -686,7 +687,8 @@ void compute_soc_force_gpu(
     double kx_Lx, double ky_Ly, double kz_Lz,  // Bloch phase products
     double spn_fac, double wk,
     // Output (host)
-    double* h_f_soc)  // [3 * n_phys_atoms]
+    double* h_f_soc,
+    cudaStream_t stream)  // [3 * n_phys_atoms]
 {
     if (n_influence_soc == 0 || total_soc_nproj == 0) {
         std::memset(h_f_soc, 0, 3 * n_phys_atoms * sizeof(double));
@@ -739,9 +741,9 @@ void compute_soc_force_gpu(
         int total_elems = Nd_d * Nband;
         int bs = 256;
         int gs = (total_elems + bs - 1) / bs;
-        soc_force_spinor_extract_kernel<<<gs, bs>>>(d_psi_spinor, d_psi_up, Nd_d, Nband, 0);
+        soc_force_spinor_extract_kernel<<<gs, bs, 0, stream>>>(d_psi_spinor, d_psi_up, Nd_d, Nband, 0);
         CUDA_CHECK(cudaGetLastError());
-        soc_force_spinor_extract_kernel<<<gs, bs>>>(d_psi_spinor, d_psi_dn, Nd_d, Nband, 1);
+        soc_force_spinor_extract_kernel<<<gs, bs, 0, stream>>>(d_psi_spinor, d_psi_dn, Nd_d, Nband, 1);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -761,7 +763,7 @@ void compute_soc_force_gpu(
             threads = ((max_nproj_soc * Nband + 31) / 32) * 32;
         if (threads < 32) threads = 32;
 
-        soc_gather_alpha_z_kernel<<<n_influence_soc, threads>>>(
+        soc_gather_alpha_z_kernel<<<n_influence_soc, threads, 0, stream>>>(
             d_psi_spinor, d_Chi_soc_flat, d_gpos_flat,
             d_gpos_offsets_soc, d_chi_soc_offsets,
             d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
@@ -790,13 +792,13 @@ void compute_soc_force_gpu(
     for (int dim = 0; dim < 3; ++dim) {
         // 3a. Complex halo exchange + gradient for psi_up → Dpsi_up
         halo_exchange_z_gpu(d_psi_up, d_x_ex, nx, ny, nz, FDn, Nband,
-                            true, true, true, kx_Lx, ky_Ly, kz_Lz);
-        gradient_z_gpu(d_x_ex, d_Dpsi_up, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband);
+                            true, true, true, kx_Lx, ky_Ly, kz_Lz, stream);
+        gradient_z_gpu(d_x_ex, d_Dpsi_up, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband, stream);
 
         // 3b. Complex halo exchange + gradient for psi_dn → Dpsi_dn
         halo_exchange_z_gpu(d_psi_dn, d_x_ex, nx, ny, nz, FDn, Nband,
-                            true, true, true, kx_Lx, ky_Ly, kz_Lz);
-        gradient_z_gpu(d_x_ex, d_Dpsi_dn, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband);
+                            true, true, true, kx_Lx, ky_Ly, kz_Lz, stream);
+        gradient_z_gpu(d_x_ex, d_Dpsi_dn, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband, stream);
 
         // 3c. Compute beta_up/dn using soc_gather on Dpsi
         // We need to pack Dpsi_up/dn into spinor layout for the gather kernel
@@ -830,7 +832,7 @@ void compute_soc_force_gpu(
                 threads = ((max_nproj_soc * Nband + 31) / 32) * 32;
             if (threads < 32) threads = 32;
 
-            soc_gather_alpha_z_kernel<<<n_influence_soc, threads>>>(
+            soc_gather_alpha_z_kernel<<<n_influence_soc, threads, 0, stream>>>(
                 d_Dpsi_spinor, d_Chi_soc_flat, d_gpos_flat,
                 d_gpos_offsets_soc, d_chi_soc_offsets,
                 d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
@@ -979,7 +981,8 @@ void compute_soc_stress_gpu(
     double spn_fac, double wk,
     // Output (host)
     double* h_stress_soc,   // [6] Voigt stress
-    double* h_energy_soc)   // scalar SOC energy for diagonal
+    double* h_energy_soc,
+    cudaStream_t stream)   // scalar SOC energy for diagonal
 {
     if (n_influence_soc == 0 || total_soc_nproj == 0) {
         std::memset(h_stress_soc, 0, 6 * sizeof(double));
@@ -1027,9 +1030,9 @@ void compute_soc_stress_gpu(
         int total_elems = Nd_d * Nband;
         int bs = 256;
         int gs = (total_elems + bs - 1) / bs;
-        soc_force_spinor_extract_kernel<<<gs, bs>>>(d_psi_spinor, d_psi_up, Nd_d, Nband, 0);
+        soc_force_spinor_extract_kernel<<<gs, bs, 0, stream>>>(d_psi_spinor, d_psi_up, Nd_d, Nband, 0);
         CUDA_CHECK(cudaGetLastError());
-        soc_force_spinor_extract_kernel<<<gs, bs>>>(d_psi_spinor, d_psi_dn, Nd_d, Nband, 1);
+        soc_force_spinor_extract_kernel<<<gs, bs, 0, stream>>>(d_psi_spinor, d_psi_dn, Nd_d, Nband, 1);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1045,7 +1048,7 @@ void compute_soc_stress_gpu(
             threads = ((max_nproj_soc * Nband + 31) / 32) * 32;
         if (threads < 32) threads = 32;
 
-        soc_gather_alpha_z_kernel<<<n_influence_soc, threads>>>(
+        soc_gather_alpha_z_kernel<<<n_influence_soc, threads, 0, stream>>>(
             d_psi_spinor, d_Chi_soc_flat, d_gpos_flat,
             d_gpos_offsets_soc, d_chi_soc_offsets,
             d_ndc_arr_soc, d_nproj_soc_arr, d_IP_displ_soc,
@@ -1133,13 +1136,13 @@ void compute_soc_stress_gpu(
     for (int dim = 0; dim < 3; ++dim) {
         // Complex halo exchange + gradient for psi_up
         halo_exchange_z_gpu(d_psi_up, d_x_ex, nx, ny, nz, FDn, Nband,
-                            true, true, true, kx_Lx, ky_Ly, kz_Lz);
-        gradient_z_gpu(d_x_ex, d_Dpsi_up, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband);
+                            true, true, true, kx_Lx, ky_Ly, kz_Lz, stream);
+        gradient_z_gpu(d_x_ex, d_Dpsi_up, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband, stream);
 
         // Complex halo exchange + gradient for psi_dn
         halo_exchange_z_gpu(d_psi_dn, d_x_ex, nx, ny, nz, FDn, Nband,
-                            true, true, true, kx_Lx, ky_Ly, kz_Lz);
-        gradient_z_gpu(d_x_ex, d_Dpsi_dn, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband);
+                            true, true, true, kx_Lx, ky_Ly, kz_Lz, stream);
+        gradient_z_gpu(d_x_ex, d_Dpsi_dn, nx, ny, nz, FDn, nx_ex, ny_ex, dim, Nband, stream);
 
         // Download gradients to host
         h_Dpsi_up_all[dim].resize((size_t)Nd_d * Nband);
@@ -1489,7 +1492,8 @@ void compute_mgga_stress_gpu(
     const double* uvec_inv,    // [9] row-major uvec_inv matrix (only used if !is_orth)
     // Output (host)
     double* h_stress_mgga,     // [6] mGGA psi stress (Voigt)
-    double* h_tau_vtau_dot)    // scalar: ∫ τ·vtau dV
+    double* h_tau_vtau_dot,
+    cudaStream_t stream)    // scalar: ∫ τ·vtau dV
 {
     auto& ctx = GPUContext::instance();
 
@@ -1520,10 +1524,10 @@ void compute_mgga_stress_gpu(
 
     // Halo exchange + gradients (batched V2 — single launch per direction)
     double* d_x_ex = ctx.buf.x_ex;
-    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true);
-    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband);
-    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband);
-    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband);
+    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
 
     // Compute mGGA psi stress: 6 Voigt pairs
     {
@@ -1537,14 +1541,14 @@ void compute_mgga_stress_gpu(
             int voigt_b[6] = {0, 1, 2, 1, 2, 2};
 
             for (int v = 0; v < 6; ++v) {
-                mgga_psi_stress_kernel<<<Nband, bs, smem>>>(
+                mgga_psi_stress_kernel<<<Nband, bs, smem, stream>>>(
                     d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
                     d_vtau, d_occ, d_smgga + v, Nd, Nband, neg_occfac_dV);
                 CUDA_CHECK(cudaGetLastError());
             }
         } else {
             // Non-orthogonal: single kernel computes all 6 Voigt with uvec_inv transform
-            mgga_psi_stress_kernel_nonorth<<<Nband, bs, smem>>>(
+            mgga_psi_stress_kernel_nonorth<<<Nband, bs, smem, stream>>>(
                 d_Dpsi_x, d_Dpsi_y, d_Dpsi_z,
                 d_vtau, d_occ, d_smgga, Nd, Nband, neg_occfac_dV,
                 uvec_inv[0], uvec_inv[1], uvec_inv[2],
@@ -1559,7 +1563,7 @@ void compute_mgga_stress_gpu(
         int bs = 256;
         int nblocks = std::min((tau_dot_len + bs - 1) / bs, 256);
         size_t smem = bs * sizeof(double);
-        dot_product_reduce_kernel<<<nblocks, bs, smem>>>(
+        dot_product_reduce_kernel<<<nblocks, bs, smem, stream>>>(
             d_tau, d_vtau_full, d_dot, tau_dot_len);
         CUDA_CHECK(cudaGetLastError());
     }

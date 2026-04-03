@@ -1,5 +1,6 @@
 #ifdef USE_CUDA
 #include "xc/GPUExchangePoissonSolver.cuh"
+#include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 #include <cstdio>
 #include <cassert>
@@ -285,6 +286,7 @@ void GPUExchangePoissonSolver::solve_batch_stress(double* d_rhs, int ncol, doubl
 void GPUExchangePoissonSolver::solve_batch_impl(double* d_rhs, int ncol, double* d_sol,
                                                   cublasHandle_t cublas,
                                                   const double* d_pconst) {
+    cudaStream_t stream = GPUContext::instance().compute_stream;
     assert(is_setup_ && !is_kpt_);
     if (ncol == 0) return;
 
@@ -313,7 +315,7 @@ void GPUExchangePoissonSolver::solve_batch_impl(double* d_rhs, int ncol, double*
     int total = Ndc_ * ncol;
     int block = 256;
     int grid = (total + block - 1) / block;
-    pointwise_multiply_kernel<<<grid, block>>>(d_fft_work_, d_pconst, Ndc_, total);
+    pointwise_multiply_kernel<<<grid, block, 0, stream>>>(d_fft_work_, d_pconst, Ndc_, total);
     CUDA_CHECK(cudaGetLastError());
 
     // 3. Inverse C2R FFT
@@ -345,6 +347,7 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
                                                 cuDoubleComplex* d_sol,
                                                 cublasHandle_t cublas,
                                                 int kpt_k, int kpt_q) {
+    cudaStream_t stream = GPUContext::instance().compute_stream;
     assert(is_setup_ && is_kpt_);
     if (ncol == 0) return;
 
@@ -378,7 +381,7 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
     // 2. Apply negative phase factor
     if (l != 0) {
         const cuDoubleComplex* d_phase = d_neg_phase_ + (size_t)(l - 1) * Nd_;
-        apply_phase_kernel<<<grid, block>>>(d_kpt_scratch_, d_phase, Nd_, total);
+        apply_phase_kernel<<<grid, block, 0, stream>>>(d_kpt_scratch_, d_phase, Nd_, total);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -396,7 +399,7 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
     } else {
         d_alpha = d_pois_const_ + (size_t)Nd_ * (l - 1);
     }
-    pointwise_multiply_z2z_kernel<<<grid, block>>>(d_fft_work_, d_alpha, Nd_, total);
+    pointwise_multiply_z2z_kernel<<<grid, block, 0, stream>>>(d_fft_work_, d_alpha, Nd_, total);
     CUDA_CHECK(cudaGetLastError());
 
     // 5. Inverse Z2Z FFT: fft_work -> sol
@@ -408,13 +411,13 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
 
     // 6. Normalize by 1/Nd
     double inv_Nd = 1.0 / Nd_;
-    scale_z_kernel<<<grid, block>>>(d_sol, inv_Nd, total);
+    scale_z_kernel<<<grid, block, 0, stream>>>(d_sol, inv_Nd, total);
     CUDA_CHECK(cudaGetLastError());
 
     // 7. Apply positive phase factor
     if (l != 0) {
         const cuDoubleComplex* d_phase = d_pos_phase_ + (size_t)(l - 1) * Nd_;
-        apply_phase_kernel<<<grid, block>>>(d_sol, d_phase, Nd_, total);
+        apply_phase_kernel<<<grid, block, 0, stream>>>(d_sol, d_phase, Nd_, total);
         CUDA_CHECK(cudaGetLastError());
     }
 }

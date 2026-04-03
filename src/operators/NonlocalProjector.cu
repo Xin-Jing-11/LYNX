@@ -301,7 +301,8 @@ void nonlocal_projector_apply_gpu(
     double* d_alpha,
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
-    int max_ndc, int max_nproj)
+    int max_ndc, int max_nproj,
+    cudaStream_t stream)
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
@@ -312,7 +313,7 @@ void nonlocal_projector_apply_gpu(
     // Step 1: Tiled gather + Chi^T * psi → alpha (2D grid: atoms × columns)
     size_t smem1 = (NL_TILE + block_size / 32) * sizeof(double);
     dim3 grid_gather(n_atoms, ncol);
-    fused_gather_chitpsi_kernel<<<grid_gather, block_size, smem1>>>(
+    fused_gather_chitpsi_kernel<<<grid_gather, block_size, smem1, stream>>>(
         d_psi, d_Chi_flat, d_gpos_flat,
         d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
         d_alpha, Nd, ncol, ncol, 0, dV, n_atoms);
@@ -321,7 +322,7 @@ void nonlocal_projector_apply_gpu(
     // Step 2: Gamma scaling
     {
         int total = total_nproj * ncol;
-        gamma_scale_kernel<<<ceildiv(total, block_size), block_size>>>(
+        gamma_scale_kernel<<<ceildiv(total, block_size), block_size, 0, stream>>>(
             d_alpha, d_Gamma, total_nproj, ncol);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -330,7 +331,7 @@ void nonlocal_projector_apply_gpu(
     // Shared memory: only max_nproj doubles per block (one column per block)
     size_t smem3 = (size_t)max_nproj * sizeof(double);
     dim3 grid_scatter(n_atoms, ncol);
-    fused_chialpha_scatter_kernel<<<grid_scatter, block_size, smem3>>>(
+    fused_chialpha_scatter_kernel<<<grid_scatter, block_size, smem3, stream>>>(
         d_Hpsi, d_Chi_flat, d_gpos_flat,
         d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
         d_alpha, Nd, ncol, ncol, 0, n_atoms);
@@ -354,7 +355,8 @@ void nonlocal_projector_apply_gpu(
     const int* h_ndc_arr,
     const int* h_nproj_arr,
     const int* h_IP_displ,
-    int max_ndc, int max_nproj)
+    int max_ndc, int max_nproj,
+    cudaStream_t stream)
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
@@ -376,7 +378,7 @@ void nonlocal_projector_apply_gpu(
         d_gpos_off, d_chi_off, d_ndc, d_nproj, d_ip,
         d_Gamma, d_alpha,
         Nd, ncol, dV, n_atoms, total_nproj,
-        max_ndc, max_nproj);
+        max_ndc, max_nproj, stream);
 
     cudaFreeAsync(d_gpos_off, 0); cudaFreeAsync(d_chi_off, 0);
     cudaFreeAsync(d_ndc, 0); cudaFreeAsync(d_nproj, 0); cudaFreeAsync(d_ip, 0);

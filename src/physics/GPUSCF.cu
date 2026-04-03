@@ -53,12 +53,12 @@ namespace gpu {
 void halo_exchange_gpu(
     const double* d_x, double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z);
+    bool periodic_x, bool periodic_y, bool periodic_z, cudaStream_t stream = 0);
 
 void halo_exchange_batched_nomemset_gpu(
     const double* d_x, double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z);
+    bool periodic_x, bool periodic_y, bool periodic_z, cudaStream_t stream = 0);
 
 void hamiltonian_apply_local_gpu(
     const double* d_psi, const double* d_Veff, double* d_Hpsi,
@@ -67,7 +67,8 @@ void hamiltonian_apply_local_gpu(
     bool is_orthogonal,
     bool periodic_x, bool periodic_y, bool periodic_z,
     double diag_coeff,
-    bool has_xy, bool has_xz, bool has_yz);
+    bool has_xy, bool has_xz, bool has_yz,
+    cudaStream_t stream = 0);
 
 void upload_stencil_coefficients(
     const double* D2x, const double* D2y, const double* D2z,
@@ -94,16 +95,16 @@ void nonlocal_projector_apply_gpu(
     double* d_alpha,
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
-    int max_ndc, int max_nproj);
+    int max_ndc, int max_nproj, cudaStream_t stream = 0);
 
 void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho,
-                          int Nd, int Ns, double weight);
+                          int Nd, int Ns, double weight, cudaStream_t stream = 0);
 
 void laplacian_orth_v7_gpu(
     const double* d_x_ex, const double* d_V, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    double a, double b, double c, double diag_coeff, int ncol);
+    double a, double b, double c, double diag_coeff, int ncol, cudaStream_t stream = 0);
 
 void upload_precomputed_coefficients(const double* D2x, const double* D2y, const double* D2z,
                                       double a, int FDn);
@@ -113,31 +114,31 @@ void laplacian_nonorth_gpu(
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
     double a, double b, double c, double diag_coeff,
-    bool has_xy, bool has_xz, bool has_yz, int ncol);
+    bool has_xy, bool has_xz, bool has_yz, int ncol, cudaStream_t stream = 0);
 
 void gradient_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 void gradient_v3_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 void gradient_z_gpu(
     const cuDoubleComplex* d_x_ex, cuDoubleComplex* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
-                  double* d_exc, double* d_vxc, double* d_v2xc, int N);
+                  double* d_exc, double* d_vxc, double* d_v2xc, int N, cudaStream_t stream = 0);
 
-void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N);
-void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N);
+void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
+void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
 
 int aar_gpu(
     void (*op_gpu)(const double* d_x, double* d_Ax),
@@ -147,7 +148,7 @@ int aar_gpu(
     double tol, int max_iter,
     double* d_r, double* d_f, double* d_Ax,
     double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old);
+    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
 
 void compute_force_stress_gpu(
     const double* d_psi, const double* d_occ,
@@ -161,7 +162,7 @@ void compute_force_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs, double occfac,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl);
+    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl, cudaStream_t stream = 0);
 
 void compute_mgga_stress_gpu(
     const double* d_psi, const double* d_occ,
@@ -169,7 +170,7 @@ void compute_mgga_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double occfac, int tau_dot_len,
     bool is_orth, const double* uvec_inv,
-    double* h_stress_mgga, double* h_tau_vtau_dot);
+    double* h_stress_mgga, double* h_tau_vtau_dot, cudaStream_t stream = 0);
 
 void compute_soc_force_gpu(
     const cuDoubleComplex* d_psi_spinor, const double* d_occ,
@@ -188,7 +189,7 @@ void compute_soc_force_gpu(
     int nx, int ny, int nz, int FDn, int Nd_d, int Nband,
     double dV, double kx_Lx, double ky_Ly, double kz_Lz,
     double spn_fac, double wk,
-    double* h_f_soc);
+    double* h_f_soc, cudaStream_t stream = 0);
 
 void compute_soc_stress_gpu(
     const cuDoubleComplex* d_psi_spinor, const double* d_occ,
@@ -219,7 +220,7 @@ void compute_soc_stress_gpu(
     const int* h_IP_displ_soc_inf,
     const double* h_bloch_fac,
     double spn_fac, double wk,
-    double* h_stress_soc, double* h_energy_soc);
+    double* h_stress_soc, double* h_energy_soc, cudaStream_t stream = 0);
 
 // Complex eigensolver (k-point)
 void eigensolver_solve_z_gpu(
@@ -233,14 +234,14 @@ void eigensolver_solve_z_gpu(
     void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int));
 
 void compute_density_z_gpu(const cuDoubleComplex* d_psi, const double* d_occ,
-                            double* d_rho, int Nd, int Ns, double weight);
+                            double* d_rho, int Nd, int Ns, double weight, cudaStream_t stream = 0);
 
 // Complex operators (k-point)
 void halo_exchange_z_gpu(
     const cuDoubleComplex* d_x, cuDoubleComplex* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
     bool periodic_x, bool periodic_y, bool periodic_z,
-    double kx_Lx, double ky_Ly, double kz_Lz);
+    double kx_Lx, double ky_Ly, double kz_Lz, cudaStream_t stream = 0);
 
 void hamiltonian_apply_local_z_gpu(
     const cuDoubleComplex* d_psi, const double* d_Veff, cuDoubleComplex* d_Hpsi,
@@ -250,7 +251,8 @@ void hamiltonian_apply_local_z_gpu(
     bool periodic_x, bool periodic_y, bool periodic_z,
     double diag_coeff,
     bool has_xy, bool has_xz, bool has_yz,
-    double kx_Lx, double ky_Ly, double kz_Lz);
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    cudaStream_t stream = 0);
 
 void nonlocal_projector_apply_z_gpu(
     const cuDoubleComplex* d_psi, cuDoubleComplex* d_Hpsi,
@@ -262,24 +264,24 @@ void nonlocal_projector_apply_z_gpu(
     const double* d_bloch_fac,
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
-    int max_ndc, int max_nproj);
+    int max_ndc, int max_nproj, cudaStream_t stream = 0);
 
 // Spin XC
 void lda_pw_spin_gpu(const double* d_rho_up, const double* d_rho_dn,
-                      double* d_exc, double* d_vxc_up, double* d_vxc_dn, int N);
+                      double* d_exc, double* d_vxc_up, double* d_vxc_dn, int N, cudaStream_t stream = 0);
 void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
-                       double* d_exc, double* d_vxc, double* d_v2xc, int N);
+                       double* d_exc, double* d_vxc, double* d_v2xc, int N, cudaStream_t stream = 0);
 
 // SCAN metaGGA
 void mgga_scan_gpu(const double* d_rho, const double* d_sigma, const double* d_tau,
-                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N);
+                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N, cudaStream_t stream = 0);
 void mgga_scan_spin_gpu(
     const double* d_rho_up, const double* d_rho_dn,
     const double* d_sigma_uu, const double* d_sigma_dd, const double* d_sigma_tot,
     const double* d_tau_up, const double* d_tau_dn,
     double* d_exc, double* d_vxc_up, double* d_vxc_dn,
     double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
-    double* d_vtau_up, double* d_vtau_dn, int N);
+    double* d_vtau_up, double* d_vtau_dn, int N, cudaStream_t stream = 0);
 
 // rSCAN/r2SCAN via libxc CPU fallback
 void mgga_libxc_gpu(int xc_x_id, int xc_c_id,
@@ -297,7 +299,7 @@ void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
 void spinor_offdiag_veff_gpu(
     cuDoubleComplex* d_Hpsi, const cuDoubleComplex* d_psi,
     const double* d_V_ud_re, const double* d_V_ud_im,
-    int Nd_d, int ncol);
+    int Nd_d, int ncol, cudaStream_t stream = 0);
 
 void soc_apply_z_gpu(
     const cuDoubleComplex* d_psi, cuDoubleComplex* d_Hpsi,
@@ -311,12 +313,12 @@ void soc_apply_z_gpu(
     cuDoubleComplex* d_alpha_up, cuDoubleComplex* d_alpha_dn,
     int Nd_d, int ncol, double dV,
     int n_influence, int total_soc_nproj,
-    int max_ndc_soc, int max_nproj_soc);
+    int max_ndc_soc, int max_nproj_soc, cudaStream_t stream = 0);
 
 void spinor_density_gpu(
     const cuDoubleComplex* d_psi, const double* d_occ,
     double* d_rho, double* d_mag_x, double* d_mag_y, double* d_mag_z,
-    int Nd_d, int Nband, double weight);
+    int Nd_d, int Nband, double weight, cudaStream_t stream = 0);
 
 } // namespace gpu
 
@@ -1268,6 +1270,7 @@ void GPUSCFRunner::hamiltonian_apply_cb(
     double* d_Hpsi, double* d_x_ex, int ncol)
 {
     auto* s = s_instance_;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     // GPU local part: -0.5*Lap + Veff
     gpu::hamiltonian_apply_local_gpu(
@@ -1275,7 +1278,7 @@ void GPUSCFRunner::hamiltonian_apply_cb(
         s->nx_, s->ny_, s->nz_, s->FDn_, ncol, 0.0,
         s->is_orth_, true, true, true,
         s->diag_coeff_ham_,
-        s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_);
+        s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, stream);
 
     // GPU nonlocal part: Vnl*psi -> add to Hpsi
     if (s->gpu_vnl_.total_phys_nproj > 0) {
@@ -1288,7 +1291,7 @@ void GPUSCFRunner::hamiltonian_apply_cb(
             s->gpu_vnl_.d_alpha,
             s->Nd_, ncol, s->dV_,
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
-            s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+            s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj, stream);
     }
 
     // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
@@ -1311,15 +1314,15 @@ void GPUSCFRunner::hamiltonian_apply_cb(
         if (s->is_orth_) {
             // Batched orthogonal: halo all bands once, then direction-by-direction
             gpu::halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex,
-                s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+                s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true, stream);
             for (int dir = 0; dir < 3; dir++) {
                 gpu::gradient_v3_gpu(d_x_ex, d_dpsi,
-                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol);
-                vtau_multiply_batched_kernel<<<gs_total, bs>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd, total);
+                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol, stream);
+                vtau_multiply_batched_kernel<<<gs_total, bs, 0, stream>>>(d_dpsi, s->d_vtau_active_, d_vtdpsi, Nd, total);
                 gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
-                    s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+                    s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true, stream);
                 gpu::gradient_v3_gpu(d_vt_ex, d_dpsi,
-                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol);
+                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol, stream);
                 double one = 1.0;
                 cublasDaxpy(ctx.cublas, total, &one, d_dpsi, 1, d_div, 1);
             }
@@ -1329,34 +1332,34 @@ void GPUSCFRunner::hamiltonian_apply_cb(
             double* d_dpsi_y = s->d_mgga_dpsi_y_;
             double* d_dpsi_zr = s->d_mgga_dpsi_z_r_;
             gpu::halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex,
-                s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+                s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true, stream);
             gpu::gradient_v3_gpu(d_x_ex, d_dpsi_x,
-                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, ncol);
+                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, ncol, stream);
             gpu::gradient_v3_gpu(d_x_ex, d_dpsi_y,
-                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, ncol);
+                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, ncol, stream);
             gpu::gradient_v3_gpu(d_x_ex, d_dpsi_zr,
-                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, ncol);
+                s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, ncol, stream);
             int gs = gpu::ceildiv(Nd, bs);
             for (int dir = 0; dir < 3; dir++) {
                 // Per-band vtau_lapcT because vtau is 1×Nd broadcast
                 for (int n = 0; n < ncol; n++) {
-                    vtau_lapcT_multiply_kernel<<<gs, bs>>>(
+                    vtau_lapcT_multiply_kernel<<<gs, bs, 0, stream>>>(
                         d_dpsi_x + (size_t)n * Nd, d_dpsi_y + (size_t)n * Nd,
                         d_dpsi_zr + (size_t)n * Nd,
                         s->d_vtau_active_, d_vtdpsi + (size_t)n * Nd, Nd,
                         s->lapcT_[dir*3+0], s->lapcT_[dir*3+1], s->lapcT_[dir*3+2]);
                 }
                 gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
-                    s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true);
+                    s->nx_, s->ny_, s->nz_, s->FDn_, ncol, true, true, true, stream);
                 gpu::gradient_v3_gpu(d_vt_ex, d_vtdpsi,
-                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol);
+                    s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, ncol, stream);
                 double one = 1.0;
                 cublasDaxpy(ctx.cublas, total, &one, d_vtdpsi, 1, d_div, 1);
             }
         }
 
         // Hpsi -= 0.5 * div (all bands at once)
-        mgga_ham_sub_kernel<<<gs_total, bs>>>(d_Hpsi, d_div, total);
+        mgga_ham_sub_kernel<<<gs_total, bs, 0, stream>>>(d_Hpsi, d_div, total);
     }
 
     // GPU exact exchange: Hx -= exx_frac * Xi * (Xi^T * X)
@@ -1379,6 +1382,7 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
     cuDoubleComplex* d_Hpsi, cuDoubleComplex* d_x_ex, int ncol)
 {
     auto* s = s_instance_;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     // GPU local part: -0.5*Lap + Veff (complex, with Bloch phases)
     gpu::hamiltonian_apply_local_z_gpu(
@@ -1387,7 +1391,7 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
         s->is_orth_, true, true, true,
         s->diag_coeff_ham_,
         s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
-        s->kxLx_, s->kyLy_, s->kzLz_);
+        s->kxLx_, s->kyLy_, s->kzLz_, stream);
 
     // GPU nonlocal part with Bloch phases
     if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
@@ -1401,7 +1405,7 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
             s->d_bloch_fac_,
             s->Nd_, ncol, s->dV_,
             s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
-            s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+            s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj, stream);
     }
 
     // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
@@ -1427,12 +1431,12 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
                 // Orthogonal: direction-by-direction
                 for (int dir = 0; dir < 3; dir++) {
                     gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
-                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
-                    gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
-                    vtau_multiply_z_kernel<<<gs, bs>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
+                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_, stream);
+                    gpu::gradient_z_gpu(d_x_ex, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1, stream);
+                    vtau_multiply_z_kernel<<<gs, bs, 0, stream>>>(d_dpsi_z, s->d_vtau_active_, d_vtdpsi_z, Nd);
                     gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
-                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
-                    gpu::gradient_z_gpu(d_vt_ex_z, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_, stream);
+                    gpu::gradient_z_gpu(d_vt_ex_z, d_dpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1, stream);
                     cuDoubleComplex one = {1.0, 0.0};
                     cublasZaxpy(ctx.cublas, Nd, &one, d_dpsi_z, 1, d_div_z, 1);
                 }
@@ -1443,26 +1447,26 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
                 cuDoubleComplex* d_dpsi_zz = (cuDoubleComplex*)s->d_mgga_dpsi_zz_;
                 // Compute all 3 gradient components
                 gpu::halo_exchange_z_gpu(d_psi_n, d_x_ex, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
-                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
-                gpu::gradient_z_gpu(d_x_ex, d_dpsi_xz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, 1);
-                gpu::gradient_z_gpu(d_x_ex, d_dpsi_yz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, 1);
-                gpu::gradient_z_gpu(d_x_ex, d_dpsi_zz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, 1);
+                                         true, true, true, s->kxLx_, s->kyLy_, s->kzLz_, stream);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_xz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 0, 1, stream);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_yz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 1, 1, stream);
+                gpu::gradient_z_gpu(d_x_ex, d_dpsi_zz, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, 2, 1, stream);
                 // For each direction: flux_dir = vtau * (lapcT[dir] · grad_psi), then divergence
                 for (int dir = 0; dir < 3; dir++) {
-                    vtau_lapcT_multiply_z_kernel<<<gs, bs>>>(d_dpsi_xz, d_dpsi_yz, d_dpsi_zz,
+                    vtau_lapcT_multiply_z_kernel<<<gs, bs, 0, stream>>>(d_dpsi_xz, d_dpsi_yz, d_dpsi_zz,
                         s->d_vtau_active_, d_vtdpsi_z, Nd,
                         s->lapcT_[dir*3+0], s->lapcT_[dir*3+1], s->lapcT_[dir*3+2]);
                     gpu::halo_exchange_z_gpu(d_vtdpsi_z, d_vt_ex_z, s->nx_, s->ny_, s->nz_, s->FDn_, 1,
-                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_);
+                                             true, true, true, s->kxLx_, s->kyLy_, s->kzLz_, stream);
                     // Write divergence output to d_vtdpsi_z (flux already consumed by halo exchange)
-                    gpu::gradient_z_gpu(d_vt_ex_z, d_vtdpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1);
+                    gpu::gradient_z_gpu(d_vt_ex_z, d_vtdpsi_z, s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex, dir, 1, stream);
                     cuDoubleComplex one = {1.0, 0.0};
                     cublasZaxpy(ctx.cublas, Nd, &one, d_vtdpsi_z, 1, d_div_z, 1);
                 }
             }
 
             // Hpsi -= 0.5 * div
-            mgga_ham_sub_z_kernel<<<gs, bs>>>(d_Hpsi_n, d_div_z, Nd);
+            mgga_ham_sub_z_kernel<<<gs, bs, 0, stream>>>(d_Hpsi_n, d_div_z, Nd);
         }
     }
 
@@ -1535,6 +1539,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     cuDoubleComplex* d_Hpsi, cuDoubleComplex* d_x_ex, int ncol)
 {
     auto* s = s_instance_;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int Nd_d = s->Nd_;
     int Nd_d_spinor = 2 * Nd_d;
 
@@ -1578,8 +1583,8 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
         // Extract up/dn from spinor layout (offset by col_start)
         const cuDoubleComplex* d_psi_batch = d_psi + col_start * Nd_d_spinor;
         cuDoubleComplex* d_Hpsi_batch = d_Hpsi + col_start * Nd_d_spinor;
-        spinor_extract_kernel<<<gs, bs>>>(d_psi_batch, d_psi_up, Nd_d, cols, 0);
-        spinor_extract_kernel<<<gs, bs>>>(d_psi_batch, d_psi_dn, Nd_d, cols, 1);
+        spinor_extract_kernel<<<gs, bs, 0, stream>>>(d_psi_batch, d_psi_up, Nd_d, cols, 0);
+        spinor_extract_kernel<<<gs, bs, 0, stream>>>(d_psi_batch, d_psi_dn, Nd_d, cols, 1);
 
         // Batched local H
         gpu::hamiltonian_apply_local_z_gpu(
@@ -1588,7 +1593,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             s->is_orth_, true, true, true,
             s->diag_coeff_ham_,
             s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
-            s->kxLx_, s->kyLy_, s->kzLz_);
+            s->kxLx_, s->kyLy_, s->kzLz_, stream);
 
         gpu::hamiltonian_apply_local_z_gpu(
             d_psi_dn, V_dd, d_Hp_dn, d_xex_batch,
@@ -1596,7 +1601,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             s->is_orth_, true, true, true,
             s->diag_coeff_ham_,
             s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_,
-            s->kxLx_, s->kyLy_, s->kzLz_);
+            s->kxLx_, s->kyLy_, s->kzLz_, stream);
 
         // Batched Vnl
         if (s->gpu_vnl_.total_phys_nproj > 0 && s->d_bloch_fac_) {
@@ -1610,7 +1615,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
                 s->d_bloch_fac_,
                 Nd_d, cols, s->dV_,
                 s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
-                s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+                s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj, stream);
 
             gpu::nonlocal_projector_apply_z_gpu(
                 d_psi_dn, d_Hp_dn,
@@ -1622,19 +1627,19 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
                 s->d_bloch_fac_,
                 Nd_d, cols, s->dV_,
                 s->gpu_vnl_.n_influence, s->gpu_vnl_.total_phys_nproj,
-                s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj);
+                s->gpu_vnl_.max_ndc, s->gpu_vnl_.max_nproj, stream);
         }
 
         // Scatter back to spinor layout
-        spinor_scatter_kernel<<<gs, bs>>>(d_Hp_up, d_Hpsi_batch, Nd_d, cols, 0);
-        spinor_scatter_kernel<<<gs, bs>>>(d_Hp_dn, d_Hpsi_batch, Nd_d, cols, 1);
+        spinor_scatter_kernel<<<gs, bs, 0, stream>>>(d_Hp_up, d_Hpsi_batch, Nd_d, cols, 0);
+        spinor_scatter_kernel<<<gs, bs, 0, stream>>>(d_Hp_dn, d_Hpsi_batch, Nd_d, cols, 1);
 
         ctx.scratch_pool.restore(sp_cp);
     }
 
     // Off-diagonal Veff: Hpsi_up += V_ud * psi_dn, Hpsi_dn += conj(V_ud) * psi_up
     // (operates directly on spinor layout)
-    gpu::spinor_offdiag_veff_gpu(d_Hpsi, d_psi, V_ud_re, V_ud_im, Nd_d, ncol);
+    gpu::spinor_offdiag_veff_gpu(d_Hpsi, d_psi, V_ud_re, V_ud_im, Nd_d, ncol, stream);
 
     // SOC terms (Term 1 + Term 2)
     if (s->has_soc_ && s->gpu_soc_.total_soc_nproj > 0) {
@@ -1651,7 +1656,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
             static_cast<cuDoubleComplex*>(s->gpu_soc_.d_alpha_soc_dn),
             Nd_d, ncol, s->dV_,
             s->gpu_soc_.n_influence_soc, s->gpu_soc_.total_soc_nproj,
-            s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc);
+            s->gpu_soc_.max_ndc_soc, s->gpu_soc_.max_nproj_soc, stream);
     }
 }
 
@@ -1661,19 +1666,20 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
 void GPUSCFRunner::poisson_op_cb(const double* d_x, double* d_Ax) {
     auto* s = s_instance_;
     auto& ctx = s->ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
 
     gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
-        s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+        s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true, stream);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
     if (s->is_orth_) {
         gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
             s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
-            -1.0, 0.0, 0.0, s->poisson_diag_, 1);
+            -1.0, 0.0, 0.0, s->poisson_diag_, 1, stream);
     } else {
         gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
             s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
             -1.0, 0.0, 0.0, s->poisson_diag_,
-            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1);
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1, stream);
     }
 }
 
@@ -1682,8 +1688,9 @@ void GPUSCFRunner::poisson_op_cb(const double* d_x, double* d_Ax) {
 // ============================================================
 void GPUSCFRunner::poisson_precond_cb(const double* d_r, double* d_f) {
     auto* s = s_instance_;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
-    jacobi_scale_kernel<<<gpu::ceildiv(s->Nd_, bs), bs>>>(
+    jacobi_scale_kernel<<<gpu::ceildiv(s->Nd_, bs), bs, 0, stream>>>(
         d_r, d_f, s->jacobi_m_inv_, s->Nd_);
 }
 
@@ -1693,20 +1700,21 @@ void GPUSCFRunner::poisson_precond_cb(const double* d_r, double* d_f) {
 void GPUSCFRunner::kerker_op_cb(const double* d_x, double* d_Ax) {
     auto* s = s_instance_;
     auto& ctx = s->ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
 
     gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
-        s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
+        s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true, stream);
     int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
     constexpr double kTF2 = 1.0;
     if (s->is_orth_) {
         gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
             s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
-            -1.0, 0.0, kTF2, s->kerker_diag_, 1);
+            -1.0, 0.0, kTF2, s->kerker_diag_, 1, stream);
     } else {
         gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
             s->nx_, s->ny_, s->nz_, s->FDn_, nx_ex, ny_ex,
             -1.0, 0.0, kTF2, s->kerker_diag_,
-            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1);
+            s->has_mixed_deriv_, s->has_mixed_deriv_, s->has_mixed_deriv_, 1, stream);
     }
 }
 
@@ -1715,8 +1723,9 @@ void GPUSCFRunner::kerker_op_cb(const double* d_x, double* d_Ax) {
 // ============================================================
 void GPUSCFRunner::kerker_precond_cb(const double* d_r, double* d_f) {
     auto* s = s_instance_;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
-    jacobi_scale_kernel<<<gpu::ceildiv(s->Nd_, bs), bs>>>(
+    jacobi_scale_kernel<<<gpu::ceildiv(s->Nd_, bs), bs, 0, stream>>>(
         d_r, d_f, s->kerker_m_inv_, s->Nd_);
 }
 
@@ -1736,6 +1745,7 @@ double GPUSCFRunner::gpu_sum(const double* d_x, int N) {
 // ============================================================
 void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, int Nd) {
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
     int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
@@ -1753,29 +1763,29 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         double* d_rho_xc;
         if (has_nlcc_ && d_rho_core_) {
             d_rho_xc = ctx.buf.b;  // reuse Poisson RHS buffer
-            nlcc_add_kernel<<<grid_sz, bs>>>(d_rho, d_rho_core_, d_rho_xc, Nd);
+            nlcc_add_kernel<<<grid_sz, bs, 0, stream>>>(d_rho, d_rho_core_, d_rho_xc, Nd);
         } else {
             d_rho_xc = d_rho;
         }
 
         // Gradient of rho_xc
-        gpu::halo_exchange_gpu(d_rho_xc, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true);
-        gpu::gradient_gpu(d_x_ex, d_Drho_x, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
-        gpu::gradient_gpu(d_x_ex, d_Drho_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
-        gpu::gradient_gpu(d_x_ex, d_Drho_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+        gpu::halo_exchange_gpu(d_rho_xc, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_Drho_x, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1, stream);
+        gpu::gradient_gpu(d_x_ex, d_Drho_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1, stream);
+        gpu::gradient_gpu(d_x_ex, d_Drho_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1, stream);
 
         // sigma = |nabla rho|^2 (with metric tensor for non-orth cells)
         if (is_orth_) {
-            sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
+            sigma_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
         } else {
-            sigma_nonorth_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd,
+            sigma_nonorth_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd,
                 lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
         }
 
         if (is_mgga_ && tau_valid_) {
             if (xc_type_ == XCType::MGGA_SCAN) {
                 // Hand-coded SCAN kernel (fastest path)
-                gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd);
+                gpu::mgga_scan_gpu(d_rho_xc, d_sigma, d_tau_, d_exc, d_Vxc, d_v2xc, d_vtau_, Nd, stream);
             } else {
                 // rSCAN/r2SCAN via libxc CPU fallback
                 int xc_x_id, xc_c_id;
@@ -1785,18 +1795,18 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         } else {
             // Fused PBE kernel: (rho_xc, sigma) -> (exc, Vxc, v2xc)
             // Also used for first mGGA iteration before tau is computed (matching CPU PBE-first logic)
-            gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+            gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd, stream);
         }
 
         // Divergence correction: Vxc += -div(v2xc * lapcT * nabla rho)
         // For orth: flux_dir = v2xc * Drho_dir (identity metric)
         // For non-orth: flux = v2xc * (lapcT * [dx,dy,dz]) (matrix-vector product)
         if (is_orth_) {
-            v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_x, d_v2xc, Nd);
-            v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_y, d_v2xc, Nd);
-            v2xc_scale_kernel<<<grid_sz, bs>>>(d_Drho_z, d_v2xc, Nd);
+            v2xc_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_x, d_v2xc, Nd);
+            v2xc_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_y, d_v2xc, Nd);
+            v2xc_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_z, d_v2xc, Nd);
         } else {
-            lapcT_flux_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd,
+            lapcT_flux_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd,
                 lapcT_[0], lapcT_[1], lapcT_[2],
                 lapcT_[3], lapcT_[4], lapcT_[5],
                 lapcT_[6], lapcT_[7], lapcT_[8]);
@@ -1806,30 +1816,30 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
         double* d_DDrho = d_sigma;  // reuse sigma buffer
 
         // x-direction
-        gpu::halo_exchange_gpu(d_Drho_x, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true);
-        gpu::gradient_gpu(d_x_ex, d_DDrho, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
-        divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
+        gpu::halo_exchange_gpu(d_Drho_x, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_DDrho, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1, stream);
+        divergence_sub_kernel<<<grid_sz, bs, 0, stream>>>(d_Vxc, d_DDrho, Nd);
 
         // y-direction
-        gpu::halo_exchange_gpu(d_Drho_y, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true);
-        gpu::gradient_gpu(d_x_ex, d_DDrho, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
-        divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
+        gpu::halo_exchange_gpu(d_Drho_y, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_DDrho, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1, stream);
+        divergence_sub_kernel<<<grid_sz, bs, 0, stream>>>(d_Vxc, d_DDrho, Nd);
 
         // z-direction
-        gpu::halo_exchange_gpu(d_Drho_z, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true);
-        gpu::gradient_gpu(d_x_ex, d_DDrho, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
-        divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
+        gpu::halo_exchange_gpu(d_Drho_z, d_x_ex, nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_DDrho, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1, stream);
+        divergence_sub_kernel<<<grid_sz, bs, 0, stream>>>(d_Vxc, d_DDrho, Nd);
     } else {
         // LDA path
         double* d_rho_xc;
         if (has_nlcc_ && d_rho_core_) {
             d_rho_xc = ctx.buf.b;
-            nlcc_add_kernel<<<grid_sz, bs>>>(d_rho, d_rho_core_, d_rho_xc, Nd);
+            nlcc_add_kernel<<<grid_sz, bs, 0, stream>>>(d_rho, d_rho_core_, d_rho_xc, Nd);
         } else {
             d_rho_xc = d_rho;
         }
         // Use LDA_PW by default (xc_type_ distinguished in run())
-        gpu::lda_pw_gpu(d_rho_xc, d_exc, d_Vxc, Nd);
+        gpu::lda_pw_gpu(d_rho_xc, d_exc, d_Vxc, Nd, stream);
     }
 }
 
@@ -1840,6 +1850,7 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
 // ============================================================
 void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_Vxc, int Nd) {
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
     int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
@@ -1863,29 +1874,29 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
 
         // Build rho_xc = [total|up|dn] with NLCC
         if (has_nlcc_ && d_rho_core_) {
-            nlcc_add_spin_kernel<<<grid_sz, bs>>>(d_rho_up, d_rho_dn, d_rho_core_, d_rho_xc, Nd);
+            nlcc_add_spin_kernel<<<grid_sz, bs, 0, stream>>>(d_rho_up, d_rho_dn, d_rho_core_, d_rho_xc, Nd);
         } else {
-            rho_xc_spin_kernel<<<grid_sz, bs>>>(d_rho_up, d_rho_dn, d_rho_xc, Nd);
+            rho_xc_spin_kernel<<<grid_sz, bs, 0, stream>>>(d_rho_up, d_rho_dn, d_rho_xc, Nd);
         }
 
         // Gradient of all 3 density columns
         for (int col = 0; col < 3; col++) {
             gpu::halo_exchange_gpu(d_rho_xc + col * Nd, d_x_ex_tmp,
-                                   nx_, ny_, nz_, FDn_, 1, true, true, true);
+                                   nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
             gpu::gradient_gpu(d_x_ex_tmp, d_Drho_x + col * Nd,
-                              nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
+                              nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1, stream);
             gpu::gradient_gpu(d_x_ex_tmp, d_Drho_y + col * Nd,
-                              nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
+                              nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1, stream);
             gpu::gradient_gpu(d_x_ex_tmp, d_Drho_z + col * Nd,
-                              nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+                              nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1, stream);
         }
 
         // sigma for 3 columns (with metric tensor for non-orth)
         int grid3 = gpu::ceildiv(3 * Nd, bs);
         if (is_orth_) {
-            sigma_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
+            sigma_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3);
         } else {
-            sigma_3col_nonorth_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3,
+            sigma_3col_nonorth_kernel<<<grid3, bs, 0, stream>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd, 3,
                 lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
         }
 
@@ -1898,7 +1909,7 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
                     d_tau_, d_tau_ + Nd,                         // tau_up, tau_dn
                     d_exc, d_Vxc, d_Vxc + Nd,                   // exc, vxc_up, vxc_dn
                     d_v2xc, d_v2xc + Nd, d_v2xc + 2 * Nd,      // v2xc_c, v2xc_x_up, v2xc_x_dn
-                    d_vtau_, d_vtau_ + Nd, Nd);                  // vtau_up, vtau_dn
+                    d_vtau_, d_vtau_ + Nd, Nd, stream);                  // vtau_up, vtau_dn
             } else {
                 // rSCAN/r2SCAN via libxc CPU fallback
                 int xc_x_id, xc_c_id;
@@ -1914,18 +1925,18 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
 
         } else {
             // Fused spin PBE kernel: (rho_xc[3*Nd], sigma[3*Nd]) -> (exc, Vxc[2*Nd], v2xc[3*Nd])
-            gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+            gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd, stream);
         }
 
         // Divergence correction for 3 columns
         // For orth: flux_dir[col] = v2xc[col] * Drho_dir[col]
         // For non-orth: flux = v2xc * (lapcT * [dx,dy,dz]) per column
         if (is_orth_) {
-            v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_v2xc, Nd, 3);
-            v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_y, d_v2xc, Nd, 3);
-            v2xc_scale_3col_kernel<<<grid3, bs>>>(d_Drho_z, d_v2xc, Nd, 3);
+            v2xc_scale_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_x, d_v2xc, Nd, 3);
+            v2xc_scale_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_y, d_v2xc, Nd, 3);
+            v2xc_scale_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_z, d_v2xc, Nd, 3);
         } else {
-            lapcT_flux_3col_kernel<<<grid3, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd, 3,
+            lapcT_flux_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd, 3,
                 lapcT_[0], lapcT_[1], lapcT_[2],
                 lapcT_[3], lapcT_[4], lapcT_[5],
                 lapcT_[6], lapcT_[7], lapcT_[8]);
@@ -1940,8 +1951,8 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         for (int col = 0; col < 3; col++) {
             double* d_DDcol = sp.alloc<double>(Nd);
             gpu::halo_exchange_gpu(d_Drho_x + col * Nd, d_x_ex_tmp,
-                                   nx_, ny_, nz_, FDn_, 1, true, true, true);
-            gpu::gradient_gpu(d_x_ex_tmp, d_DDcol, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
+                                   nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+            gpu::gradient_gpu(d_x_ex_tmp, d_DDcol, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1, stream);
             // Accumulate into DDrho
             double one = 1.0;
             cublasDaxpy(ctx.cublas, Nd, &one, d_DDcol, 1, d_DDrho + col * Nd, 1);
@@ -1952,8 +1963,8 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         for (int col = 0; col < 3; col++) {
             double* d_DDcol = sp.alloc<double>(Nd);
             gpu::halo_exchange_gpu(d_Drho_y + col * Nd, d_x_ex_tmp,
-                                   nx_, ny_, nz_, FDn_, 1, true, true, true);
-            gpu::gradient_gpu(d_x_ex_tmp, d_DDcol, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
+                                   nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+            gpu::gradient_gpu(d_x_ex_tmp, d_DDcol, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1, stream);
             double one = 1.0;
             cublasDaxpy(ctx.cublas, Nd, &one, d_DDcol, 1, d_DDrho + col * Nd, 1);
             sp.restore(sp.checkpoint() - Nd * sizeof(double));
@@ -1963,15 +1974,15 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
         for (int col = 0; col < 3; col++) {
             double* d_DDcol = sp.alloc<double>(Nd);
             gpu::halo_exchange_gpu(d_Drho_z + col * Nd, d_x_ex_tmp,
-                                   nx_, ny_, nz_, FDn_, 1, true, true, true);
-            gpu::gradient_gpu(d_x_ex_tmp, d_DDcol, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+                                   nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+            gpu::gradient_gpu(d_x_ex_tmp, d_DDcol, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1, stream);
             double one = 1.0;
             cublasDaxpy(ctx.cublas, Nd, &one, d_DDcol, 1, d_DDrho + col * Nd, 1);
             sp.restore(sp.checkpoint() - Nd * sizeof(double));
         }
 
         // Apply spin divergence correction
-        spin_divergence_add_kernel<<<grid_sz, bs>>>(d_Vxc, d_Vxc + Nd, d_DDrho, Nd);
+        spin_divergence_add_kernel<<<grid_sz, bs, 0, stream>>>(d_Vxc, d_Vxc + Nd, d_DDrho, Nd);
 
         sp.restore(sp_cp);
     } else {
@@ -1985,13 +1996,13 @@ void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_
             // rho_xc_up = max(rho_up + 0.5*rho_core, 1e-14)
             // Use nlcc_add_spin_kernel to build [total|up|dn], then just pass up/dn
             double* d_rho_xc_3 = sp.alloc<double>(3 * Nd);
-            nlcc_add_spin_kernel<<<grid_sz, bs>>>(d_rho_up, d_rho_dn, d_rho_core_, d_rho_xc_3, Nd);
+            nlcc_add_spin_kernel<<<grid_sz, bs, 0, stream>>>(d_rho_up, d_rho_dn, d_rho_core_, d_rho_xc_3, Nd);
             d_rho_xc_up = d_rho_xc_3 + Nd;
             d_rho_xc_dn = d_rho_xc_3 + 2 * Nd;
-            gpu::lda_pw_spin_gpu(d_rho_xc_up, d_rho_xc_dn, d_exc, d_Vxc, d_Vxc + Nd, Nd);
+            gpu::lda_pw_spin_gpu(d_rho_xc_up, d_rho_xc_dn, d_exc, d_Vxc, d_Vxc + Nd, Nd, stream);
             sp.restore(sp_cp);
         } else {
-            gpu::lda_pw_spin_gpu(d_rho_up, d_rho_dn, d_exc, d_Vxc, d_Vxc + Nd, Nd);
+            gpu::lda_pw_spin_gpu(d_rho_up, d_rho_dn, d_exc, d_Vxc, d_Vxc + Nd, Nd, stream);
         }
     }
 }
@@ -2037,17 +2048,18 @@ void GPUSCFRunner::setup_bloch_factors(
 int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
                                      double* d_rhs, int Nd, double tol) {
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
 
     // RHS = 4*pi*(rho + pseudocharge)
-    poisson_rhs_kernel<<<grid_sz, bs>>>(d_rho, d_pseudocharge_, d_rhs,
+    poisson_rhs_kernel<<<grid_sz, bs, 0, stream>>>(d_rho, d_pseudocharge_, d_rhs,
                                          4.0 * constants::PI, Nd);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     // Mean-subtract RHS
     double rhs_mean = gpu_sum(d_rhs, Nd) / Nd;
-    mean_subtract_kernel<<<grid_sz, bs>>>(d_rhs, rhs_mean, Nd);
+    mean_subtract_kernel<<<grid_sz, bs, 0, stream>>>(d_rhs, rhs_mean, Nd);
 
     // Allocate x_old and f_old from scratch pool
     auto& sp = ctx.scratch_pool;
@@ -2061,14 +2073,14 @@ int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
         0.6, 0.6, 7, 6, tol, 3000,
         ctx.buf.aar_r, ctx.buf.aar_f, ctx.buf.aar_Ax,
         ctx.buf.aar_X, ctx.buf.aar_F,
-        d_xold, d_fold);
+        d_xold, d_fold, stream);
 
     sp.restore(sp_cp);
 
     // Mean-subtract phi
     CUDA_CHECK(cudaDeviceSynchronize());
     double phi_mean = gpu_sum(d_phi, Nd) / Nd;
-    mean_subtract_kernel<<<grid_sz, bs>>>(d_phi, phi_mean, Nd);
+    mean_subtract_kernel<<<grid_sz, bs, 0, stream>>>(d_phi, phi_mean, Nd);
 
     return iters;
 }
@@ -2079,6 +2091,7 @@ int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
 void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
                                   int Nd, int m_depth, double beta_mix,
                                   int Nd_kerker, double beta_mag) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     // Nd_kerker: grid size for one Kerker solve (typically Nd_ for the 3D grid).
     //   If 0, apply Kerker to full Nd (non-spin, single column).
     //   If Nd_kerker < Nd and beta_mag >= 0: Kerker on first Nd_kerker, simple mix on rest.
@@ -2100,12 +2113,12 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
     }
 
     // f_k = g - x
-    mix_residual_kernel<<<grid_sz, bs>>>(d_g, d_x, d_fk, Nd);
+    mix_residual_kernel<<<grid_sz, bs, 0, stream>>>(d_g, d_x, d_fk, Nd);
 
     // Store history
     if (mix_iter_ > 0) {
         int i_hist = (mix_iter_ - 1) % m_depth;
-        mix_store_history_kernel<<<grid_sz, bs>>>(
+        mix_store_history_kernel<<<grid_sz, bs, 0, stream>>>(
             d_x, d_xkm1, d_fk, d_mix_fkm1_, d_R, d_F, i_hist, Nd);
     }
 
@@ -2193,16 +2206,16 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
             constexpr double idiemac_kTF2 = 0.1;
             int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
             gpu::halo_exchange_gpu(d_f_col, ctx.buf.aar_x_ex,
-                nx_, ny_, nz_, FDn_, 1, true, true, true);
+                nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
             if (is_orth_) {
                 gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
                     nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
-                    1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1);
+                    1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_, 1, stream);
             } else {
                 gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Lf,
                     nx_, ny_, nz_, FDn_, nx_ex, ny_ex,
                     1.0, 0.0, -idiemac_kTF2, kerker_rhs_diag_,
-                    has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_, 1);
+                    has_mixed_deriv_, has_mixed_deriv_, has_mixed_deriv_, 1, stream);
             }
         }
 
@@ -2220,7 +2233,7 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
                 kerker_op_cb, kerker_precond_cb,
                 d_Lf, d_Pf_col, Nd_kerker,
                 0.6, 0.6, 7, 6, precond_tol_, 1000,
-                d_kr, d_kf, d_kAx, d_kX, d_kF, d_kxold, d_kfold);
+                d_kr, d_kf, d_kAx, d_kX, d_kF, d_kxold, d_kfold, stream);
         }
 
         // Kerker step 3: Pf_col *= -beta_mix
@@ -2367,6 +2380,7 @@ double GPUSCFRunner::run(
     // GPU memory allocation + data upload
     // ============================================================
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int mix_ncol = has_soc_ ? 4 : ((Nspin >= 2) ? 2 : 1);  // SOC: [rho|mx|my|mz]
     int Nspin_buf = has_soc_ ? 2 : Nspin;  // SOC uses spin-polarized XC internally
     ctx.init_scf_buffers(Nd_, nx_, ny_, nz_, FDn_,
@@ -2673,7 +2687,7 @@ double GPUSCFRunner::run(
             {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
-                scale_kernel<<<gs, bs>>>(d_rho_soc, 1.0, Nd_);  // noop, just ensure sync
+                scale_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, 1.0, Nd_);  // noop, just ensure sync
                 // d_rho holds [up|dn] for XC
                 std::vector<double> h_rho_half(Nd_);
                 for (int i = 0; i < Nd_; i++) h_rho_half[i] = 0.5 * rho_init[i];
@@ -3269,7 +3283,7 @@ double GPUSCFRunner::run(
                 // SOC density uses occfac=1 (no spin degeneracy since both spins in spinor)
                 gpu::spinor_density_gpu(d_psi_spinor, d_occ,
                                          d_rho_new_soc, d_mag_x_new, d_mag_y_new, d_mag_z_new,
-                                         Nd_, Nband, 1.0 * wk);
+                                         Nd_, Nband, 1.0 * wk, stream);
             }
             // Copy total density for SCF error
             CUDA_CHECK(cudaMemcpy(d_rho_new_total, d_rho_new_soc, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
@@ -3294,17 +3308,17 @@ double GPUSCFRunner::run(
                         CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
                                                Nband * sizeof(double), cudaMemcpyHostToDevice));
                         gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
-                                                   d_rho_spin_target, Nd_, Nband, occfac * wk);
+                                                   d_rho_spin_target, Nd_, Nband, occfac * wk, stream);
                     }
                 } else {
                     gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                              d_rho_spin_target, Nd_, Nband, occfac);
+                                              d_rho_spin_target, Nd_, Nband, occfac, stream);
                 }
             }
 
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
-            add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_rho_new_total, Nd_);
+            add_kernel<<<gs, bs, 0, stream>>>(d_rho_new_up, d_rho_new_dn, d_rho_new_total, Nd_);
         } else {
             for (int s = 0; s < Nspin_local_; s++) {
                 int s_glob = spin_start_ + s;
@@ -3319,11 +3333,11 @@ double GPUSCFRunner::run(
                         CUDA_CHECK(cudaMemcpy(d_occ_arr[s_glob], h_occ.data(),
                                                Nband * sizeof(double), cudaMemcpyHostToDevice));
                         gpu::compute_density_z_gpu(d_psi_sk, d_occ_arr[s_glob],
-                                                   d_rho_new_total, Nd_, Nband, occfac * wk);
+                                                   d_rho_new_total, Nd_, Nband, occfac * wk, stream);
                     }
                 } else {
                     gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                              d_rho_new_total, Nd_, Nband, occfac);
+                                              d_rho_new_total, Nd_, Nband, occfac, stream);
                 }
             }
         }
@@ -3375,15 +3389,15 @@ double GPUSCFRunner::run(
                             cuDoubleComplex* d_xex_z = static_cast<cuDoubleComplex*>(ctx.buf.x_ex_z);
                             gpu::halo_exchange_z_gpu(d_psi_n, d_xex_z,
                                 nx_, ny_, nz_, FDn_, 1, true, true, true,
-                                kxLx, kyLy, kzLz);
-                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_x_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
-                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_y_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
-                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_z_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+                                kxLx, kyLy, kzLz, stream);
+                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_x_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1, stream);
+                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_y_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1, stream);
+                            gpu::gradient_z_gpu(d_xex_z, d_dpsi_z_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1, stream);
                             if (is_orth_) {
-                                tau_accumulate_z_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
+                                tau_accumulate_z_kernel<<<gs_tau, bs_tau, 0, stream>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
                                                                             d_tau_s, weight, Nd_);
                             } else {
-                                tau_accumulate_z_nonorth_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
+                                tau_accumulate_z_nonorth_kernel<<<gs_tau, bs_tau, 0, stream>>>(d_dpsi_x_z, d_dpsi_y_z, d_dpsi_z_z,
                                     d_tau_s, weight, Nd_,
                                     lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
                             }
@@ -3412,15 +3426,15 @@ double GPUSCFRunner::run(
 
                         const double* d_psi_n = d_psi_arr[s_glob] + (size_t)n * Nd_;
                         gpu::halo_exchange_gpu(d_psi_n, ctx.buf.aar_x_ex,
-                            nx_, ny_, nz_, FDn_, 1, true, true, true);
-                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_x, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1);
-                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1);
-                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1);
+                            nx_, ny_, nz_, FDn_, 1, true, true, true, stream);
+                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_x, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 0, 1, stream);
+                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_y, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 1, 1, stream);
+                        gpu::gradient_gpu(ctx.buf.aar_x_ex, d_dpsi_z, nx_, ny_, nz_, FDn_, nx_ex, ny_ex, 2, 1, stream);
                         if (is_orth_) {
-                            tau_accumulate_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
+                            tau_accumulate_kernel<<<gs_tau, bs_tau, 0, stream>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
                                                                        d_tau_s, weight, Nd_);
                         } else {
-                            tau_accumulate_nonorth_kernel<<<gs_tau, bs_tau>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
+                            tau_accumulate_nonorth_kernel<<<gs_tau, bs_tau, 0, stream>>>(d_dpsi_x, d_dpsi_y, d_dpsi_z,
                                 d_tau_s, weight, Nd_,
                                 lapcT_[0], lapcT_[4], lapcT_[8], lapcT_[1], lapcT_[2], lapcT_[5]);
                         }
@@ -3455,7 +3469,7 @@ double GPUSCFRunner::run(
             {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
-                add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
+                add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
             }
             gpu_poisson_solve(d_rho_new, d_phi, ctx.buf.b, Nd_, poisson_tol);
 
@@ -3464,7 +3478,7 @@ double GPUSCFRunner::run(
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
                 for (int s = 0; s < Nspin; s++) {
-                    veff_combine_spin_kernel<<<gs, bs>>>(
+                    veff_combine_spin_kernel<<<gs, bs, 0, stream>>>(
                         d_Vxc + s * Nd_, d_phi, d_Veff_new_tmp + s * Nd_, Nd_);
                 }
             }
@@ -3488,7 +3502,7 @@ double GPUSCFRunner::run(
                 double* d_rho_in_total = sp_e.alloc<double>(Nd_);
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
-                add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_in_total, Nd_);
+                add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_in_total, Nd_);
                 CUDA_CHECK(cudaDeviceSynchronize());
                 CUDA_CHECK(cudaMemcpy(h_rho_in.data(), d_rho_in_total, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
                 sp_e.restore(sp_e_cp);
@@ -3707,29 +3721,29 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaMemcpy(d_mag_y, d_dens_in + 2*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpy(d_mag_z, d_dens_in + 3*Nd_, Nd_ * sizeof(double), cudaMemcpyDeviceToDevice));
 
-            clamp_min_kernel<<<gs, bs>>>(d_rho_soc, 0.0, Nd_);
+            clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, 0.0, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
             double rho_sum = gpu_sum(d_rho_soc, Nd_);
             double Ne_current = rho_sum * dV_;
             if (Ne_current > 1e-10) {
                 double sc = (double)Nelectron / Ne_current;
-                scale_kernel<<<gs, bs>>>(d_rho_soc, sc, Nd_);
-                scale_kernel<<<gs, bs>>>(d_mag_x, sc, Nd_);
-                scale_kernel<<<gs, bs>>>(d_mag_y, sc, Nd_);
-                scale_kernel<<<gs, bs>>>(d_mag_z, sc, Nd_);
+                scale_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, sc, Nd_);
+                scale_kernel<<<gs, bs, 0, stream>>>(d_mag_x, sc, Nd_);
+                scale_kernel<<<gs, bs, 0, stream>>>(d_mag_y, sc, Nd_);
+                scale_kernel<<<gs, bs, 0, stream>>>(d_mag_z, sc, Nd_);
             }
         } else if (Nspin == 1) {
             gpu_pulay_mix(d_rho, d_rho_new_total, Nd_, mixing_history, mixing_param);
             {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
-                clamp_min_kernel<<<gs, bs>>>(d_rho, 0.0, Nd_);
+                clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho, 0.0, Nd_);
                 CUDA_CHECK(cudaDeviceSynchronize());
                 double rho_sum = gpu_sum(d_rho, Nd_);
                 double Ne_current = rho_sum * dV_;
                 if (Ne_current > 1e-10) {
                     double sc = (double)Nelectron / Ne_current;
-                    scale_kernel<<<gs, bs>>>(d_rho, sc, Nd_);
+                    scale_kernel<<<gs, bs, 0, stream>>>(d_rho, sc, Nd_);
                 }
             }
         } else {
@@ -3743,10 +3757,10 @@ double GPUSCFRunner::run(
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
 
-            add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_total_in, Nd_);
-            sub_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_mag_in, Nd_);
-            add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_total_out, Nd_);
-            sub_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_mag_out, Nd_);
+            add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_total_in, Nd_);
+            sub_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_mag_in, Nd_);
+            add_kernel<<<gs, bs, 0, stream>>>(d_rho_new_up, d_rho_new_dn, d_total_out, Nd_);
+            sub_kernel<<<gs, bs, 0, stream>>>(d_rho_new_up, d_rho_new_dn, d_mag_out, Nd_);
 
             gpu_pulay_mix(d_total_in, d_total_out, Nd_, mixing_history, mixing_param);
 
@@ -3757,10 +3771,10 @@ double GPUSCFRunner::run(
                 cublasDaxpy(ctx.cublas, Nd_, &beta_mag, d_mag_out, 1, d_mag_in, 1);
             }
 
-            unpack_spin_kernel<<<gs, bs>>>(d_total_in, d_mag_in, d_rho, d_rho + Nd_, Nd_);
+            unpack_spin_kernel<<<gs, bs, 0, stream>>>(d_total_in, d_mag_in, d_rho, d_rho + Nd_, Nd_);
 
-            clamp_min_kernel<<<gs, bs>>>(d_rho, 0.0, Nd_);
-            clamp_min_kernel<<<gs, bs>>>(d_rho + Nd_, 0.0, Nd_);
+            clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho, 0.0, Nd_);
+            clamp_min_kernel<<<gs, bs, 0, stream>>>(d_rho + Nd_, 0.0, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
 
             double rho_up_sum = gpu_sum(d_rho, Nd_);
@@ -3768,8 +3782,8 @@ double GPUSCFRunner::run(
             double Ne_current = (rho_up_sum + rho_dn_sum) * dV_;
             if (Ne_current > 1e-10) {
                 double sc = (double)Nelectron / Ne_current;
-                scale_kernel<<<gs, bs>>>(d_rho, sc, Nd_);
-                scale_kernel<<<gs, bs>>>(d_rho + Nd_, sc, Nd_);
+                scale_kernel<<<gs, bs, 0, stream>>>(d_rho, sc, Nd_);
+                scale_kernel<<<gs, bs, 0, stream>>>(d_rho + Nd_, sc, Nd_);
             }
         }
 
@@ -3783,17 +3797,17 @@ double GPUSCFRunner::run(
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
 
-            mag_to_collinear_kernel<<<gs, bs>>>(d_rho_soc, d_mag_x, d_mag_y, d_mag_z,
+            mag_to_collinear_kernel<<<gs, bs, 0, stream>>>(d_rho_soc, d_mag_x, d_mag_y, d_mag_z,
                                                   d_rho, d_rho + Nd_, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
 
             gpu_xc_evaluate_spin(d_rho, d_exc, d_Vxc, Nd_);
             gpu_poisson_solve(d_rho_soc, d_phi, ctx.buf.b, Nd_, poisson_tol);
 
-            veff_combine_spin_kernel<<<gs, bs>>>(d_Vxc, d_phi, d_Veff, Nd_);
-            veff_combine_spin_kernel<<<gs, bs>>>(d_Vxc + Nd_, d_phi, d_Veff + Nd_, Nd_);
+            veff_combine_spin_kernel<<<gs, bs, 0, stream>>>(d_Vxc, d_phi, d_Veff, Nd_);
+            veff_combine_spin_kernel<<<gs, bs, 0, stream>>>(d_Vxc + Nd_, d_phi, d_Veff + Nd_, Nd_);
 
-            veff_spinor_from_xc_kernel<<<gs, bs>>>(d_Vxc, d_Vxc + Nd_, d_phi,
+            veff_spinor_from_xc_kernel<<<gs, bs, 0, stream>>>(d_Vxc, d_Vxc + Nd_, d_phi,
                                                      d_mag_x, d_mag_y, d_mag_z,
                                                      d_Veff_spinor, Nd_);
         } else {
@@ -3806,7 +3820,7 @@ double GPUSCFRunner::run(
             if (Nspin >= 2) {
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
-                add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
+                add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
                 gpu_poisson_solve(d_rho_new, d_phi, ctx.buf.b, Nd_, poisson_tol);
             } else {
                 gpu_poisson_solve(d_rho, d_phi, ctx.buf.b, Nd_, poisson_tol);
@@ -3816,7 +3830,7 @@ double GPUSCFRunner::run(
                 int bs = 256;
                 int gs = gpu::ceildiv(Nd_, bs);
                 for (int s = 0; s < Nspin; s++) {
-                    veff_combine_spin_kernel<<<gs, bs>>>(
+                    veff_combine_spin_kernel<<<gs, bs, 0, stream>>>(
                         d_Vxc + s * Nd_, d_phi, d_Veff + s * Nd_, Nd_);
                 }
             }
@@ -3972,7 +3986,7 @@ double GPUSCFRunner::run(
                                        gpu_poisson_,
                                        d_psi_arr[s_glob], Nd_, Nband, exx_Nocc_,
                                        h_occ.data(), dV_,
-                                       d_Xi_);
+                                       d_Xi_, stream);
                     CUDA_CHECK(cudaDeviceSynchronize());
 
                     exx_spin_ = s_glob;
@@ -4129,14 +4143,14 @@ double GPUSCFRunner::run(
                             int s_glob = spin_start + s;
                             double* d_rho_s = (s_glob == 0) ? d_rho_new_up : d_rho_new_dn;
                             gpu::compute_density_gpu(d_psi_arr[s_glob], d_occ_arr[s_glob],
-                                                     d_rho_s, Nd_, Nband, occfac);
+                                                     d_rho_s, Nd_, Nband, occfac, stream);
                         }
                         // Total density for XC/Poisson
-                        add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_rho_new, Nd_);
+                        add_kernel<<<gs, bs, 0, stream>>>(d_rho_new_up, d_rho_new_dn, d_rho_new, Nd_);
                     } else {
                         CUDA_CHECK(cudaMemset(d_rho_new, 0, Nd_ * sizeof(double)));
                         gpu::compute_density_gpu(d_psi_arr[0], d_occ_arr[0],
-                                                 d_rho_new, Nd_, Nband, occfac);
+                                                 d_rho_new, Nd_, Nband, occfac, stream);
                     }
                 }
 
@@ -4281,7 +4295,7 @@ double GPUSCFRunner::run(
                     if (Nspin == 2) {
                         int bs = 256;
                         int gs = gpu::ceildiv(Nd_, bs);
-                        add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
+                        add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
                         d_rho_total = d_rho_new;
                     }
                     gpu_poisson_solve(d_rho_total, d_phi, ctx.buf.b, Nd_, poisson_tol);
@@ -4581,7 +4595,7 @@ double GPUSCFRunner::run(
                                 d_psi_q_src, all_occ[q_loc].data(),
                                 kpt_glob, q_hf,
                                 kptWts_hf, dV_,
-                                d_Xi_k);
+                                d_Xi_k, stream);
                         }
 
                         cudaFree(d_psi_q_conj);
@@ -4590,7 +4604,7 @@ double GPUSCFRunner::run(
                         gpu::build_ACE_kpt_finalize_gpu(
                             ctx.cublas, ctx.cusolver,
                             d_psi_all_k[kpt_loc], Nd_, Nband, exx_Nocc_,
-                            dV_, d_Xi_k);
+                            dV_, d_Xi_k, stream);
 
                         CUDA_CHECK(cudaDeviceSynchronize());
                     }
@@ -4787,13 +4801,13 @@ double GPUSCFRunner::run(
                             gpu::compute_density_z_gpu(
                                 d_psi_z, d_occ_arr[s_glob],
                                 d_rho_s,
-                                Nd_, Nband, wk_dens);
+                                Nd_, Nband, wk_dens, stream);
                         }
                     }
                     // Total density for mixing
                     int bs = 256;
                     int gs = gpu::ceildiv(Nd_, bs);
-                    add_kernel<<<gs, bs>>>(d_rho_new_up, d_rho_new_dn, d_rho_new_kpt, Nd_);
+                    add_kernel<<<gs, bs, 0, stream>>>(d_rho_new_up, d_rho_new_dn, d_rho_new_kpt, Nd_);
                 } else {
                     CUDA_CHECK(cudaMemset(d_rho_new_kpt, 0, Nd_ * sizeof(double)));
                     for (int k = 0; k < Nkpts; k++) {
@@ -4820,7 +4834,7 @@ double GPUSCFRunner::run(
                         gpu::compute_density_z_gpu(
                             d_psi_z, d_occ_arr[0],
                             d_rho_new_kpt,
-                            Nd_, Nband, wk_dens);
+                            Nd_, Nband, wk_dens, stream);
                     }
                 }
 
@@ -4929,7 +4943,7 @@ double GPUSCFRunner::run(
                     if (Nspin == 2) {
                         int bs = 256;
                         int gs = gpu::ceildiv(Nd_, bs);
-                        add_kernel<<<gs, bs>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
+                        add_kernel<<<gs, bs, 0, stream>>>(d_rho, d_rho + Nd_, d_rho_new, Nd_);
                         d_rho_total_m = d_rho_new;
                     }
                     // gpu_poisson_solve internally computes RHS = 4pi*(rho + b)
@@ -5058,6 +5072,7 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
                                      double* rho, Wavefunction& wfn)
 {
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int Nband = wfn.Nband();
     int vxc_size = Nd_ * Nspin_;
     int veff_size = Nd_ * Nspin_;
@@ -5081,7 +5096,7 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
             int bs = 256;
             int gs = gpu::ceildiv(Nd_, bs);
             double* d_temp = ctx.buf.rho_total;
-            add_kernel<<<gs, bs>>>(ctx.buf.rho, ctx.buf.rho + Nd_, d_temp, Nd_);
+            add_kernel<<<gs, bs, 0, stream>>>(ctx.buf.rho, ctx.buf.rho + Nd_, d_temp, Nd_);
             CUDA_CHECK(cudaDeviceSynchronize());
             CUDA_CHECK(cudaMemcpy(rho, d_temp, Nd_ * sizeof(double), cudaMemcpyDeviceToHost));
         } else {
@@ -5141,6 +5156,7 @@ void GPUSCFRunner::compute_force_stress(
     const auto& domain = ctx_->domain();
     const auto& grid = ctx_->grid();
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int Nband = wfn.Nband();
     int n_phys = crystal.n_atom_total();
     int ntypes = crystal.n_types();
@@ -5187,7 +5203,7 @@ void GPUSCFRunner::compute_force_stress(
         dV_, grid.dx(), grid.dy(), grid.dz(),
         domain.vertices().xs, domain.vertices().ys, domain.vertices().zs,
         occfac,
-        f_nloc, stress_k, stress_nl, energy_nl);
+        f_nloc, stress_k, stress_nl, energy_nl, stream);
 
     // Normalize stress by cell volume (matching CPU Stress.cpp)
     const auto& lat = grid.lattice();
@@ -5221,6 +5237,7 @@ void GPUSCFRunner::compute_mgga_stress(
     const auto& grid = ctx_->grid();
     int Nspin = ctx_->Nspin();
     auto& ctx = ctx_->gpu_ctx();
+    cudaStream_t stream = ctx.compute_stream;
     int Nband = wfn.Nband();
     double occfac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
     int Nspin_local = wfn.Nspin();
@@ -5257,7 +5274,7 @@ void GPUSCFRunner::compute_mgga_stress(
                 nx_, ny_, nz_, FDn_, Nd_, Nband,
                 dV_, occfac, tau_dot_len,
                 is_orth, uvec_inv_flat,
-                h_stress_s, &h_dot_s);
+                h_stress_s, &h_dot_s, stream);
         } else {
             // Multi-spin: upload psi for this spin from CPU wavefunction
             // (psi was already downloaded to wfn by download_results)
@@ -5289,7 +5306,7 @@ void GPUSCFRunner::compute_mgga_stress(
                 nx_, ny_, nz_, FDn_, Nd_, Nband,
                 dV_, occfac, dot_len_s,
                 is_orth, uvec_inv_flat,
-                h_stress_s, &h_dot_s);
+                h_stress_s, &h_dot_s, stream);
         }
 
         for (int i = 0; i < 6; i++) stress_mgga[i] += h_stress_s[i];
@@ -5346,7 +5363,7 @@ void GPUSCFRunner::compute_soc_force(
     const auto& kpt_weights = ctx_->kpoints().normalized_weights();
     const KPoints* kpoints = &ctx_->kpoints();
     int kpt_start = ctx_->kpt_start();
-
+    cudaStream_t stream = ctx_->gpu_ctx().compute_stream;
     int n_phys = crystal.n_atom_total();
     int Nband = wfn.Nband();
     int Nkpts = wfn.Nkpts();
@@ -5465,7 +5482,7 @@ void GPUSCFRunner::compute_soc_force(
             nx_, ny_, nz_, FDn_, Nd_d, Nband,
             dV, kxLx, kyLy, kzLz,
             spn_fac, wk,
-            f_soc_k.data());
+            f_soc_k.data(), stream);
 
         // Accumulate across k-points
         for (int i = 0; i < 3 * n_phys; ++i)
@@ -5491,7 +5508,7 @@ void GPUSCFRunner::compute_soc_stress(
     const auto& kpt_weights = ctx_->kpoints().normalized_weights();
     const KPoints* kpoints = &ctx_->kpoints();
     int kpt_start = ctx_->kpt_start();
-
+    cudaStream_t stream = ctx_->gpu_ctx().compute_stream;
     int n_phys = crystal.n_atom_total();
     int Nband = wfn.Nband();
     int Nkpts = wfn.Nkpts();
@@ -5714,7 +5731,7 @@ void GPUSCFRunner::compute_soc_stress(
             h_IP_displ_soc_inf.data(),
             h_bloch_fac.data(),
             spn_fac, wk,
-            stress_soc_k, &energy_soc_k);
+            stress_soc_k, &energy_soc_k, stream);
 
         // Accumulate across k-points
         for (int i = 0; i < 6; ++i)

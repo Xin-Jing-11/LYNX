@@ -156,7 +156,8 @@ int aar_gpu(
     double* d_X_hist,  // (N, m)
     double* d_F_hist,  // (N, m)
     double* d_x_old,   // reuse via caller
-    double* d_f_old)   // reuse via caller
+    double* d_f_old,
+    cudaStream_t stream)   // reuse via caller
 {
     auto& ctx = GPUContext::instance();
     int bs = 256;
@@ -177,14 +178,14 @@ int aar_gpu(
 
     // ||b|| via fused norm kernel (1 launch + 1 D2H instead of cublasDnrm2)
     int norm_bs = 256;
-    norm2_kernel<<<1, norm_bs, norm_bs * sizeof(double)>>>(d_b, d_norm2_buf, N);
+    norm2_kernel<<<1, norm_bs, norm_bs * sizeof(double), stream>>>(d_b, d_norm2_buf, N);
     double b_norm2;
     CUDA_CHECK(cudaMemcpy(&b_norm2, d_norm2_buf, sizeof(double), cudaMemcpyDeviceToHost));
     double abs_tol = tol * std::sqrt(b_norm2);
 
     // Initial residual: r = b - A*x
     op_gpu(d_x, d_Ax);
-    residual_kernel<<<grid, bs>>>(d_b, d_Ax, d_r, N);
+    residual_kernel<<<grid, bs, 0, stream>>>(d_b, d_Ax, d_r, N);
 
     double r_2norm = abs_tol + 1.0;
     int iter_count = 0;
@@ -206,7 +207,7 @@ int aar_gpu(
         // Store history
         if (iter_count > 0) {
             int i_hist = (iter_count - 1) % m;
-            store_history_kernel<<<grid, bs>>>(d_x, d_x_old, d_f, d_f_old,
+            store_history_kernel<<<grid, bs, 0, stream>>>(d_x, d_x_old, d_f, d_f_old,
                                                 d_X_hist, d_F_hist, i_hist, N);
         }
 
@@ -240,7 +241,7 @@ int aar_gpu(
                 CUDA_CHECK(cudaMemcpy(d_pair_j, h_pair_j.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice));
 
                 int gram_bs = std::min(256, N);
-                fused_gram_kernel<<<n_jobs, gram_bs, gram_bs * sizeof(double)>>>(
+                fused_gram_kernel<<<n_jobs, gram_bs, gram_bs * sizeof(double), stream>>>(
                     d_F_hist, d_f, d_gram_out, d_pair_i, d_pair_j, N, cols, n_jobs);
 
                 // Single D2H: download all dot products at once
@@ -294,25 +295,25 @@ int aar_gpu(
             CUDA_CHECK(cudaMemcpy(d_gamma, h_gamma.data(), cols * sizeof(double),
                                    cudaMemcpyHostToDevice));
 
-            anderson_kernel<<<grid, bs>>>(d_x_old, d_f, d_X_hist, d_F_hist,
+            anderson_kernel<<<grid, bs, 0, stream>>>(d_x_old, d_f, d_X_hist, d_F_hist,
                                            d_gamma, d_x, beta, cols, N);
 
             // Recompute residual + check convergence
             op_gpu(d_x, d_Ax);
-            residual_kernel<<<grid, bs>>>(d_b, d_Ax, d_r, N);
+            residual_kernel<<<grid, bs, 0, stream>>>(d_b, d_Ax, d_r, N);
             {
-                norm2_kernel<<<1, norm_bs, norm_bs * sizeof(double)>>>(d_r, d_norm2_buf, N);
+                norm2_kernel<<<1, norm_bs, norm_bs * sizeof(double), stream>>>(d_r, d_norm2_buf, N);
                 double r_norm2;
                 CUDA_CHECK(cudaMemcpy(&r_norm2, d_norm2_buf, sizeof(double), cudaMemcpyDeviceToHost));
                 r_2norm = std::sqrt(r_norm2);
             }
         } else {
             // Richardson update
-            richardson_kernel<<<grid, bs>>>(d_x_old, d_f, d_x, omega, N);
+            richardson_kernel<<<grid, bs, 0, stream>>>(d_x_old, d_f, d_x, omega, N);
 
             // Recompute residual
             op_gpu(d_x, d_Ax);
-            residual_kernel<<<grid, bs>>>(d_b, d_Ax, d_r, N);
+            residual_kernel<<<grid, bs, 0, stream>>>(d_b, d_Ax, d_r, N);
         }
 
         iter_count++;
@@ -347,11 +348,12 @@ void compute_density_gpu(
     const double* d_psi,
     const double* d_occ,
     double* d_rho,
-    int Nd, int Ns, double weight)
+    int Nd, int Ns, double weight,
+    cudaStream_t stream)
 {
     int bs = 256;
     int grid = ceildiv(Nd, bs);
-    compute_density_kernel<<<grid, bs>>>(d_psi, d_occ, d_rho, Nd, Ns, weight);
+    compute_density_kernel<<<grid, bs, 0, stream>>>(d_psi, d_occ, d_rho, Nd, Ns, weight);
 }
 
 // ============================================================

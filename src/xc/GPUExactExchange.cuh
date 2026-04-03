@@ -30,7 +30,8 @@ void build_ACE_gpu(cublasHandle_t cublas,
                    GPUExchangePoissonSolver& poisson,
                    const double* d_psi, int Nd, int Ns, int Nocc,
                    const double* occ, double dV,
-                   double* d_Xi);
+                   double* d_Xi,
+                   cudaStream_t stream = 0);
 
 // Compute exact exchange energy on GPU (gamma-point, real).
 double compute_energy_gpu(cublasHandle_t cublas,
@@ -89,7 +90,8 @@ void build_ACE_kpt_accumulate_gpu(cublasHandle_t cublas,
                                    const double* occ_q,
                                    int kpt_glob, int q_hf,
                                    double kptWts_hf, double dV,
-                                   cuDoubleComplex* d_Xi);
+                                   cuDoubleComplex* d_Xi,
+                                   cudaStream_t stream = 0);
 
 // Finalize ACE operator: Cholesky factorize and triangular solve.
 // Called once per k-point after all q-points have been accumulated.
@@ -97,7 +99,8 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
                                  cusolverDnHandle_t cusolver,
                                  const cuDoubleComplex* d_psi_k, int Nd, int Ns, int Nocc,
                                  double dV,
-                                 cuDoubleComplex* d_Xi);
+                                 cuDoubleComplex* d_Xi,
+                                 cudaStream_t stream = 0);
 
 // Compute exact exchange energy contribution for one k-point on GPU.
 //

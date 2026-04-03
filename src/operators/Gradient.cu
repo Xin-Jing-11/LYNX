@@ -76,7 +76,8 @@ void gradient_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol)
+    int direction, int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -91,13 +92,13 @@ void gradient_gpu(
 
         switch (direction) {
             case 0:
-                gradient_x_kernel<<<grid, block>>>(xn, yn, nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
+                gradient_x_kernel<<<grid, block, 0, stream>>>(xn, yn, nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
                 break;
             case 1:
-                gradient_y_kernel<<<grid, block>>>(xn, yn, nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
+                gradient_y_kernel<<<grid, block, 0, stream>>>(xn, yn, nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
                 break;
             case 2:
-                gradient_z_kernel<<<grid, block>>>(xn, yn, nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
+                gradient_z_kernel<<<grid, block, 0, stream>>>(xn, yn, nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex);
                 break;
         }
     }
@@ -191,7 +192,8 @@ void gradient_v2_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol)
+    int direction, int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -203,15 +205,15 @@ void gradient_v2_gpu(
 
     if (FDn == 6) {
         switch (direction) {
-            case 0: gradient_x_kernel_v2<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 1: gradient_y_kernel_v2<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 2: gradient_z_kernel_v2<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 0: gradient_x_kernel_v2<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_kernel_v2<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_kernel_v2<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
         }
     } else {
         switch (direction) {
-            case 0: gradient_x_kernel_v2<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 1: gradient_y_kernel_v2<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 2: gradient_z_kernel_v2<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 0: gradient_x_kernel_v2<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_kernel_v2<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_kernel_v2<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
         }
     }
     CUDA_CHECK(cudaGetLastError());
@@ -304,7 +306,8 @@ void gradient_v3_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol)
+    int direction, int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -316,15 +319,15 @@ void gradient_v3_gpu(
 
     if (FDn == 6) {
         switch (direction) {
-            case 0: gradient_x_kernel_v3<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 1: gradient_y_kernel_v3<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 2: gradient_z_kernel_v3<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 0: gradient_x_kernel_v3<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_kernel_v3<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_kernel_v3<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
         }
     } else {
         switch (direction) {
-            case 0: gradient_x_kernel_v3<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 1: gradient_y_kernel_v3<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 2: gradient_z_kernel_v3<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 0: gradient_x_kernel_v3<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_kernel_v3<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_kernel_v3<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
         }
     }
     CUDA_CHECK(cudaGetLastError());

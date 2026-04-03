@@ -143,7 +143,8 @@ void build_ACE_gpu(cublasHandle_t cublas,
                    GPUExchangePoissonSolver& poisson,
                    const double* d_psi, int Nd, int Ns, int Nocc,
                    const double* occ, double dV,
-                   double* d_Xi)
+                   double* d_Xi,
+                   cudaStream_t stream)
 {
     if (Nocc <= 0) return;
 
@@ -166,15 +167,15 @@ void build_ACE_gpu(cublasHandle_t cublas,
         for (int i = j; i < Nocc; i++) {
             const double* d_psi_i = d_psi + (size_t)i * Nd;
 
-            elementwise_mul_kernel<<<grid_Nd, block>>>(d_psi_i, d_psi_j, d_rhs, Nd);
+            elementwise_mul_kernel<<<grid_Nd, block, 0, stream>>>(d_psi_i, d_psi_j, d_rhs, Nd);
             poisson.solve_batch(d_rhs, 1, d_sol, cublas);
 
             double coeff_j = occ[j] * coeff_scale;
-            accumulate_Xi_kernel<<<grid_Nd, block>>>(d_Xi, Nd, i, d_psi_j, d_sol, coeff_j);
+            accumulate_Xi_kernel<<<grid_Nd, block, 0, stream>>>(d_Xi, Nd, i, d_psi_j, d_sol, coeff_j);
 
             if (i != j && occ[i] > OCC_THRESHOLD) {
                 double coeff_i = occ[i] * coeff_scale;
-                accumulate_Xi_kernel<<<grid_Nd, block>>>(d_Xi, Nd, j, d_psi_i, d_sol, coeff_i);
+                accumulate_Xi_kernel<<<grid_Nd, block, 0, stream>>>(d_Xi, Nd, j, d_psi_i, d_sol, coeff_i);
             }
         }
     }
@@ -202,7 +203,7 @@ void build_ACE_gpu(cublasHandle_t cublas,
     {
         int n_total = Nocc * Nocc;
         int grid_m = (n_total + block - 1) / block;
-        negate_kernel<<<grid_m, block>>>(d_M, n_total);
+        negate_kernel<<<grid_m, block, 0, stream>>>(d_M, n_total);
     }
 
     {
@@ -220,7 +221,7 @@ void build_ACE_gpu(cublasHandle_t cublas,
         int h_info = 0;
         CUDA_CHECK(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
         if (h_info != 0) {
-            std::fprintf(stderr, "WARNING: cusolverDnDpotrf failed in build_ACE_gpu (info=%d)\n", h_info);
+            std::fprintf(stderr, "WARNING: cusolverDnDpotrf failed in build_ACE_gpu (info=%d, stream)\n", h_info);
         }
         cudaFree(d_work);
         cudaFree(d_info);
@@ -335,7 +336,8 @@ void build_ACE_kpt_accumulate_gpu(cublasHandle_t cublas,
                                    const double* occ_q,
                                    int kpt_glob, int q_hf,
                                    double kptWts_hf, double dV,
-                                   cuDoubleComplex* d_Xi)
+                                   cuDoubleComplex* d_Xi,
+                                   cudaStream_t stream)
 {
     constexpr double OCC_THRESHOLD = 1e-6;
     double coeff_scale = std::sqrt(dV);
@@ -357,14 +359,14 @@ void build_ACE_kpt_accumulate_gpu(cublasHandle_t cublas,
             const cuDoubleComplex* d_psi_ki = d_psi_k + (size_t)i * Nd;
 
             // rhs = conj(psi_q[j]) * psi_k[i]
-            conj_mul_kernel<<<grid_Nd, block>>>(d_psi_qj, d_psi_ki, d_rhs, Nd);
+            conj_mul_kernel<<<grid_Nd, block, 0, stream>>>(d_psi_qj, d_psi_ki, d_rhs, Nd);
 
             // Poisson solve (k-point Z2Z with phase factors)
             poisson.solve_batch_kpt(d_rhs, 1, d_sol, cublas, kpt_glob, q_hf);
 
             // Xi[k,i] -= kptWts_hf * occ_q[j] * sqrt(dV) * psi_q[j] * sol
             double coeff = kptWts_hf * occ_q[j] * coeff_scale;
-            accumulate_Xi_z_kernel<<<grid_Nd, block>>>(d_Xi, Nd, i, d_psi_qj, d_sol, coeff);
+            accumulate_Xi_z_kernel<<<grid_Nd, block, 0, stream>>>(d_Xi, Nd, i, d_psi_qj, d_sol, coeff);
         }
     }
 
@@ -377,7 +379,8 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
                                  cusolverDnHandle_t cusolver,
                                  const cuDoubleComplex* d_psi_k, int Nd, int Ns, int Nocc,
                                  double dV,
-                                 cuDoubleComplex* d_Xi)
+                                 cuDoubleComplex* d_Xi,
+                                 cudaStream_t stream)
 {
     if (Nocc <= 0) return;
 
@@ -404,7 +407,7 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
     {
         int n_total = Nocc * Nocc;
         int grid_m = (n_total + block - 1) / block;
-        negate_z_kernel<<<grid_m, block>>>(d_M, n_total);
+        negate_z_kernel<<<grid_m, block, 0, stream>>>(d_M, n_total);
     }
 
     // Cholesky factorization: zpotrf on device
@@ -423,7 +426,7 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
         int h_info = 0;
         CUDA_CHECK(cudaMemcpy(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
         if (h_info != 0) {
-            std::fprintf(stderr, "WARNING: cusolverDnZpotrf failed in build_ACE_kpt_finalize_gpu (info=%d)\n", h_info);
+            std::fprintf(stderr, "WARNING: cusolverDnZpotrf failed in build_ACE_kpt_finalize_gpu (info=%d, stream)\n", h_info);
         }
         cudaFree(d_work);
         cudaFree(d_info);
