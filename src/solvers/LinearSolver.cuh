@@ -1,6 +1,8 @@
 #pragma once
 #ifdef USE_CUDA
 
+#include <cuda_runtime.h>
+
 namespace lynx {
 namespace gpu {
 
@@ -13,11 +15,13 @@ int aar_gpu(
     double tol, int max_iter,
     double* d_r, double* d_f, double* d_Ax,
     double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old);
+    double* d_x_old, double* d_f_old,
+    cudaStream_t stream = 0);
 
 // Compute electron density from real wavefunctions (gamma-point)
 void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho,
-                          int Nd, int Ns, double weight);
+                          int Nd, int Ns, double weight,
+                          cudaStream_t stream = 0);
 
 } // namespace gpu
 } // namespace lynx

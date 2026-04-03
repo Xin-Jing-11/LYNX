@@ -1,6 +1,7 @@
 #pragma once
 #ifdef USE_CUDA
 
+#include <cuda_runtime.h>
 #include <cuComplex.h>
 
 namespace lynx {
@@ -30,7 +31,8 @@ void eigensolver_solve_z_gpu(
 
 // Compute electron density from complex wavefunctions
 void compute_density_z_gpu(const cuDoubleComplex* d_psi, const double* d_occ,
-                            double* d_rho, int Nd, int Ns, double weight);
+                            double* d_rho, int Nd, int Ns, double weight,
+                            cudaStream_t stream = 0);
 
 } // namespace gpu
 } // namespace lynx

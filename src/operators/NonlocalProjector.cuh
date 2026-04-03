@@ -32,6 +32,25 @@ void nonlocal_projector_apply_gpu(
     int max_ndc, int max_nproj,
     cudaStream_t stream = 0);
 
+// Standalone gather: Chi^T × psi → alpha (no gamma scaling or scatter)
+// Caller must zero d_alpha before first call.
+void nonlocal_gather_chitpsi_gpu(
+    const double* d_psi,
+    const double* d_Chi_flat,
+    const int* d_gpos_flat,
+    const int* d_gpos_offsets,
+    const int* d_chi_offsets,
+    const int* d_ndc_arr,
+    const int* d_nproj_arr,
+    const int* d_IP_displ,
+    double* d_alpha,
+    int Nd, int ncol_this,
+    int ncol_stride,
+    int col_start,
+    double dV, int n_atoms,
+    int max_ndc, int max_nproj,
+    cudaStream_t stream = 0);
+
 } // namespace gpu
 } // namespace lynx
 

@@ -1,43 +1,11 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
 #include "operators/Hamiltonian.cuh"
+#include "parallel/HaloExchange.cuh"
+#include "operators/Laplacian.cuh"
 
 namespace lynx {
 namespace gpu {
-
-// Forward declarations
-void halo_exchange_gpu(const double* d_x, double* d_x_ex,
-                       int nx, int ny, int nz, int FDn, int ncol,
-                       bool periodic_x, bool periodic_y, bool periodic_z,
-                       cudaStream_t stream = 0);
-
-void halo_exchange_batched_gpu(const double* d_x, double* d_x_ex,
-                                int nx, int ny, int nz, int FDn, int ncol,
-                                bool periodic_x, bool periodic_y, bool periodic_z,
-                                cudaStream_t stream = 0);
-
-void laplacian_orth_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                        int nx, int ny, int nz, int FDn,
-                        int nx_ex, int ny_ex,
-                        double a, double b, double c,
-                        double diag_coeff, int ncol,
-                        cudaStream_t stream = 0);
-
-void laplacian_orth_v7_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                            int nx, int ny, int nz, int FDn,
-                            int nx_ex, int ny_ex,
-                            double a, double b, double c,
-                            double diag_coeff, int ncol,
-                            cudaStream_t stream = 0);
-
-void laplacian_nonorth_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                           int nx, int ny, int nz, int FDn,
-                           int nx_ex, int ny_ex,
-                           double a, double b, double c,
-                           double diag_coeff,
-                           bool has_xy, bool has_xz, bool has_yz,
-                           int ncol,
-                           cudaStream_t stream = 0);
 
 // Hamiltonian local part: H_local*psi = -0.5*Lap*psi + Veff*psi + c*psi
 // Uses batched halo exchange (8 launches total instead of 8*ncol)

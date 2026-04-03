@@ -83,7 +83,8 @@ if(USE_CUDA)
         xc/GPUExactExchange.cu
         xc/GPUExchangePoissonSolver.cu
         physics/GPUSCF.cu
-        physics/GPUForceStress.cu
+        physics/GPUForce.cu
+        physics/GPUStress.cu
     )
     target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand CUDA::cufft CUDA::cufftw)
     target_compile_definitions(lynx_core PUBLIC USE_CUDA)

@@ -1,6 +1,7 @@
 #pragma once
 #ifdef USE_CUDA
 
+#include <cuda_runtime.h>
 #include <cuComplex.h>
 
 namespace lynx {
@@ -11,7 +12,8 @@ void halo_exchange_z_gpu(
     const cuDoubleComplex* d_x, cuDoubleComplex* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
     bool periodic_x, bool periodic_y, bool periodic_z,
-    double kx_Lx, double ky_Ly, double kz_Lz);
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    cudaStream_t stream = 0);
 
 // Complex orthogonal Laplacian
 void laplacian_orth_z_gpu(
@@ -19,7 +21,8 @@ void laplacian_orth_z_gpu(
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
     double a, double b, double c,
-    double diag_coeff, int ncol);
+    double diag_coeff, int ncol,
+    cudaStream_t stream = 0);
 
 // Complex non-orthogonal Laplacian
 void laplacian_nonorth_z_gpu(
@@ -29,14 +32,16 @@ void laplacian_nonorth_z_gpu(
     double a, double b, double c,
     double diag_coeff,
     bool has_xy, bool has_xz, bool has_yz,
-    int ncol);
+    int ncol,
+    cudaStream_t stream = 0);
 
 // Complex gradient
 void gradient_z_gpu(
     const cuDoubleComplex* d_x_ex, cuDoubleComplex* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol,
+    cudaStream_t stream = 0);
 
 // Complex local Hamiltonian application
 void hamiltonian_apply_local_z_gpu(
@@ -47,7 +52,8 @@ void hamiltonian_apply_local_z_gpu(
     bool periodic_x, bool periodic_y, bool periodic_z,
     double diag_coeff,
     bool has_xy, bool has_xz, bool has_yz,
-    double kx_Lx, double ky_Ly, double kz_Lz);
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    cudaStream_t stream = 0);
 
 // Complex nonlocal projector (device-side index arrays)
 void nonlocal_projector_apply_z_gpu(
@@ -60,7 +66,8 @@ void nonlocal_projector_apply_z_gpu(
     const double* d_bloch_fac,
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
-    int max_ndc, int max_nproj);
+    int max_ndc, int max_nproj,
+    cudaStream_t stream = 0);
 
 // Complex nonlocal projector (host-side index arrays, separate layout)
 void nonlocal_projector_apply_z_gpu(
@@ -74,7 +81,8 @@ void nonlocal_projector_apply_z_gpu(
     const int* h_gpos_offsets, const int* h_chi_offsets,
     const int* h_ndc_arr, const int* h_nproj_arr,
     const int* h_IP_displ,
-    int max_ndc, int max_nproj);
+    int max_ndc, int max_nproj,
+    cudaStream_t stream = 0);
 
 } // namespace gpu
 } // namespace lynx
