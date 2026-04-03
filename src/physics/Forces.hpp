@@ -47,6 +47,15 @@ public:
 
     // SOC nonlocal force from spin-orbit coupling projectors (public: used by GPUSCF)
     void compute_nonlocal_soc(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const std::vector<double>& kpt_weights);
+
+    // SOC nonlocal force (explicit params — backward compat for GPU code)
+    void compute_nonlocal_soc(
         const Wavefunction& wfn,
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
@@ -66,6 +75,8 @@ public:
     static void symmetrize(std::vector<double>& forces, int n_atom);
 
 private:
+    const LynxContext* ctx_ = nullptr;
+
     std::vector<double> f_local_;
     std::vector<double> f_nloc_;
     std::vector<double> f_soc_;
@@ -95,11 +106,6 @@ private:
     void compute_local(
         const Crystal& crystal,
         const std::vector<AtomInfluence>& influence,
-        const FDStencil& stencil,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
         const double* phi,
         const double* Vloc,
         const double* b,
@@ -111,25 +117,12 @@ private:
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
         const NonlocalProjector& vnl,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const std::vector<double>& kpt_weights,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr,
-        int kpt_start = 0,
-        int band_start = 0);
+        const std::vector<double>& kpt_weights);
 
     // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
     void compute_xc_nlcc(
         const Crystal& crystal,
         const std::vector<AtomInfluence>& influence,
-        const FDStencil& stencil,
-        const Domain& domain,
-        const FDGrid& grid,
         const double* Vxc);
 };
 

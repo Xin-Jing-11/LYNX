@@ -1,4 +1,5 @@
 #include "physics/Energy.hpp"
+#include "core/LynxContext.hpp"
 #include "electronic/Occupation.hpp"
 #include <cmath>
 #include <cstdio>
@@ -207,6 +208,33 @@ EnergyComponents Energy::compute_all(
     E.Etotal = E.Eband - E2 + E.Exc - E3 + E.Ehart + E.Eself + E.Ec + E.Entropy;
 
     return E;
+}
+
+EnergyComponents Energy::compute_all(
+    const LynxContext& ctx,
+    const Wavefunction& wfn,
+    const ElectronDensity& density,
+    const double* Veff,
+    const double* phi,
+    const double* exc,
+    const double* Vxc,
+    const double* rho_b,
+    double Eself,
+    double Ec,
+    double beta,
+    SmearingType smearing,
+    const std::vector<double>& kpt_weights,
+    const double* rho_core,
+    double Ef,
+    const double* tau,
+    const double* vtau) {
+
+    return compute_all(wfn, density, Veff, phi, exc, Vxc, rho_b,
+                       Eself, Ec, beta, smearing, kpt_weights,
+                       ctx.domain().Nd_d(), ctx.dV(),
+                       rho_core, Ef, ctx.kpt_start(),
+                       &ctx.kpt_bridge(), &ctx.spin_bridge(),
+                       ctx.Nspin(), nullptr, tau, vtau);
 }
 
 } // namespace lynx

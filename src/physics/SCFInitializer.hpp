@@ -6,6 +6,7 @@
 #include "core/FDGrid.hpp"
 #include "core/KPoints.hpp"
 #include "core/constants.hpp"
+#include "core/LynxContext.hpp"
 #include "operators/Hamiltonian.hpp"
 #include "operators/NonlocalProjector.hpp"
 #include "electronic/Wavefunction.hpp"
@@ -53,10 +54,24 @@ class SCFInitializer {
 public:
     SCFInitializer() = default;
 
-    // Initialize SCF state: allocate arrays, set initial density, randomize wavefunctions,
-    // compute initial Veff, estimate spectral bounds via Lanczos.
-    // Modifies: wfn (randomized), density (initialized), arrays (allocated + initial Veff)
-    // Modifies params in place (auto-computes poisson_tol, elec_temp, cheb_degree).
+    // Initialize SCF state (with LynxContext — preferred).
+    static SCFState initialize(
+        const LynxContext& ctx,
+        Wavefunction& wfn,
+        ElectronDensity& density,
+        VeffArrays& arrays,
+        EffectivePotential& veff_builder,
+        SCFParams& params,
+        const Hamiltonian& hamiltonian,
+        const NonlocalProjector* vnl,
+        EigenSolver& eigsolver,
+        Mixer& mixer,
+        int Nelectron,
+        XCType xc_type,
+        const double* rho_b,
+        const double* rho_core);
+
+    // Initialize SCF state (explicit params — backward compat).
     static SCFState initialize(
         Wavefunction& wfn,
         ElectronDensity& density,

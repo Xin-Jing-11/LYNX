@@ -148,12 +148,9 @@ double SCF::run(Wavefunction& wfn,
     eigsolver.setup(*ctx_, *hamiltonian_);
 
     SCFState state = SCFInitializer::initialize(
-        wfn, density_, arrays_, veff_builder_, params_,
-        *grid_, *domain_, *hamiltonian_, *halo_, vnl_,
-        *bandcomm_, *kptcomm_, *spincomm_, eigsolver, mixer,
-        Nelectron, Nspin_global_, Nspin_local_, spin_start_,
-        kpoints_, kpt_start_, band_start_,
-        xc_type, rho_b, rho_core, is_kpt_, is_soc_);
+        *ctx_, wfn, density_, arrays_, veff_builder_, params_,
+        *hamiltonian_, vnl_, eigsolver, mixer,
+        Nelectron, xc_type, rho_b, rho_core);
 
     state.Nelectron = Nelectron;
 
@@ -181,15 +178,12 @@ double SCF::run(Wavefunction& wfn,
     // ===== 3. Outer Fock Loop for hybrid functionals =====
     if (exx_ && is_hybrid(xc_type_)) {
         HybridSCF hybrid;
-        hybrid.run(wfn, density_, arrays_, veff_builder_,
+        hybrid.run(*ctx_, wfn, density_, arrays_, veff_builder_,
                    energy_, Ef_, converged_,
                    exx_, hamiltonian_, vnl_,
                    eigsolver, mixer, params_,
-                   *grid_, *domain_,
-                   *bandcomm_, *kptcomm_, *spincomm_, kpoints_,
-                   Nelectron, Natom, Nspin_global_, Nspin_local_,
-                   spin_start_, kpt_start_, band_start_,
-                   rho_b, rho_core, xc_type, is_kpt_,
+                   Nelectron, Natom,
+                   rho_b, rho_core, xc_type,
                    Eself, Ec, state.kpt_weights, state);
     }
 
@@ -293,9 +287,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
 
     // Compute tau for mGGA after CheFSI solve
     if (is_mgga_type(xc_type_)) {
-        tau_.compute(wfn, state.kpt_weights, *grid_, *domain_, *halo_, *gradient_,
-                     kpoints_, *bandcomm_, *kptcomm_, spincomm_,
-                     spin_start_, kpt_start_, band_start_, Nspin_global_);
+        tau_.compute(*ctx_, wfn, state.kpt_weights);
     }
 }
 
@@ -306,12 +298,10 @@ void SCF::compute_new_density(const Wavefunction& wfn, const SCFState& state,
 
     if (is_soc_) {
         rho_new.allocate_noncollinear(Nd_d);
-        rho_new.compute_spinor(wfn, state.kpt_weights, grid_->dV(),
-                                *bandcomm_, *kptcomm_, kpt_start_, band_start_);
+        rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights);
     } else {
         rho_new.allocate(Nd_d, Nspin);
-        rho_new.compute(wfn, state.kpt_weights, grid_->dV(), *bandcomm_, *kptcomm_,
-                        Nspin, spin_start_, spincomm_, kpt_start_, band_start_);
+        rho_new.compute(*ctx_, wfn, state.kpt_weights);
     }
 }
 
@@ -334,12 +324,10 @@ void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho
         state.Veff_out = NDArray<double>(Nd_d * Nspin);
         std::memcpy(state.Veff_out.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
 
-        energy_ = Energy::compute_all(wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
+        energy_ = Energy::compute_all(*ctx_, wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
                                        arrays_.exc.data(), arrays_.Vxc.data(), rho_b,
                                        Eself, Ec, state.beta, params_.smearing,
-                                       state.kpt_weights, Nd_d, grid_->dV(),
-                                       rho_core_, Ef_, kpt_start_,
-                                       kptcomm_, spincomm_, Nspin, nullptr,
+                                       state.kpt_weights, rho_core_, Ef_,
                                        (is_mgga_type(xc_type_) && tau_.valid()) ? tau_.data() : nullptr,
                                        (is_mgga_type(xc_type_) && tau_.valid()) ? arrays_.vtau.data() : nullptr);
 
@@ -351,12 +339,10 @@ void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho
         // Restore Veff_in for mixer
         std::memcpy(arrays_.Veff.data(), Veff_in.data(), Nd_d * Nspin * sizeof(double));
     } else {
-        energy_ = Energy::compute_all(wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
+        energy_ = Energy::compute_all(*ctx_, wfn, density_, arrays_.Veff.data(), arrays_.phi.data(),
                                        arrays_.exc.data(), arrays_.Vxc.data(), rho_b,
                                        Eself, Ec, state.beta, params_.smearing,
-                                       state.kpt_weights, Nd_d, grid_->dV(),
-                                       rho_core_, Ef_, kpt_start_,
-                                       kptcomm_, spincomm_, Nspin, nullptr,
+                                       state.kpt_weights, rho_core_, Ef_,
                                        (is_mgga_type(xc_type_) && tau_.valid()) ? tau_.data() : nullptr,
                                        (is_mgga_type(xc_type_) && tau_.valid()) ? arrays_.vtau.data() : nullptr);
     }

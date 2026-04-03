@@ -127,6 +127,31 @@ void SCFInitializer::estimate_spectral_bounds(
 }
 
 SCFState SCFInitializer::initialize(
+    const LynxContext& ctx,
+    Wavefunction& wfn,
+    ElectronDensity& density,
+    VeffArrays& arrays,
+    EffectivePotential& veff_builder,
+    SCFParams& params,
+    const Hamiltonian& hamiltonian,
+    const NonlocalProjector* vnl,
+    EigenSolver& eigsolver,
+    Mixer& mixer,
+    int Nelectron,
+    XCType xc_type,
+    const double* rho_b,
+    const double* rho_core) {
+
+    return initialize(wfn, density, arrays, veff_builder, params,
+                      ctx.grid(), ctx.domain(), hamiltonian, ctx.halo(), vnl,
+                      ctx.scf_bandcomm(), ctx.kpt_bridge(), ctx.spin_bridge(),
+                      eigsolver, mixer, Nelectron,
+                      ctx.Nspin(), ctx.Nspin_local(), ctx.spin_start(),
+                      &ctx.kpoints(), ctx.kpt_start(), ctx.band_start(),
+                      xc_type, rho_b, rho_core, ctx.is_kpt(), ctx.is_soc());
+}
+
+SCFState SCFInitializer::initialize(
     Wavefunction& wfn,
     ElectronDensity& density,
     VeffArrays& arrays,

@@ -253,6 +253,23 @@ void ElectronDensity::compute_spinor(const Wavefunction& wfn,
     std::memcpy(rho_[0].data(), rho_total_.data(), Nd_d * sizeof(double));
 }
 
+void ElectronDensity::compute(const LynxContext& ctx,
+                               const Wavefunction& wfn,
+                               const std::vector<double>& kpt_weights) {
+    compute(wfn, kpt_weights, ctx.dV(),
+            ctx.scf_bandcomm(), ctx.kpt_bridge(),
+            ctx.Nspin(), ctx.spin_start(),
+            &ctx.spin_bridge(), ctx.kpt_start(), ctx.band_start());
+}
+
+void ElectronDensity::compute_spinor(const LynxContext& ctx,
+                                      const Wavefunction& wfn,
+                                      const std::vector<double>& kpt_weights) {
+    compute_spinor(wfn, kpt_weights, ctx.dV(),
+                   ctx.scf_bandcomm(), ctx.kpt_bridge(),
+                   ctx.kpt_start(), ctx.band_start());
+}
+
 double ElectronDensity::integrate(double dV) const {
     double sum = 0.0;
     const double* rt = rho_total_.data();

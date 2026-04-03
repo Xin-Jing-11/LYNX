@@ -54,7 +54,16 @@ public:
     double soc_energy() const { return energy_soc_; }
     void set_cell_measure(double cm) { cell_measure_ = cm; }
 
-    // Nonlocal+kinetic stress combined (public: used by GPUSCF)
+    // Nonlocal+kinetic stress combined (with LynxContext — preferred).
+    void compute_nonlocal_kinetic(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const std::vector<double>& kpt_weights);
+
+    // Nonlocal+kinetic stress combined (explicit params — used by GPUSCF).
     void compute_nonlocal_kinetic(
         const Wavefunction& wfn,
         const Crystal& crystal,
@@ -73,6 +82,8 @@ public:
         int band_start = 0);
 
 private:
+    const LynxContext* ctx_ = nullptr;
+
     std::array<double, 6> stress_k_ = {};
     std::array<double, 6> stress_xc_ = {};
     std::array<double, 6> stress_el_ = {};
@@ -129,10 +140,6 @@ private:
         XCType xc_type,
         int Nspin,
         const double* rho_core,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
         const double* vtau = nullptr,
         const double* tau = nullptr,
         const double* gpu_tau_vtau_dot = nullptr);
@@ -141,11 +148,6 @@ private:
     void compute_electrostatic(
         const Crystal& crystal,
         const std::vector<AtomInfluence>& influence,
-        const FDStencil& stencil,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
         const double* phi,
         const double* rho,
         const double* Vloc,
@@ -157,9 +159,6 @@ private:
     void compute_xc_nlcc_stress(
         const Crystal& crystal,
         const std::vector<AtomInfluence>& influence,
-        const FDStencil& stencil,
-        const Domain& domain,
-        const FDGrid& grid,
         const double* Vxc,
         int Nspin);
 };

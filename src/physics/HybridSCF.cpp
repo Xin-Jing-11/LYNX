@@ -12,7 +12,8 @@ static bool is_mgga_type(XCType t) {
     return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
 }
 
-void HybridSCF::run(Wavefunction& wfn,
+void HybridSCF::run(const LynxContext& ctx,
+                     Wavefunction& wfn,
                      ElectronDensity& density,
                      VeffArrays& arrays,
                      EffectivePotential& veff_builder,
@@ -25,27 +26,28 @@ void HybridSCF::run(Wavefunction& wfn,
                      EigenSolver& eigsolver,
                      Mixer& mixer,
                      const SCFParams& params,
-                     const FDGrid& grid,
-                     const Domain& domain,
-                     const MPIComm& bandcomm,
-                     const MPIComm& kptcomm,
-                     const MPIComm& spincomm,
-                     const KPoints* kpoints,
                      int Nelectron,
                      int Natom,
-                     int Nspin_global,
-                     int Nspin_local,
-                     int spin_start,
-                     int kpt_start,
-                     int band_start,
                      const double* rho_b,
                      const double* rho_core,
                      XCType xc_type,
-                     bool is_kpt,
                      double Eself,
                      double Ec,
                      const std::vector<double>& kpt_weights,
                      SCFState& state) {
+    ctx_ = &ctx;
+    const auto& grid = ctx.grid();
+    const auto& domain = ctx.domain();
+    const auto& kptcomm = ctx.kpt_bridge();
+    const auto& spincomm = ctx.spin_bridge();
+    const KPoints* kpoints = &ctx.kpoints();
+    int Nspin_global = ctx.Nspin();
+    int Nspin_local = ctx.Nspin_local();
+    int spin_start = ctx.spin_start();
+    int kpt_start = ctx.kpt_start();
+    int band_start = ctx.band_start();
+    bool is_kpt = ctx.is_kpt();
+
     int rank_world = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
     int Nd_d = domain.Nd_d();
@@ -124,11 +126,10 @@ void HybridSCF::run(Wavefunction& wfn,
         // 5. Reset mixer and run inner SCF with EXX
         mixer.reset();
         run_inner_scf(wfn, density, arrays, veff_builder, energy, Ef, converged,
-                      Eexx_est, eigsolver, mixer, params, grid, domain,
-                      hamiltonian, vnl, bandcomm, kptcomm, spincomm, kpoints,
-                      Nelectron, Nspin_global, Nspin_local, spin_start,
-                      kpt_start, band_start, rho_b, rho_core, xc_type,
-                      is_kpt, Eself, Ec, kpt_weights, state);
+                      Eexx_est, eigsolver, mixer, params,
+                      hamiltonian, vnl,
+                      Nelectron, rho_b, rho_core, xc_type,
+                      Eself, Ec, kpt_weights, state);
 
         // 6. Energy correction (matching SPARC exactExchange.c:310-325)
         Eexx_prev = Eexx_est;
@@ -168,28 +169,29 @@ void HybridSCF::run_inner_scf(Wavefunction& wfn,
                                 EigenSolver& eigsolver,
                                 Mixer& mixer,
                                 const SCFParams& params,
-                                const FDGrid& grid,
-                                const Domain& domain,
                                 const Hamiltonian* hamiltonian,
                                 const NonlocalProjector* vnl,
-                                const MPIComm& bandcomm,
-                                const MPIComm& kptcomm,
-                                const MPIComm& spincomm,
-                                const KPoints* kpoints,
                                 int Nelectron,
-                                int Nspin_global,
-                                int Nspin_local,
-                                int spin_start,
-                                int kpt_start,
-                                int band_start,
                                 const double* rho_b,
                                 const double* rho_core,
                                 XCType xc_type,
-                                bool is_kpt,
                                 double Eself,
                                 double Ec,
                                 const std::vector<double>& kpt_weights,
                                 SCFState& state) {
+    const auto& grid = ctx_->grid();
+    const auto& domain = ctx_->domain();
+    const auto& bandcomm = ctx_->scf_bandcomm();
+    const auto& kptcomm = ctx_->kpt_bridge();
+    const auto& spincomm = ctx_->spin_bridge();
+    const KPoints* kpoints = &ctx_->kpoints();
+    int Nspin_global = ctx_->Nspin();
+    int Nspin_local = ctx_->Nspin_local();
+    int spin_start = ctx_->spin_start();
+    int kpt_start = ctx_->kpt_start();
+    int band_start = ctx_->band_start();
+    bool is_kpt = ctx_->is_kpt();
+
     int rank_world = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
     int Nd_d = domain.Nd_d();
@@ -256,16 +258,13 @@ void HybridSCF::run_inner_scf(Wavefunction& wfn,
         // Compute density
         ElectronDensity rho_new_fock;
         rho_new_fock.allocate(Nd_d, Nspin);
-        rho_new_fock.compute(wfn, kpt_weights, grid.dV(), bandcomm, kptcomm,
-                             Nspin, spin_start, &spincomm, kpt_start, band_start);
+        rho_new_fock.compute(*ctx_, wfn, kpt_weights);
 
         // Energy with Eexx correction
-        energy = Energy::compute_all(wfn, density, arrays.Veff.data(), arrays.phi.data(),
+        energy = Energy::compute_all(*ctx_, wfn, density, arrays.Veff.data(), arrays.phi.data(),
                                        arrays.exc.data(), arrays.Vxc.data(), rho_b,
                                        Eself, Ec, state.beta, params.smearing,
-                                       kpt_weights, Nd_d, grid.dV(),
-                                       rho_core, Ef, kpt_start,
-                                       &kptcomm, &spincomm, Nspin);
+                                       kpt_weights, rho_core, Ef);
         energy.Exc += Eexx_est;
         energy.Etotal -= Eexx_est;
 
