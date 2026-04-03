@@ -59,12 +59,12 @@ namespace lynx { namespace gpu {
 void halo_exchange_gpu(
     const double* d_x, double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z);
+    bool periodic_x, bool periodic_y, bool periodic_z, cudaStream_t stream = 0);
 
 void halo_exchange_batched_nomemset_gpu(
     const double* d_x, double* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
-    bool periodic_x, bool periodic_y, bool periodic_z);
+    bool periodic_x, bool periodic_y, bool periodic_z, cudaStream_t stream = 0);
 
 void hamiltonian_apply_local_gpu(
     const double* d_psi, const double* d_Veff, double* d_Hpsi,
@@ -73,7 +73,8 @@ void hamiltonian_apply_local_gpu(
     bool is_orthogonal,
     bool periodic_x, bool periodic_y, bool periodic_z,
     double diag_coeff,
-    bool has_xy, bool has_xz, bool has_yz);
+    bool has_xy, bool has_xz, bool has_yz,
+    cudaStream_t stream = 0);
 
 void upload_stencil_coefficients(
     const double* D2x, const double* D2y, const double* D2z,
@@ -100,25 +101,25 @@ void nonlocal_projector_apply_gpu(
     double* d_alpha,
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
-    int max_ndc, int max_nproj);
+    int max_ndc, int max_nproj, cudaStream_t stream = 0);
 
 void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho,
-                          int Nd, int Ns, double weight);
+                          int Nd, int Ns, double weight, cudaStream_t stream = 0);
 
 void laplacian_orth_v2_gpu(
     const double* d_x_ex, const double* d_V, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    double a, double b, double c, double diag_coeff, int ncol);
+    double a, double b, double c, double diag_coeff, int ncol, cudaStream_t stream = 0);
 
 void gradient_gpu(
     const double* d_x_ex, double* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol);
+    int direction, int ncol, cudaStream_t stream = 0);
 
 void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
-                  double* d_exc, double* d_vxc, double* d_v2xc, int N);
+                  double* d_exc, double* d_vxc, double* d_v2xc, int N, cudaStream_t stream = 0);
 
 int aar_gpu(
     void (*op_gpu)(const double* d_x, double* d_Ax),
@@ -128,7 +129,7 @@ int aar_gpu(
     double tol, int max_iter,
     double* d_r, double* d_f, double* d_Ax,
     double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old);
+    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
 
 void compute_force_stress_gpu(
     const double* d_psi, const double* d_occ,
@@ -142,7 +143,7 @@ void compute_force_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs, double occfac,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl);
+    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl, cudaStream_t stream = 0);
 
 }} // namespace lynx::gpu
 
