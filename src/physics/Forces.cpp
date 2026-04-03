@@ -2,6 +2,7 @@
 #include "physics/SCF.hpp"
 #include "physics/Electrostatics.hpp"
 #include "atoms/AtomSetup.hpp"
+#include "io/InputParser.hpp"
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -15,7 +16,35 @@
 
 namespace lynx {
 
-std::vector<double> Forces::compute(
+// ---------------------------------------------------------------------------
+// High-level entry point: extract data from SCF/atoms and delegate.
+// ---------------------------------------------------------------------------
+void Forces::compute(
+    const LynxContext& ctx,
+    const SystemConfig& /*config*/,
+    const Wavefunction& wfn,
+    const SCF& scf,
+    const AtomSetup& atoms,
+    const NonlocalProjector& vnl) {
+
+    compute_impl(ctx, wfn, atoms.crystal,
+                 atoms.influence, atoms.nloc_influence, vnl,
+                 scf.phi(), scf.density().rho_total().data(),
+                 atoms.Vloc.data(),
+                 atoms.elec.pseudocharge().data(),
+                 atoms.elec.pseudocharge_ref().data(),
+                 scf.Vxc(),
+                 atoms.has_nlcc ? atoms.rho_core.data() : nullptr);
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    print(rank, ctx.is_soc(), atoms.has_nlcc, atoms.Natom);
+}
+
+// ---------------------------------------------------------------------------
+// Detailed implementation (private).
+// ---------------------------------------------------------------------------
+std::vector<double> Forces::compute_impl(
     const LynxContext& ctx,
     const Wavefunction& wfn,
     const Crystal& crystal,

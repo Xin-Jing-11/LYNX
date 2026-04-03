@@ -23,6 +23,7 @@
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
 #include "physics/Electrostatics.hpp"
+#include "atoms/AtomSetup.hpp"
 
 using namespace lynx;
 
@@ -227,58 +228,28 @@ static DFTResult run_single_point(const std::string& json_file) {
         std::printf("  Eself+Ec= %.15e\n", scf.energy().Eself + scf.energy().Ec);
     }
 
-    // Forces — use LynxContext-based overload
-    if (config.print_forces) {
-        Forces forces;
-        result.forces = forces.compute(ctx, wfn, crystal, influence, nloc_influence, vnl,
-                                       scf.phi(), scf.density().rho_total().data(),
-                                       Vloc.data(),
-                                       elec.pseudocharge().data(),
-                                       elec.pseudocharge_ref().data(),
-                                       scf.Vxc(),
-                                       has_nlcc ? rho_core.data() : nullptr);
-    }
+    // Build AtomSetup for the simplified force/stress API
+    AtomSetup atoms;
+    atoms.crystal = std::move(crystal);
+    atoms.elec = std::move(elec);
+    atoms.Vloc = std::move(Vloc);
+    atoms.rho_core = std::move(rho_core);
+    atoms.influence = std::move(influence);
+    atoms.nloc_influence = std::move(nloc_influence);
+    atoms.has_nlcc = has_nlcc;
+    atoms.Nelectron = Nelectron;
+    atoms.Natom = Natom;
 
-    // Stress — use LynxContext-based overload
-    if (config.calc_stress || config.calc_pressure) {
-        Stress stress_calc;
-        int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 : 1;
-        const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
-        const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
-        const double* gpu_mgga_ptr = nullptr;
-        const double* gpu_dot_ptr = nullptr;
-        std::array<double, 6> gpu_mgga_stress = {};
-        double gpu_tau_vtau_dot = 0.0;
-#ifdef USE_CUDA
-        {
-            bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
-                            config.xc == XCType::MGGA_RSCAN ||
-                            config.xc == XCType::MGGA_R2SCAN);
-            if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
-                scf.gpu_runner()->compute_mgga_stress(wfn, domain, grid, Nspin_calc,
-                                                       gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
-                gpu_mgga_ptr = gpu_mgga_stress.data();
-                gpu_dot_ptr = &gpu_tau_vtau_dot;
-            }
-        }
-#endif
-        result.stress = stress_calc.compute(ctx, wfn, crystal, influence, nloc_influence, vnl,
-                                            scf.phi(), scf.density().rho_total().data(),
-                                            rho_up_ptr, rho_dn_ptr,
-                                            Vloc.data(),
-                                            elec.pseudocharge().data(),
-                                            elec.pseudocharge_ref().data(),
-                                            scf.exc(), scf.Vxc(),
-                                            scf.Dxcdgrho(),
-                                            scf.energy().Exc,
-                                            elec.Eself() + elec.Ec(),
-                                            config.xc,
-                                            Nspin_calc,
-                                            has_nlcc ? rho_core.data() : nullptr,
-                                            scf.vtau(), scf.tau(),
-                                            gpu_mgga_ptr, gpu_dot_ptr);
-        result.pressure = stress_calc.pressure();
-    }
+    // Forces
+    Forces forces;
+    forces.compute(ctx, config, wfn, scf, atoms, vnl);
+    result.forces = forces.total_forces();
+
+    // Stress
+    Stress stress_calc;
+    stress_calc.compute(ctx, config, wfn, scf, atoms, vnl);
+    result.stress = stress_calc.total_stress();
+    result.pressure = stress_calc.pressure();
 
     return result;
 }

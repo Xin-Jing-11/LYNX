@@ -20,8 +20,9 @@
 
 namespace lynx {
 
-struct AtomSetup;  // forward declaration (defined in AtomSetup.hpp)
-class SCF;         // forward declaration
+struct AtomSetup;      // forward declaration (defined in AtomSetup.hpp)
+struct SystemConfig;   // forward declaration (defined in InputParser.hpp)
+class SCF;             // forward declaration
 
 // Stress tensor calculation matching reference LYNX.
 // Components: kinetic, XC, electrostatic (local), nonlocal.
@@ -34,8 +35,55 @@ class Stress {
 public:
     Stress() = default;
 
-    /// Compute stress using LynxContext for infrastructure.
-    std::array<double, 6> compute(
+    /// High-level entry point: compute stress (including GPU mGGA and EXX) and print results.
+    void compute(const LynxContext& ctx,
+                 const SystemConfig& config,
+                 const Wavefunction& wfn,
+                 SCF& scf,
+                 const AtomSetup& atoms,
+                 const NonlocalProjector& vnl);
+
+    double pressure() const;
+
+    const std::array<double, 6>& kinetic_stress() const { return stress_k_; }
+    const std::array<double, 6>& xc_stress() const { return stress_xc_; }
+    const std::array<double, 6>& electrostatic_stress() const { return stress_el_; }
+    const std::array<double, 6>& nonlocal_stress() const { return stress_nl_; }
+    const std::array<double, 6>& total_stress() const { return stress_total_; }
+    const std::array<double, 6>& soc_stress() const { return stress_soc_; }
+    double soc_energy() const { return energy_soc_; }
+    void set_cell_measure(double cm) { cell_measure_ = cm; }
+
+    // Nonlocal+kinetic stress combined (public: used by GPUSCF)
+    void compute_nonlocal_kinetic(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const Gradient& gradient,
+        const HaloExchange& halo,
+        const Domain& domain,
+        const FDGrid& grid,
+        const std::vector<double>& kpt_weights,
+        const MPIComm& bandcomm,
+        const MPIComm& kptcomm,
+        const MPIComm& spincomm,
+        const KPoints* kpoints = nullptr,
+        int kpt_start = 0,
+        int band_start = 0);
+
+private:
+    std::array<double, 6> stress_k_ = {};
+    std::array<double, 6> stress_xc_ = {};
+    std::array<double, 6> stress_el_ = {};
+    std::array<double, 6> stress_nl_ = {};
+    std::array<double, 6> stress_soc_ = {};
+    std::array<double, 6> stress_total_ = {};
+    double cell_measure_ = 0.0;
+    double energy_soc_ = 0.0;
+
+    /// Detailed compute (implementation -- called by the high-level overload).
+    std::array<double, 6> compute_impl(
         const LynxContext& ctx,
         const Wavefunction& wfn,
         const Crystal& crystal,
@@ -62,32 +110,12 @@ public:
         const double* gpu_mgga_psi_stress = nullptr,
         const double* gpu_tau_vtau_dot = nullptr);
 
-    /// Print computed stress tensor to stdout.
+    /// Print computed stress tensor to stdout (called at end of compute).
     void print(int rank) const;
 
-    double pressure() const;
-
-    const std::array<double, 6>& kinetic_stress() const { return stress_k_; }
-    const std::array<double, 6>& xc_stress() const { return stress_xc_; }
-    const std::array<double, 6>& electrostatic_stress() const { return stress_el_; }
-    const std::array<double, 6>& nonlocal_stress() const { return stress_nl_; }
-    const std::array<double, 6>& total_stress() const { return stress_total_; }
-    const std::array<double, 6>& soc_stress() const { return stress_soc_; }
-    double soc_energy() const { return energy_soc_; }
-    void set_cell_measure(double cm) { cell_measure_ = cm; }
     void add_to_total(const std::array<double, 6>& extra) {
         for (int i = 0; i < 6; ++i) stress_total_[i] += extra[i];
     }
-
-private:
-    std::array<double, 6> stress_k_ = {};
-    std::array<double, 6> stress_xc_ = {};
-    std::array<double, 6> stress_el_ = {};
-    std::array<double, 6> stress_nl_ = {};
-    std::array<double, 6> stress_soc_ = {};
-    std::array<double, 6> stress_total_ = {};
-    double cell_measure_ = 0.0;
-    double energy_soc_ = 0.0;
 
     // XC stress: diagonal = (Exc - Exc_corr), GGA correction = -∫ Dxcdgrho * ∂ρ/∂x_α * ∂ρ/∂x_β dV
     void compute_xc_stress(
@@ -134,25 +162,6 @@ private:
         const FDGrid& grid,
         const double* Vxc,
         int Nspin);
-
-public:
-    // Nonlocal+kinetic stress combined (matching reference)
-    void compute_nonlocal_kinetic(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const std::vector<double>& kpt_weights,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const MPIComm& spincomm,
-        const KPoints* kpoints = nullptr,
-        int kpt_start = 0,
-        int band_start = 0);
 };
 
 } // namespace lynx

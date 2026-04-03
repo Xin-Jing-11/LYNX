@@ -3,6 +3,11 @@
 #include "physics/Electrostatics.hpp"
 #include "xc/ExactExchange.hpp"
 #include "atoms/AtomSetup.hpp"
+#include "io/InputParser.hpp"
+
+#ifdef USE_CUDA
+#include "physics/GPUSCF.cuh"
+#endif
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -46,7 +51,74 @@ static void nonCart2Cart_grad_arrays(const Mat3& uvec_inv, double* gx, double* g
     }
 }
 
-std::array<double, 6> Stress::compute(
+// ---------------------------------------------------------------------------
+// High-level entry point: extract data, handle GPU mGGA and EXX, then print.
+// ---------------------------------------------------------------------------
+void Stress::compute(
+    const LynxContext& ctx,
+    const SystemConfig& config,
+    const Wavefunction& wfn,
+    SCF& scf,
+    const AtomSetup& atoms,
+    const NonlocalProjector& vnl) {
+
+    int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 :
+                     (config.spin_type == SpinType::NonCollinear) ? 1 : 1;
+    const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
+    const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
+
+    // GPU mGGA stress
+    const double* gpu_mgga_ptr = nullptr;
+    const double* gpu_dot_ptr = nullptr;
+    [[maybe_unused]] std::array<double, 6> gpu_mgga_stress = {};
+    [[maybe_unused]] double gpu_tau_vtau_dot_val = 0.0;
+#ifdef USE_CUDA
+    {
+        bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
+                        config.xc == XCType::MGGA_RSCAN ||
+                        config.xc == XCType::MGGA_R2SCAN);
+        if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
+            scf.gpu_runner()->compute_mgga_stress(
+                wfn, ctx.domain(), ctx.grid(), Nspin_calc,
+                gpu_mgga_stress.data(), &gpu_tau_vtau_dot_val);
+            gpu_mgga_ptr = gpu_mgga_stress.data();
+            gpu_dot_ptr = &gpu_tau_vtau_dot_val;
+        }
+    }
+#endif
+
+    compute_impl(ctx, wfn, atoms.crystal,
+                 atoms.influence, atoms.nloc_influence, vnl,
+                 scf.phi(), scf.density().rho_total().data(),
+                 rho_up_ptr, rho_dn_ptr,
+                 atoms.Vloc.data(),
+                 atoms.elec.pseudocharge().data(),
+                 atoms.elec.pseudocharge_ref().data(),
+                 scf.exc(), scf.Vxc(),
+                 scf.Dxcdgrho(),
+                 scf.energy().Exc,
+                 atoms.elec.Eself() + atoms.elec.Ec(),
+                 config.xc,
+                 Nspin_calc,
+                 atoms.has_nlcc ? atoms.rho_core.data() : nullptr,
+                 scf.vtau(), scf.tau(),
+                 gpu_mgga_ptr, gpu_dot_ptr);
+
+    // Add EXX stress for hybrid functionals
+    if (is_hybrid(config.xc) && scf.exx().is_setup()) {
+        auto stress_exx = scf.exx().compute_stress(wfn, ctx.gradient(), ctx.halo(), ctx.domain());
+        add_to_total(stress_exx);
+    }
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    print(rank);
+}
+
+// ---------------------------------------------------------------------------
+// Detailed implementation (private).
+// ---------------------------------------------------------------------------
+std::array<double, 6> Stress::compute_impl(
     const LynxContext& ctx,
     const Wavefunction& wfn,
     const Crystal& crystal,

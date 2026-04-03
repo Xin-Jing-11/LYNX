@@ -18,8 +18,9 @@
 
 namespace lynx {
 
-struct AtomSetup;  // forward declaration (defined in AtomSetup.hpp)
-class SCF;         // forward declaration
+struct AtomSetup;      // forward declaration (defined in AtomSetup.hpp)
+struct SystemConfig;   // forward declaration (defined in InputParser.hpp)
+class SCF;             // forward declaration
 
 // Force calculation matching reference LYNX.
 // Three contributions:
@@ -30,8 +31,49 @@ class Forces {
 public:
     Forces() = default;
 
-    /// Compute forces using LynxContext for infrastructure.
-    std::vector<double> compute(
+    /// High-level entry point: compute forces and print results.
+    void compute(const LynxContext& ctx,
+                 const SystemConfig& config,
+                 const Wavefunction& wfn,
+                 const SCF& scf,
+                 const AtomSetup& atoms,
+                 const NonlocalProjector& vnl);
+
+    const std::vector<double>& local_forces() const { return f_local_; }
+    const std::vector<double>& nonlocal_forces() const { return f_nloc_; }
+    const std::vector<double>& soc_forces() const { return f_soc_; }
+    const std::vector<double>& xc_forces() const { return f_xc_; }
+    const std::vector<double>& total_forces() const { return f_total_; }
+
+    // SOC nonlocal force from spin-orbit coupling projectors (public: used by GPUSCF)
+    void compute_nonlocal_soc(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const Gradient& gradient,
+        const HaloExchange& halo,
+        const Domain& domain,
+        const FDGrid& grid,
+        const std::vector<double>& kpt_weights,
+        const MPIComm& bandcomm,
+        const MPIComm& kptcomm,
+        const KPoints* kpoints = nullptr,
+        int kpt_start = 0,
+        int band_start = 0);
+
+    // Symmetrize forces: subtract mean to ensure sum = 0
+    static void symmetrize(std::vector<double>& forces, int n_atom);
+
+private:
+    std::vector<double> f_local_;
+    std::vector<double> f_nloc_;
+    std::vector<double> f_soc_;
+    std::vector<double> f_xc_;
+    std::vector<double> f_total_;
+
+    /// Detailed compute (implementation — called by the high-level overload).
+    std::vector<double> compute_impl(
         const LynxContext& ctx,
         const Wavefunction& wfn,
         const Crystal& crystal,
@@ -46,21 +88,8 @@ public:
         const double* Vxc,
         const double* rho_core);
 
-    /// Print computed forces to stdout.
+    /// Print computed forces to stdout (called at end of compute).
     void print(int rank, bool is_soc, bool has_nlcc, int Natom) const;
-
-    const std::vector<double>& local_forces() const { return f_local_; }
-    const std::vector<double>& nonlocal_forces() const { return f_nloc_; }
-    const std::vector<double>& soc_forces() const { return f_soc_; }
-    const std::vector<double>& xc_forces() const { return f_xc_; }
-    const std::vector<double>& total_forces() const { return f_total_; }
-
-private:
-    std::vector<double> f_local_;
-    std::vector<double> f_nloc_;
-    std::vector<double> f_soc_;
-    std::vector<double> f_xc_;
-    std::vector<double> f_total_;
 
     // Local force: F = -∫ bJ · ∇φ dV + 0.5 * ∫ [∇VcJ·(b+b_ref) - ∇Vc·(bJ+bJ_ref)] dV
     void compute_local(
@@ -94,24 +123,6 @@ private:
         int kpt_start = 0,
         int band_start = 0);
 
-public:
-    // SOC nonlocal force from spin-orbit coupling projectors
-    void compute_nonlocal_soc(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const Gradient& gradient,
-        const HaloExchange& halo,
-        const Domain& domain,
-        const FDGrid& grid,
-        const std::vector<double>& kpt_weights,
-        const MPIComm& bandcomm,
-        const MPIComm& kptcomm,
-        const KPoints* kpoints = nullptr,
-        int kpt_start = 0,
-        int band_start = 0);
-
     // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
     void compute_xc_nlcc(
         const Crystal& crystal,
@@ -120,9 +131,6 @@ public:
         const Domain& domain,
         const FDGrid& grid,
         const double* Vxc);
-
-    // Symmetrize forces: subtract mean to ensure sum = 0
-    static void symmetrize(std::vector<double>& forces, int n_atom);
 };
 
 } // namespace lynx
