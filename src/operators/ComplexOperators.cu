@@ -1,5 +1,6 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
+#include "operators/ComplexOperators.cuh"
 #include <cuComplex.h>
 
 namespace lynx {
@@ -189,7 +190,8 @@ void halo_exchange_z_gpu(
     cuDoubleComplex* d_x_ex,
     int nx, int ny, int nz, int FDn, int ncol,
     bool periodic_x, bool periodic_y, bool periodic_z,
-    double kx_Lx, double ky_Ly, double kz_Lz)
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    cudaStream_t stream)
 {
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
@@ -205,7 +207,7 @@ void halo_exchange_z_gpu(
     {
         dim3 block(32, 8);
         dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
-        halo_copy_interior_z_batched_kernel<<<grid, block>>>(
+        halo_copy_interior_z_batched_kernel<<<grid, block, 0, stream>>>(
             d_x, d_x_ex, nx, ny, nz, FDn,
             nx_ex, ny_ex, nxny_ex, nd, nd_ex);
     }
@@ -214,23 +216,23 @@ void halo_exchange_z_gpu(
     int bs = 256;
     if (periodic_z) {
         int total = nxny_ex * FDn * ncol;
-        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 0, ncol);
-        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 1, ncol);
     }
     if (periodic_y) {
         int total = nz_ex * FDn * nx_ex * ncol;
-        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 2, ncol);
-        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 3, ncol);
     }
     if (periodic_x) {
         int total = nz_ex * ny_ex * FDn * ncol;
-        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 4, ncol);
-        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_periodic_bc_z_batched_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex, 5, ncol);
     }
 
@@ -240,31 +242,31 @@ void halo_exchange_z_gpu(
         double cos_z = cos(kz_Lz), sin_z = sin(kz_Lz);
         int total = nxny_ex * FDn * ncol;
         // z_lo ghost: phase_l = e^{-ikL_z}
-        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex,
             0, ncol, cos_z, -sin_z);
         // z_hi ghost: phase_r = e^{+ikL_z}
-        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex,
             1, ncol, cos_z, sin_z);
     }
     if (periodic_y && (ky_Ly != 0.0)) {
         double cos_y = cos(ky_Ly), sin_y = sin(ky_Ly);
         int total = nz_ex * FDn * nx_ex * ncol;
-        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex,
             2, ncol, cos_y, -sin_y);
-        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex,
             3, ncol, cos_y, sin_y);
     }
     if (periodic_x && (kx_Lx != 0.0)) {
         double cos_x = cos(kx_Lx), sin_x = sin(kx_Lx);
         int total = nz_ex * ny_ex * FDn * ncol;
-        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex,
             4, ncol, cos_x, -sin_x);
-        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs>>>(
+        halo_bloch_phase_z_kernel<<<ceildiv(total, bs), bs, 0, stream>>>(
             d_x_ex, nx, ny, nz, FDn, nx_ex, ny_ex, nz_ex, nxny_ex, nd_ex,
             5, ncol, cos_x, sin_x);
     }
@@ -320,7 +322,8 @@ void laplacian_orth_z_gpu(
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
     double a, double b, double c,
-    double diag_coeff, int ncol)
+    double diag_coeff, int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -330,12 +333,12 @@ void laplacian_orth_z_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
 
     if (FDn == 6) {
-        laplacian_orth_z_kernel<6><<<grid, block>>>(
+        laplacian_orth_z_kernel<6><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, a, b, diag_coeff, ncol);
     } else {
-        laplacian_orth_z_kernel<3><<<grid, block>>>(
+        laplacian_orth_z_kernel<3><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, a, b, diag_coeff, ncol);
@@ -433,7 +436,8 @@ void laplacian_nonorth_z_gpu(
     double a, double b, double c,
     double diag_coeff,
     bool has_xy, bool has_xz, bool has_yz,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -443,7 +447,7 @@ void laplacian_nonorth_z_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 4), ceildiv(nz, 4));
 
     for (int n = 0; n < ncol; ++n) {
-        laplacian_nonorth_z_kernel<<<grid, block>>>(
+        laplacian_nonorth_z_kernel<<<grid, block, 0, stream>>>(
             d_x_ex + n * nd_ex, d_V, d_y + n * nd,
             nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex,
             a, b, diag_coeff,
@@ -539,7 +543,8 @@ void gradient_z_gpu(
     const cuDoubleComplex* d_x_ex, cuDoubleComplex* d_y,
     int nx, int ny, int nz, int FDn,
     int nx_ex, int ny_ex,
-    int direction, int ncol)
+    int direction, int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -551,15 +556,15 @@ void gradient_z_gpu(
 
     if (FDn == 6) {
         switch (direction) {
-            case 0: gradient_x_z_kernel<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 1: gradient_y_z_kernel<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 2: gradient_z_z_kernel<6><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 0: gradient_x_z_kernel<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_z_kernel<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_z_kernel<6><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
         }
     } else {
         switch (direction) {
-            case 0: gradient_x_z_kernel<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 1: gradient_y_z_kernel<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
-            case 2: gradient_z_z_kernel<3><<<grid, block>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 0: gradient_x_z_kernel<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 1: gradient_y_z_kernel<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
+            case 2: gradient_z_z_kernel<3><<<grid, block, 0, stream>>>(d_x_ex, d_y, nx, ny, nz, nx_ex, ny_ex, nxny_ex, nd, nd_ex, ncol); break;
         }
     }
     CUDA_CHECK(cudaGetLastError());
@@ -579,7 +584,8 @@ void hamiltonian_apply_local_z_gpu(
     bool periodic_x, bool periodic_y, bool periodic_z,
     double diag_coeff,
     bool has_xy, bool has_xz, bool has_yz,
-    double kx_Lx, double ky_Ly, double kz_Lz)
+    double kx_Lx, double ky_Ly, double kz_Lz,
+    cudaStream_t stream)
 {
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
@@ -587,18 +593,18 @@ void hamiltonian_apply_local_z_gpu(
     // Step 1: Complex halo exchange with Bloch phases
     halo_exchange_z_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, ncol,
                         periodic_x, periodic_y, periodic_z,
-                        kx_Lx, ky_Ly, kz_Lz);
+                        kx_Lx, ky_Ly, kz_Lz, stream);
 
     // Step 2: Apply (-0.5*Lap + Veff + c*I)
     if (is_orthogonal) {
         laplacian_orth_z_gpu(d_x_ex, d_Veff, d_Hpsi,
                              nx, ny, nz, FDn, nx_ex, ny_ex,
-                             -0.5, 1.0, c, diag_coeff, ncol);
+                             -0.5, 1.0, c, diag_coeff, ncol, stream);
     } else {
         laplacian_nonorth_z_gpu(d_x_ex, d_Veff, d_Hpsi,
                                 nx, ny, nz, FDn, nx_ex, ny_ex,
                                 -0.5, 1.0, c, diag_coeff,
-                                has_xy, has_xz, has_yz, ncol);
+                                has_xy, has_xz, has_yz, ncol, stream);
     }
 }
 
@@ -799,7 +805,8 @@ void nonlocal_projector_apply_z_gpu(
     const double* d_bloch_fac,   // [n_atoms * 2] on device
     int Nd, int ncol, double dV,
     int n_atoms, int total_nproj,
-    int max_ndc, int max_nproj)
+    int max_ndc, int max_nproj,
+    cudaStream_t stream)
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
@@ -812,7 +819,7 @@ void nonlocal_projector_apply_z_gpu(
     // Step 1: Tiled gather + Chi^T * psi → alpha (2D grid: atoms × columns)
     size_t smem1 = NL_TILE_Z * sizeof(cuDoubleComplex) + 2 * nwarps * sizeof(double);
     dim3 grid_gather(n_atoms, ncol);
-    fused_gather_chitpsi_z_kernel<<<grid_gather, block_size, smem1>>>(
+    fused_gather_chitpsi_z_kernel<<<grid_gather, block_size, smem1, stream>>>(
         d_psi, d_Chi_flat, d_gpos_flat,
         d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
         d_bloch_fac, d_alpha, Nd, ncol, ncol, 0, dV, n_atoms);
@@ -821,7 +828,7 @@ void nonlocal_projector_apply_z_gpu(
     // Step 2: Gamma scaling (Gamma is real)
     {
         int total = total_nproj * ncol;
-        gamma_scale_z_kernel<<<ceildiv(total, block_size), block_size>>>(
+        gamma_scale_z_kernel<<<ceildiv(total, block_size), block_size, 0, stream>>>(
             d_alpha, d_Gamma, total_nproj, ncol);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -829,7 +836,7 @@ void nonlocal_projector_apply_z_gpu(
     // Step 3: Fused Chi * alpha + scatter → Hpsi (2D grid: atoms × columns)
     size_t smem3 = (size_t)max_nproj * sizeof(cuDoubleComplex);
     dim3 grid_scatter(n_atoms, ncol);
-    fused_chialpha_scatter_z_kernel<<<grid_scatter, block_size, smem3>>>(
+    fused_chialpha_scatter_z_kernel<<<grid_scatter, block_size, smem3, stream>>>(
         d_Hpsi, d_Chi_flat, d_gpos_flat,
         d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
         d_bloch_fac, d_alpha, Nd, ncol, ncol, 0, n_atoms);
@@ -852,7 +859,7 @@ void nonlocal_projector_apply_z_gpu(
     const int* h_ndc_arr,
     const int* h_nproj_arr,
     const int* h_IP_displ,
-    int max_ndc, int max_nproj)
+    int max_ndc, int max_nproj, cudaStream_t stream)
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
@@ -863,18 +870,18 @@ void nonlocal_projector_apply_z_gpu(
     CUDA_CHECK(cudaMallocAsync(&d_nproj, n_atoms * sizeof(int), 0));
     CUDA_CHECK(cudaMallocAsync(&d_ip, n_atoms * sizeof(int), 0));
 
-    CUDA_CHECK(cudaMemcpy(d_gpos_off, h_gpos_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_chi_off, h_chi_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_ndc, h_ndc_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_nproj, h_nproj_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_ip, h_IP_displ, n_atoms * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_gpos_off, h_gpos_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_chi_off, h_chi_offsets, (n_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_ndc, h_ndc_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_nproj, h_nproj_arr, n_atoms * sizeof(int), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_ip, h_IP_displ, n_atoms * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     nonlocal_projector_apply_z_gpu(
         d_psi, d_Hpsi, d_Chi_flat, d_gpos_flat,
         d_gpos_off, d_chi_off, d_ndc, d_nproj, d_ip,
         d_Gamma, d_alpha, d_bloch_fac,
         Nd, ncol, dV, n_atoms, total_nproj,
-        max_ndc, max_nproj);
+        max_ndc, max_nproj, stream);
 
     cudaFreeAsync(d_gpos_off, 0); cudaFreeAsync(d_chi_off, 0);
     cudaFreeAsync(d_ndc, 0); cudaFreeAsync(d_nproj, 0); cudaFreeAsync(d_ip, 0);

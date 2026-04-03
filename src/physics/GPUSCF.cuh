@@ -35,17 +35,13 @@ public:
 
     // Run full GPU SCF. Returns total energy.
     // Prerequisites: Crystal/Influence/Vnl already set up on CPU.
+    // Grid, domain, stencil, halo, bandcomm, spin/kpt params are extracted from ctx_.
     double run(Wavefunction& wfn,
                const SCFParams& params,
-               const FDGrid& grid,
-               const Domain& domain,
-               const FDStencil& stencil,
                const Hamiltonian& hamiltonian,
-               const HaloExchange& halo,
                const NonlocalProjector* vnl,
                const Crystal& crystal,
                const std::vector<AtomNlocInfluence>& nloc_influence,
-               const MPIComm& bandcomm,
                int Nelectron,
                int Natom,
                const double* rho_init,       // initial total density (Nd)
@@ -55,17 +51,8 @@ public:
                XCType xc_type,
                const double* rho_core,       // NLCC core density (may be null)
                bool is_gga,
-               // Spin/k-point parameters (optional, default = gamma Nspin=1)
-               int Nspin = 1,
-               bool is_kpt = false,
-               const KPoints* kpoints = nullptr,
-               const std::vector<double>& kpt_weights = std::vector<double>{1.0},
-               int Nspin_local = 1,
-               int spin_start = 0,
-               int kpt_start = 0,
                const double* rho_up_init = nullptr,  // spin-up density (Nd, for Nspin=2)
-               const double* rho_dn_init = nullptr,   // spin-down density (Nd, for Nspin=2)
-               bool is_soc = false,                    // SOC mode (spinor wavefunctions)
+               const double* rho_dn_init = nullptr,  // spin-down density (Nd, for Nspin=2)
                // Hybrid EXX parameters (optional)
                ExactExchange* exx = nullptr,           // CPU EXX operator (non-owning)
                XCType xc_type_hybrid = XCType::LDA_PZ);  // for is_hybrid() check
@@ -77,12 +64,11 @@ public:
 
     // Compute nonlocal forces, kinetic + nonlocal stress on GPU.
     // Psi stays on device. Only tiny results (3*Natom + 6 + 6 + 1) downloaded.
+    // Domain/grid are extracted from ctx_.
     void compute_force_stress(
         const Wavefunction& wfn,      // for occupations
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
-        const Domain& domain,
-        const FDGrid& grid,
         double* f_nloc,               // [3 * n_atom] nonlocal forces
         double* stress_k,             // [6] kinetic stress (Voigt)
         double* stress_nl,            // [6] nonlocal stress (Voigt)
@@ -90,37 +76,27 @@ public:
 
     // Compute SOC nonlocal forces on GPU.
     // Psi is uploaded from wfn (spinor complex), SOC data already on device.
+    // kpt_weights, kpoints, kpt_start extracted from ctx_.
     void compute_soc_force(
         const Wavefunction& wfn,
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
-        const Domain& domain,
-        const FDGrid& grid,
-        const std::vector<double>& kpt_weights,
-        const KPoints* kpoints,
-        int kpt_start,
         double* f_soc);  // [3 * n_atoms]
 
     // Compute SOC nonlocal stress tensor on GPU.
     // GPU computes gradients; position-weighted beta and reduction done on CPU.
+    // kpt_weights, kpoints, kpt_start extracted from ctx_.
     void compute_soc_stress(
         const Wavefunction& wfn,
         const Crystal& crystal,
         const std::vector<AtomNlocInfluence>& nloc_influence,
-        const Domain& domain,
-        const FDGrid& grid,
-        const std::vector<double>& kpt_weights,
-        const KPoints* kpoints,
-        int kpt_start,
         double* stress_soc,   // [6] Voigt stress
         double* energy_soc);  // scalar SOC energy
 
     // Compute mGGA psi stress and tau·vtau dot product on GPU (avoids D2H transfer)
+    // Domain/grid/Nspin extracted from ctx_.
     void compute_mgga_stress(
         const Wavefunction& wfn,
-        const Domain& domain,
-        const FDGrid& grid,
-        int Nspin,
         double* stress_mgga,       // [6] mGGA psi stress (Voigt), unnormalized
         double* tau_vtau_dot);     // scalar: ∫ τ·vtau dV
 

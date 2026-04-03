@@ -79,7 +79,7 @@ void Stress::compute(
                         config.xc == XCType::MGGA_R2SCAN);
         if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
             scf.gpu_runner()->compute_mgga_stress(
-                wfn, ctx.domain(), ctx.grid(), Nspin_calc,
+                wfn,
                 gpu_mgga_stress.data(), &gpu_tau_vtau_dot_val);
             gpu_mgga_ptr = gpu_mgga_stress.data();
             gpu_dot_ptr = &gpu_tau_vtau_dot_val;

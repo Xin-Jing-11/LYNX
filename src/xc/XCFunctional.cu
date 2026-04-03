@@ -5,6 +5,7 @@
 #include <xc.h>
 #include <xc_funcs.h>
 #include "core/gpu_common.cuh"
+#include "xc/XCFunctional.cuh"
 
 namespace lynx {
 namespace gpu {
@@ -64,10 +65,10 @@ __global__ void lda_pw_kernel(
     vxc[i] = vx + vc;
 }
 
-void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N) {
+void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    lda_pw_kernel<<<grid, bs>>>(d_rho, d_exc, d_vxc, N);
+    lda_pw_kernel<<<grid, bs, 0, stream>>>(d_rho, d_exc, d_vxc, N);
 }
 
 // ============================================================
@@ -125,10 +126,10 @@ __global__ void lda_pz_kernel(
     vxc[i] = vx + vc;
 }
 
-void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N) {
+void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    lda_pz_kernel<<<grid, bs>>>(d_rho, d_exc, d_vxc, N);
+    lda_pz_kernel<<<grid, bs, 0, stream>>>(d_rho, d_exc, d_vxc, N);
 }
 
 // ============================================================
@@ -249,10 +250,11 @@ __global__ void lda_pw_spin_kernel(
 }
 
 void lda_pw_spin_gpu(const double* d_rho_up, const double* d_rho_dn,
-                      double* d_exc, double* d_vxc_up, double* d_vxc_dn, int N) {
+                      double* d_exc, double* d_vxc_up, double* d_vxc_dn, int N,
+                      cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    lda_pw_spin_kernel<<<grid, bs>>>(d_rho_up, d_rho_dn, d_exc, d_vxc_up, d_vxc_dn, N);
+    lda_pw_spin_kernel<<<grid, bs, 0, stream>>>(d_rho_up, d_rho_dn, d_exc, d_vxc_up, d_vxc_dn, N);
 }
 
 // ============================================================
@@ -418,10 +420,11 @@ __global__ void gga_pbe_kernel(
 }
 
 void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
-                  double* d_exc, double* d_vxc, double* d_v2xc, int N) {
+                  double* d_exc, double* d_vxc, double* d_v2xc, int N,
+                  cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    gga_pbe_kernel<<<grid, bs>>>(d_rho, d_sigma, d_exc, d_vxc, d_v2xc, N);
+    gga_pbe_kernel<<<grid, bs, 0, stream>>>(d_rho, d_sigma, d_exc, d_vxc, d_v2xc, N);
 }
 
 // ============================================================
@@ -739,10 +742,11 @@ __global__ void gga_pbe_spin_kernel(
 }
 
 void gga_pbe_spin_gpu(const double* d_rho, const double* d_sigma,
-                       double* d_exc, double* d_vxc, double* d_v2xc, int N) {
+                       double* d_exc, double* d_vxc, double* d_v2xc, int N,
+                       cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    gga_pbe_spin_kernel<<<grid, bs>>>(d_rho, d_sigma, d_exc, d_vxc, d_v2xc, N);
+    gga_pbe_spin_kernel<<<grid, bs, 0, stream>>>(d_rho, d_sigma, d_exc, d_vxc, d_v2xc, N);
 }
 
 // ============================================================
@@ -994,10 +998,11 @@ __global__ void mgga_scan_kernel(
 }
 
 void mgga_scan_gpu(const double* d_rho, const double* d_sigma, const double* d_tau,
-                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N) {
+                    double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N,
+                    cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    mgga_scan_kernel<<<grid, bs>>>(d_rho, d_sigma, d_tau, d_exc, d_vxc, d_v2xc, d_vtau, N);
+    mgga_scan_kernel<<<grid, bs, 0, stream>>>(d_rho, d_sigma, d_tau, d_exc, d_vxc, d_v2xc, d_vtau, N);
 }
 
 // ============================================================
@@ -1405,10 +1410,11 @@ void mgga_scan_spin_gpu(
     const double* d_tau_up, const double* d_tau_dn,
     double* d_exc, double* d_vxc_up, double* d_vxc_dn,
     double* d_v2xc_c, double* d_v2xc_x_up, double* d_v2xc_x_dn,
-    double* d_vtau_up, double* d_vtau_dn, int N) {
+    double* d_vtau_up, double* d_vtau_dn, int N,
+    cudaStream_t stream) {
     int bs = 256;
     int grid = (N + bs - 1) / bs;
-    mgga_scan_spin_kernel<<<grid, bs>>>(
+    mgga_scan_spin_kernel<<<grid, bs, 0, stream>>>(
         d_rho_up, d_rho_dn, d_sigma_uu, d_sigma_dd, d_sigma_tot,
         d_tau_up, d_tau_dn,
         d_exc, d_vxc_up, d_vxc_dn,

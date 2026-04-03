@@ -18,6 +18,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuComplex.h>
+#include "operators/SOCOperators.cuh"
 #include <math.h>
 #include <stdio.h>
 
@@ -391,12 +392,13 @@ void spinor_density_kernel(
 void spinor_offdiag_veff_gpu(
     cuDoubleComplex* d_Hpsi, const cuDoubleComplex* d_psi,
     const double* d_V_ud_re, const double* d_V_ud_im,
-    int Nd_d, int ncol)
+    int Nd_d, int ncol,
+    cudaStream_t stream)
 {
     int threads = 256;
     int blocks = (Nd_d + threads - 1) / threads;
     for (int n = 0; n < ncol; ++n) {
-        spinor_offdiag_veff_kernel<<<blocks, threads>>>(
+        spinor_offdiag_veff_kernel<<<blocks, threads, 0, stream>>>(
             d_Hpsi + n * 2 * Nd_d, d_psi + n * 2 * Nd_d,
             d_V_ud_re, d_V_ud_im, Nd_d, 1);
     }
@@ -415,7 +417,8 @@ void soc_apply_z_gpu(
     cuDoubleComplex* d_alpha_up, cuDoubleComplex* d_alpha_dn,
     int Nd_d, int ncol, double dV,
     int n_influence, int total_soc_nproj,
-    int max_ndc_soc, int max_nproj_soc)
+    int max_ndc_soc, int max_nproj_soc,
+    cudaStream_t stream)
 {
     if (n_influence == 0 || total_soc_nproj == 0) return;
 
@@ -433,7 +436,7 @@ void soc_apply_z_gpu(
         dim3 grid(n_influence);
         dim3 block(threads);
 
-        soc_gather_alpha_z_kernel<<<grid, block>>>(
+        soc_gather_alpha_z_kernel<<<grid, block, 0, stream>>>(
             d_psi, d_Chi_soc_flat, d_gpos_flat,
             d_gpos_offsets, d_chi_soc_offsets,
             d_ndc_arr, d_nproj_soc_arr, d_IP_displ_soc,
@@ -442,7 +445,7 @@ void soc_apply_z_gpu(
             Nd_d, ncol, ncol, 0, dV, n_influence);
     }
 
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 
     // 3. Launch scatter kernel: one block per influence atom
     //    The scatter kernel uses the same bloch_fac array as the gather kernel
@@ -456,7 +459,7 @@ void soc_apply_z_gpu(
         dim3 grid(n_influence);
         dim3 block(threads);
 
-        soc_scatter_z_kernel<<<grid, block>>>(
+        soc_scatter_z_kernel<<<grid, block, 0, stream>>>(
             d_Hpsi, d_Chi_soc_flat, d_gpos_flat,
             d_gpos_offsets, d_chi_soc_offsets,
             d_ndc_arr, d_nproj_soc_arr, d_IP_displ_soc,
@@ -466,7 +469,7 @@ void soc_apply_z_gpu(
             Nd_d, ncol, ncol, 0, n_influence);
     }
 
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 }
 
 
@@ -479,16 +482,17 @@ void soc_apply_z_gpu(
 void spinor_density_gpu(
     const cuDoubleComplex* d_psi, const double* d_occ,
     double* d_rho, double* d_mag_x, double* d_mag_y, double* d_mag_z,
-    int Nd_d, int Nband, double weight)
+    int Nd_d, int Nband, double weight,
+    cudaStream_t stream)
 {
     int threads = 256;
     int blocks = (Nd_d + threads - 1) / threads;
 
-    spinor_density_kernel<<<blocks, threads>>>(
+    spinor_density_kernel<<<blocks, threads, 0, stream>>>(
         d_psi, d_occ, d_rho, d_mag_x, d_mag_y, d_mag_z,
         Nd_d, Nband, weight);
 
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream);
 }
 
 

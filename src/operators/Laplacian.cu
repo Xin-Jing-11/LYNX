@@ -1,5 +1,6 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
+#include "operators/Laplacian.cuh"
 
 namespace lynx {
 namespace gpu {
@@ -43,7 +44,8 @@ void laplacian_orth_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -53,7 +55,7 @@ void laplacian_orth_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 4), ceildiv(nz, 4));
 
     for (int n = 0; n < ncol; ++n) {
-        laplacian_orth_kernel<<<grid, block>>>(
+        laplacian_orth_kernel<<<grid, block, 0, stream>>>(
             d_x_ex + n * nd_ex, d_V, d_y + n * nd,
             nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex,
             a, b, diag_coeff);
@@ -110,7 +112,8 @@ void laplacian_orth_v2_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -121,12 +124,12 @@ void laplacian_orth_v2_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz);
 
     if (FDn == 6) {
-        laplacian_orth_kernel_v2<6><<<grid, block>>>(
+        laplacian_orth_kernel_v2<6><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, a, b, diag_coeff, ncol);
     } else {
-        laplacian_orth_kernel_v2<3><<<grid, block>>>(
+        laplacian_orth_kernel_v2<3><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, a, b, diag_coeff, ncol);
@@ -181,7 +184,8 @@ void laplacian_orth_v6_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -191,12 +195,12 @@ void laplacian_orth_v6_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
 
     if (FDn == 6) {
-        laplacian_orth_kernel_v6<6><<<grid, block>>>(
+        laplacian_orth_kernel_v6<6><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, a, b, diag_coeff, ncol);
     } else {
-        laplacian_orth_kernel_v6<3><<<grid, block>>>(
+        laplacian_orth_kernel_v6<3><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, a, b, diag_coeff, ncol);
@@ -276,7 +280,8 @@ void laplacian_orth_v7_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     // Re-upload precomputed a*D2 coefficients if 'a' changed
     if (!s_coeffs_initialized || a != s_cached_a) {
@@ -298,12 +303,12 @@ void laplacian_orth_v7_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz * ncol);
 
     if (FDn == 6) {
-        laplacian_orth_kernel_v7<6><<<grid, block>>>(
+        laplacian_orth_kernel_v7<6><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, b, diag_coeff, ncol);
     } else {
-        laplacian_orth_kernel_v7<3><<<grid, block>>>(
+        laplacian_orth_kernel_v7<3><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, b, diag_coeff, ncol);
@@ -360,7 +365,8 @@ void laplacian_orth_v8_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -370,12 +376,12 @@ void laplacian_orth_v8_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz);
 
     if (FDn == 6) {
-        laplacian_orth_kernel_v8<6><<<grid, block>>>(
+        laplacian_orth_kernel_v8<6><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, b, diag_coeff, ncol);
     } else {
-        laplacian_orth_kernel_v8<3><<<grid, block>>>(
+        laplacian_orth_kernel_v8<3><<<grid, block, 0, stream>>>(
             d_x_ex, d_V, d_y,
             nx, ny, nz, nx_ex, ny_ex, nxny_ex,
             nd, nd_ex, b, diag_coeff, ncol);
@@ -476,7 +482,8 @@ void laplacian_orth_v3_gpu(
     int nx_ex, int ny_ex,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     constexpr int BX = 32, BY = 8;
     constexpr int FDN = 6;
@@ -489,7 +496,7 @@ void laplacian_orth_v3_gpu(
     dim3 block(BX, BY);
     dim3 grid(ceildiv(nx, BX), ceildiv(ny, BY), nz);
 
-    laplacian_orth_kernel_v3<FDN, BX, BY><<<grid, block, smem_bytes>>>(
+    laplacian_orth_kernel_v3<FDN, BX, BY><<<grid, block, smem_bytes, stream>>>(
         d_x_ex, d_V, d_y,
         nx, ny, nz, nx_ex, ny_ex, nxny_ex,
         nd, nd_ex, a, b, diag_coeff, ncol);
@@ -564,7 +571,8 @@ void laplacian_orth_fused_gpu(
     int nx, int ny, int nz, int FDn,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny = nx * ny;
     int nd = nxny * nz;
@@ -573,12 +581,12 @@ void laplacian_orth_fused_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 8), nz);
 
     if (FDn == 6) {
-        laplacian_orth_fused_kernel<6><<<grid, block>>>(
+        laplacian_orth_fused_kernel<6><<<grid, block, 0, stream>>>(
             d_psi, d_V, d_y,
             nx, ny, nz, nxny, nd,
             a, b, diag_coeff, ncol);
     } else {
-        laplacian_orth_fused_kernel<3><<<grid, block>>>(
+        laplacian_orth_fused_kernel<3><<<grid, block, 0, stream>>>(
             d_psi, d_V, d_y,
             nx, ny, nz, nxny, nd,
             a, b, diag_coeff, ncol);
@@ -677,7 +685,8 @@ void laplacian_orth_v5_gpu(
     int nx, int ny, int nz, int FDn,
     double a, double b, double c,
     double diag_coeff,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     constexpr int BX = 32, BY = 8;
     constexpr int FDN = 6;
@@ -686,7 +695,7 @@ void laplacian_orth_v5_gpu(
     dim3 block(BX, BY);  // 256 threads
     dim3 grid(ceildiv(nx, BX), ceildiv(ny, BY), nz);
 
-    laplacian_orth_fused_smem_kernel<FDN, BX, BY><<<grid, block, smem_size>>>(
+    laplacian_orth_fused_smem_kernel<FDN, BX, BY><<<grid, block, smem_size, stream>>>(
         d_psi, d_V, d_y,
         nx, ny, nz, nx * ny, nx * ny * nz,
         a, b, diag_coeff, ncol);
@@ -767,7 +776,8 @@ void laplacian_nonorth_gpu(
     double a, double b, double c,
     double diag_coeff,
     bool has_xy, bool has_xz, bool has_yz,
-    int ncol)
+    int ncol,
+    cudaStream_t stream)
 {
     int nxny_ex = nx_ex * ny_ex;
     int nd = nx * ny * nz;
@@ -777,7 +787,7 @@ void laplacian_nonorth_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 4), ceildiv(nz, 4));
 
     for (int n = 0; n < ncol; ++n) {
-        laplacian_nonorth_kernel<<<grid, block>>>(
+        laplacian_nonorth_kernel<<<grid, block, 0, stream>>>(
             d_x_ex + n * nd_ex, d_V, d_y + n * nd,
             nx, ny, nz, FDn, nx_ex, ny_ex, nxny_ex,
             a, b, diag_coeff,

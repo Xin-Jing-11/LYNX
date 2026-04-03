@@ -14,116 +14,11 @@
 #include <numeric>
 
 #include "core/gpu_common.cuh"
-
-// Forward declarations for GPU functions
-namespace lynx { namespace gpu {
-    void upload_stencil_coefficients(
-        const double* D2x, const double* D2y, const double* D2z,
-        const double* D1x, const double* D1y, const double* D1z,
-        const double* D2xy, const double* D2xz, const double* D2yz,
-        int FDn);
-    void halo_exchange_gpu(const double* d_x, double* d_x_ex,
-                           int nx, int ny, int nz, int FDn, int ncol,
-                           bool px, bool py, bool pz);
-    void halo_exchange_batched_gpu(const double* d_x, double* d_x_ex,
-                                    int nx, int ny, int nz, int FDn, int ncol,
-                                    bool px, bool py, bool pz);
-    void halo_exchange_batched_nomemset_gpu(const double* d_x, double* d_x_ex,
-                                             int nx, int ny, int nz, int FDn, int ncol,
-                                             bool px, bool py, bool pz);
-    void laplacian_orth_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                            int nx, int ny, int nz, int FDn,
-                            int nx_ex, int ny_ex,
-                            double a, double b, double c,
-                            double diag_coeff, int ncol);
-    void laplacian_nonorth_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                               int nx, int ny, int nz, int FDn,
-                               int nx_ex, int ny_ex,
-                               double a, double b, double c,
-                               double diag_coeff,
-                               bool has_xy, bool has_xz, bool has_yz,
-                               int ncol);
-    void gradient_gpu(const double* d_x_ex, double* d_y,
-                      int nx, int ny, int nz, int FDn,
-                      int nx_ex, int ny_ex,
-                      int direction, int ncol);
-    void hamiltonian_apply_local_gpu(
-        const double* d_psi, const double* d_Veff, double* d_Hpsi,
-        double* d_x_ex,
-        int nx, int ny, int nz, int FDn, int ncol, double c,
-        bool is_orthogonal,
-        bool periodic_x, bool periodic_y, bool periodic_z,
-        double diag_coeff,
-        bool has_xy, bool has_xz, bool has_yz);
-    // Device-metadata interface (hot path, 3 kernel launches)
-    void nonlocal_projector_apply_gpu(
-        const double* d_psi, double* d_Hpsi,
-        const double* d_Chi_flat, const int* d_gpos_flat,
-        const int* d_gpos_offsets, const int* d_chi_offsets,
-        const int* d_ndc_arr, const int* d_nproj_arr,
-        const int* d_IP_displ, const double* d_Gamma,
-        double* d_alpha,
-        int Nd, int ncol, double dV,
-        int n_atoms, int total_nproj,
-        int max_ndc, int max_nproj);
-    // Convenience wrapper: takes host-side metadata, uploads to device
-    void nonlocal_projector_apply_gpu(
-        const double* d_psi, double* d_Hpsi,
-        const double* d_Chi_flat, const int* d_gpos_flat,
-        const double* d_Gamma, double* d_alpha,
-        int Nd, int ncol, double dV,
-        int n_atoms, int total_nproj,
-        const int* h_gpos_offsets, const int* h_chi_offsets,
-        const int* h_ndc_arr, const int* h_nproj_arr, const int* h_IP_displ,
-        int max_ndc, int max_nproj);
-    // V2: Template FDn + multi-column batching
-    void laplacian_orth_v2_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                                int nx, int ny, int nz, int FDn,
-                                int nx_ex, int ny_ex,
-                                double a, double b, double c,
-                                double diag_coeff, int ncol);
-    // V3: Shared memory 2D tiling + z-sweep (uses x_ex)
-    void laplacian_orth_v3_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                                int nx, int ny, int nz, int FDn,
-                                int nx_ex, int ny_ex,
-                                double a, double b, double c,
-                                double diag_coeff, int ncol);
-    // V4: Fused periodic (no x_ex, no halo exchange)
-    void laplacian_orth_fused_gpu(const double* d_psi, const double* d_V, double* d_y,
-                                   int nx, int ny, int nz, int FDn,
-                                   double a, double b, double c,
-                                   double diag_coeff, int ncol);
-    // V5: Fused periodic + shared memory
-    void laplacian_orth_v5_gpu(const double* d_psi, const double* d_V, double* d_y,
-                                int nx, int ny, int nz, int FDn,
-                                double a, double b, double c,
-                                double diag_coeff, int ncol);
-    // V6: One column per block (low register pressure)
-    void laplacian_orth_v6_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                                int nx, int ny, int nz, int FDn,
-                                int nx_ex, int ny_ex,
-                                double a, double b, double c,
-                                double diag_coeff, int ncol);
-    // V7: V6 + precomputed a*coeff for FMA
-    void upload_precomputed_coefficients(const double* D2x, const double* D2y, const double* D2z,
-                                          double a, int FDn);
-    void laplacian_orth_v7_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                                int nx, int ny, int nz, int FDn,
-                                int nx_ex, int ny_ex,
-                                double a, double b, double c,
-                                double diag_coeff, int ncol);
-    // V8: Multi-column loop + precomputed a*coeff (best of V2+V7)
-    void laplacian_orth_v8_gpu(const double* d_x_ex, const double* d_V, double* d_y,
-                                int nx, int ny, int nz, int FDn,
-                                int nx_ex, int ny_ex,
-                                double a, double b, double c,
-                                double diag_coeff, int ncol);
-    // Gradient V2: template FDn + multi-column batching
-    void gradient_v2_gpu(const double* d_x_ex, double* d_y,
-                          int nx, int ny, int nz, int FDn,
-                          int nx_ex, int ny_ex,
-                          int direction, int ncol);
-}}
+#include "parallel/HaloExchange.cuh"
+#include "operators/Laplacian.cuh"
+#include "operators/Gradient.cuh"
+#include "operators/Hamiltonian.cuh"
+#include "operators/NonlocalProjector.cuh"
 
 using namespace lynx::gpu;
 
@@ -949,7 +844,7 @@ static void bench_hamiltonian_halo_variants(int N, int ncol, const double* D2x, 
 
     auto bench_ham = [&](const char* label, auto halo_fn) {
         for (int it = 0; it < 5; ++it) {
-            halo_fn(d_psi, d_x_ex, N, N, N, FDn, ncol, true, true, true);
+            halo_fn(d_psi, d_x_ex, N, N, N, FDn, ncol, true, true, true, 0);
             laplacian_orth_v2_gpu(d_x_ex, d_Veff, d_Hpsi, N, N, N, FDn, nx_ex, ny_ex,
                                   -0.5, 1.0, 0.0, diag_coeff, ncol);
         }
@@ -957,7 +852,7 @@ static void bench_hamiltonian_halo_variants(int N, int ncol, const double* D2x, 
 
         cudaEventRecord(start);
         for (int it = 0; it < gpu_iters; ++it) {
-            halo_fn(d_psi, d_x_ex, N, N, N, FDn, ncol, true, true, true);
+            halo_fn(d_psi, d_x_ex, N, N, N, FDn, ncol, true, true, true, 0);
             laplacian_orth_v2_gpu(d_x_ex, d_Veff, d_Hpsi, N, N, N, FDn, nx_ex, ny_ex,
                                   -0.5, 1.0, 0.0, diag_coeff, ncol);
         }

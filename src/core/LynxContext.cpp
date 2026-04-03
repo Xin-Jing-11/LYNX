@@ -2,6 +2,10 @@
 #include "core/ParameterDefaults.hpp"
 #include "io/OutputWriter.hpp"
 
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 #include <omp.h>
 #include <thread>
 #include <algorithm>
@@ -42,6 +46,10 @@ LynxContext::~LynxContext() {
 #if defined(USE_MKL) && !defined(USE_CUDA)
             free_fft_descriptors();
 #endif
+#ifdef USE_CUDA
+            gpu::GPUContext::set_instance(nullptr);
+            gpu_ctx_.reset();
+#endif
         }
     }
 }
@@ -49,6 +57,10 @@ LynxContext::~LynxContext() {
 void LynxContext::reset() {
 #if defined(USE_MKL) && !defined(USE_CUDA)
     free_fft_descriptors();
+#endif
+#ifdef USE_CUDA
+    gpu::GPUContext::set_instance(nullptr);
+    gpu_ctx_.reset();
 #endif
     lattice_.reset();
     grid_.reset();
@@ -180,6 +192,31 @@ void LynxContext::initialize(SystemConfig& config, MPI_Comm world_comm) {
 
     // ── Nstates is stored but Nelectron/Natom are set later ──────
     Nstates_ = config.Nstates;
+
+#ifdef USE_CUDA
+    // ── Create GPU context (streams, handles, warmup) ─────────
+    {
+        int cuda_device_count = 0;
+        cudaGetDeviceCount(&cuda_device_count);
+        if (cuda_device_count > 0) {
+            // Select GPU based on local rank (for multi-GPU nodes)
+            MPI_Comm node_comm;
+            MPI_Comm_split_type(world_comm, MPI_COMM_TYPE_SHARED, 0,
+                                MPI_INFO_NULL, &node_comm);
+            int local_rank;
+            MPI_Comm_rank(node_comm, &local_rank);
+            MPI_Comm_free(&node_comm);
+            cudaSetDevice(local_rank % cuda_device_count);
+
+            gpu_ctx_ = std::make_unique<gpu::GPUContext>();
+            gpu::GPUContext::set_instance(gpu_ctx_.get());
+            if (rank_ == 0) {
+                std::printf("GPU context initialized (device %d of %d)\n",
+                            local_rank % cuda_device_count, cuda_device_count);
+            }
+        }
+    }
+#endif
 
     initialized_ = true;
 }

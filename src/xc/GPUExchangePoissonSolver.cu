@@ -1,5 +1,6 @@
 #ifdef USE_CUDA
 #include "xc/GPUExchangePoissonSolver.cuh"
+#include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 #include <cstdio>
 #include <cassert>
@@ -127,6 +128,11 @@ void GPUExchangePoissonSolver::create_plans(int ncol) {
         assert(false);
     }
 
+    // Bind plans to compute_stream so FFTs run in the correct stream
+    cudaStream_t cs = GPUContext::instance().compute_stream;
+    cufftSetStream(plan_r2c_, cs);
+    cufftSetStream(plan_c2r_, cs);
+
     plans_created_ = true;
     max_ncol_ = ncol;
 }
@@ -162,6 +168,11 @@ void GPUExchangePoissonSolver::create_plans_z2z(int ncol) {
         assert(false);
     }
 
+    // Bind plans to compute_stream so FFTs run in the correct stream
+    cudaStream_t cs = GPUContext::instance().compute_stream;
+    cufftSetStream(plan_z2z_fwd_, cs);
+    cufftSetStream(plan_z2z_inv_, cs);
+
     plans_created_ = true;
     max_ncol_ = ncol;
 }
@@ -182,7 +193,9 @@ void GPUExchangePoissonSolver::setup(int Nx, int Ny, int Nz,
 
     size_t pois_bytes = Ndc_ * sizeof(double);
     CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
-    CUDA_CHECK(cudaMemcpy(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice));
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
+    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, stream));
 
     size_t work_bytes = (size_t)Ndc_ * max_ncol * sizeof(cufftDoubleComplex);
     CUDA_CHECK(cudaMalloc(&d_fft_work_, work_bytes));
@@ -203,6 +216,8 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
                                           const int* Kptshift_map, int Nkpts_sym, int Nkpts_hf,
                                           int max_ncol) {
     cleanup();
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
 
     Nx_ = Nx; Ny_ = Ny; Nz_ = Nz;
     Nd_ = Nx * Ny * Nz;
@@ -216,22 +231,22 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
     // Upload all Poisson constants [Nd * Nkpts_shift]
     size_t pois_bytes = (size_t)Nd_ * Nkpts_shift * sizeof(double);
     CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
-    CUDA_CHECK(cudaMemcpy(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, stream));
 
     // Upload phase factors [Nd * (Nkpts_shift - 1)] complex each
     if (Nkpts_shift > 1) {
         size_t phase_bytes = (size_t)Nd_ * (Nkpts_shift - 1) * sizeof(cuDoubleComplex);
         CUDA_CHECK(cudaMalloc(&d_neg_phase_, phase_bytes));
-        CUDA_CHECK(cudaMemcpy(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice, stream));
         CUDA_CHECK(cudaMalloc(&d_pos_phase_, phase_bytes));
-        CUDA_CHECK(cudaMemcpy(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice, stream));
     }
 
     // Upload Kptshift_map [Nkpts_sym * Nkpts_hf]
     int map_size = Nkpts_sym * Nkpts_hf;
     h_Kptshift_map_.assign(Kptshift_map, Kptshift_map + map_size);
     CUDA_CHECK(cudaMalloc(&d_Kptshift_map_, map_size * sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     // Workspace: Z2Z uses [Nd * max_ncol] complex
     size_t work_bytes = (size_t)Nd_ * max_ncol * sizeof(cufftDoubleComplex);
@@ -252,15 +267,17 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
 // ---------------------------------------------------------------------------
 void GPUExchangePoissonSolver::upload_stress_constants(const double* pois_const_stress,
                                                         const double* pois_const_stress2) {
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
     int Nd_per_shift = is_kpt_ ? Nd_ : Ndc_;
     size_t bytes = (size_t)Nd_per_shift * (is_kpt_ ? Nkpts_shift_ : 1) * sizeof(double);
     if (pois_const_stress) {
         if (!d_pois_const_stress_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress_, bytes));
-        CUDA_CHECK(cudaMemcpy(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice, stream));
     }
     if (pois_const_stress2) {
         if (!d_pois_const_stress2_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress2_, bytes));
-        CUDA_CHECK(cudaMemcpy(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice, stream));
     }
 }
 
@@ -285,6 +302,7 @@ void GPUExchangePoissonSolver::solve_batch_stress(double* d_rhs, int ncol, doubl
 void GPUExchangePoissonSolver::solve_batch_impl(double* d_rhs, int ncol, double* d_sol,
                                                   cublasHandle_t cublas,
                                                   const double* d_pconst) {
+    cudaStream_t stream = GPUContext::instance().compute_stream;
     assert(is_setup_ && !is_kpt_);
     if (ncol == 0) return;
 
@@ -313,7 +331,7 @@ void GPUExchangePoissonSolver::solve_batch_impl(double* d_rhs, int ncol, double*
     int total = Ndc_ * ncol;
     int block = 256;
     int grid = (total + block - 1) / block;
-    pointwise_multiply_kernel<<<grid, block>>>(d_fft_work_, d_pconst, Ndc_, total);
+    pointwise_multiply_kernel<<<grid, block, 0, stream>>>(d_fft_work_, d_pconst, Ndc_, total);
     CUDA_CHECK(cudaGetLastError());
 
     // 3. Inverse C2R FFT
@@ -345,6 +363,7 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
                                                 cuDoubleComplex* d_sol,
                                                 cublasHandle_t cublas,
                                                 int kpt_k, int kpt_q) {
+    cudaStream_t stream = GPUContext::instance().compute_stream;
     assert(is_setup_ && is_kpt_);
     if (ncol == 0) return;
 
@@ -373,12 +392,12 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
     int l = h_Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
 
     // 1. Copy rhs to scratch
-    CUDA_CHECK(cudaMemcpy(d_kpt_scratch_, d_rhs, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_kpt_scratch_, d_rhs, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
 
     // 2. Apply negative phase factor
     if (l != 0) {
         const cuDoubleComplex* d_phase = d_neg_phase_ + (size_t)(l - 1) * Nd_;
-        apply_phase_kernel<<<grid, block>>>(d_kpt_scratch_, d_phase, Nd_, total);
+        apply_phase_kernel<<<grid, block, 0, stream>>>(d_kpt_scratch_, d_phase, Nd_, total);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -396,7 +415,7 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
     } else {
         d_alpha = d_pois_const_ + (size_t)Nd_ * (l - 1);
     }
-    pointwise_multiply_z2z_kernel<<<grid, block>>>(d_fft_work_, d_alpha, Nd_, total);
+    pointwise_multiply_z2z_kernel<<<grid, block, 0, stream>>>(d_fft_work_, d_alpha, Nd_, total);
     CUDA_CHECK(cudaGetLastError());
 
     // 5. Inverse Z2Z FFT: fft_work -> sol
@@ -408,13 +427,13 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
 
     // 6. Normalize by 1/Nd
     double inv_Nd = 1.0 / Nd_;
-    scale_z_kernel<<<grid, block>>>(d_sol, inv_Nd, total);
+    scale_z_kernel<<<grid, block, 0, stream>>>(d_sol, inv_Nd, total);
     CUDA_CHECK(cudaGetLastError());
 
     // 7. Apply positive phase factor
     if (l != 0) {
         const cuDoubleComplex* d_phase = d_pos_phase_ + (size_t)(l - 1) * Nd_;
-        apply_phase_kernel<<<grid, block>>>(d_sol, d_phase, Nd_, total);
+        apply_phase_kernel<<<grid, block, 0, stream>>>(d_sol, d_phase, Nd_, total);
         CUDA_CHECK(cudaGetLastError());
     }
 }

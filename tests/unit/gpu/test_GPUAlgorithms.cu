@@ -18,14 +18,14 @@ using namespace lynx::gpu;
 
 // Forward declarations for GPU functions
 namespace lynx { namespace gpu {
-void compute_ata_gpu(const double* d_X, double* d_S, int Nd, int N, double dV);
-void compute_atb_gpu(const double* d_X, const double* d_HX, double* d_Hs, int Nd, int N, double dV);
-void symmetrize_gpu(double* d_Hs, int N);
+void compute_ata_gpu(const double* d_X, double* d_S, int Nd, int N, double dV, cudaStream_t stream = 0);
+void compute_atb_gpu(const double* d_X, const double* d_HX, double* d_Hs, int Nd, int N, double dV, cudaStream_t stream = 0);
+void symmetrize_gpu(double* d_Hs, int N, cudaStream_t stream = 0);
 void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV);
 void rotate_orbitals_gpu(double* d_X, const double* d_Q, double* d_temp, int Nd, int N);
-void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho, int Nd, int Ns, double weight);
-void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N);
-void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N);
+void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho, int Nd, int Ns, double weight, cudaStream_t stream = 0);
+void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
+void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
 
 int aar_gpu(
     void (*op_gpu)(const double* d_x, double* d_Ax),
@@ -37,7 +37,7 @@ int aar_gpu(
     double tol, int max_iter,
     double* d_r, double* d_f, double* d_Ax,
     double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old);
+    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
 }} // namespace
 
 // CPU reference BLAS

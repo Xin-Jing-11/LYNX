@@ -91,6 +91,8 @@ public:
         }
     }
 
+    void set_stream(cudaStream_t s) { stream_ = s; }
+
     size_t used() const { return used_; }
     size_t capacity() const { return used_; }  // grows dynamically
     size_t high_water() const { return high_water_; }
@@ -431,6 +433,10 @@ struct GPUContext {
         CUDA_CHECK(cudaStreamCreate(&compute_stream));
         CUDA_CHECK(cudaStreamCreate(&copy_stream));
 
+        // Bind memory pools to compute stream so async alloc/free is ordered
+        device_pool.set_stream(compute_stream);
+        scratch_pool.set_stream(compute_stream);
+
         // Create all handles, bind to compute_stream
         handles.init(compute_stream);
 
@@ -439,6 +445,9 @@ struct GPUContext {
     }
 
     ~GPUContext() {
+        // Reset pools before destroying streams — pools use stream_ for cudaFreeAsync
+        device_pool.reset();
+        scratch_pool.reset();
         handles.destroy();
         if (copy_stream) cudaStreamDestroy(copy_stream);
         if (compute_stream) cudaStreamDestroy(compute_stream);
@@ -684,11 +693,20 @@ struct GPUContext {
         std::printf("  GPU free: %.1f MB / %.1f MB total\n", free_mem / 1e6, total_mem / 1e6);
     }
 
-    // Singleton access
+    // Global access — returns the GPUContext owned by LynxContext.
+    // Falls back to a process-local static instance for tests/tools
+    // that don't use LynxContext.
     static GPUContext& instance() {
-        static GPUContext ctx;
-        return ctx;
+        if (s_instance_) return *s_instance_;
+        static GPUContext fallback;
+        return fallback;
     }
+
+    // Called by LynxContext to register/unregister the owned instance.
+    static void set_instance(GPUContext* ptr) { s_instance_ = ptr; }
+
+private:
+    static inline GPUContext* s_instance_ = nullptr;
 };
 
 } // namespace gpu
