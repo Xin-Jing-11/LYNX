@@ -1,5 +1,6 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
+#include "operators/Hamiltonian.cuh"
 
 namespace lynx {
 namespace gpu {

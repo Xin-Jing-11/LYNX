@@ -13,6 +13,7 @@
 
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
+#include "physics/GPUForceStress.cuh"
 
 namespace lynx {
 namespace gpu {

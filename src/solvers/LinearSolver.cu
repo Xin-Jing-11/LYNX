@@ -4,6 +4,7 @@
 #include <cstdio>
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
+#include "solvers/LinearSolver.cuh"
 
 namespace lynx {
 namespace gpu {

@@ -1,5 +1,6 @@
 #ifdef USE_CUDA
 #include "core/gpu_common.cuh"
+#include "operators/ComplexOperators.cuh"
 #include <cuComplex.h>
 
 namespace lynx {

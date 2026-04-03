@@ -8,6 +8,7 @@
 #include <vector>
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
+#include "solvers/EigenSolver.cuh"
 
 namespace lynx {
 namespace gpu {

@@ -5,6 +5,7 @@
 #include <xc.h>
 #include <xc_funcs.h>
 #include "core/gpu_common.cuh"
+#include "xc/XCFunctional.cuh"
 
 namespace lynx {
 namespace gpu {

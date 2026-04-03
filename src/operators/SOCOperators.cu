@@ -18,6 +18,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuComplex.h>
+#include "operators/SOCOperators.cuh"
 #include <math.h>
 #include <stdio.h>
 
