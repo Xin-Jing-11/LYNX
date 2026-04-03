@@ -193,7 +193,9 @@ void GPUExchangePoissonSolver::setup(int Nx, int Ny, int Nz,
 
     size_t pois_bytes = Ndc_ * sizeof(double);
     CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
-    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, 0));
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
+    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, stream));
 
     size_t work_bytes = (size_t)Ndc_ * max_ncol * sizeof(cufftDoubleComplex);
     CUDA_CHECK(cudaMalloc(&d_fft_work_, work_bytes));
@@ -214,6 +216,8 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
                                           const int* Kptshift_map, int Nkpts_sym, int Nkpts_hf,
                                           int max_ncol) {
     cleanup();
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
 
     Nx_ = Nx; Ny_ = Ny; Nz_ = Nz;
     Nd_ = Nx * Ny * Nz;
@@ -227,22 +231,22 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
     // Upload all Poisson constants [Nd * Nkpts_shift]
     size_t pois_bytes = (size_t)Nd_ * Nkpts_shift * sizeof(double);
     CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
-    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, 0));
+    CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, stream));
 
     // Upload phase factors [Nd * (Nkpts_shift - 1)] complex each
     if (Nkpts_shift > 1) {
         size_t phase_bytes = (size_t)Nd_ * (Nkpts_shift - 1) * sizeof(cuDoubleComplex);
         CUDA_CHECK(cudaMalloc(&d_neg_phase_, phase_bytes));
-        CUDA_CHECK(cudaMemcpyAsync(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice, 0));
+        CUDA_CHECK(cudaMemcpyAsync(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice, stream));
         CUDA_CHECK(cudaMalloc(&d_pos_phase_, phase_bytes));
-        CUDA_CHECK(cudaMemcpyAsync(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice, 0));
+        CUDA_CHECK(cudaMemcpyAsync(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice, stream));
     }
 
     // Upload Kptshift_map [Nkpts_sym * Nkpts_hf]
     int map_size = Nkpts_sym * Nkpts_hf;
     h_Kptshift_map_.assign(Kptshift_map, Kptshift_map + map_size);
     CUDA_CHECK(cudaMalloc(&d_Kptshift_map_, map_size * sizeof(int)));
-    CUDA_CHECK(cudaMemcpyAsync(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice, 0));
+    CUDA_CHECK(cudaMemcpyAsync(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     // Workspace: Z2Z uses [Nd * max_ncol] complex
     size_t work_bytes = (size_t)Nd_ * max_ncol * sizeof(cufftDoubleComplex);
@@ -263,15 +267,17 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
 // ---------------------------------------------------------------------------
 void GPUExchangePoissonSolver::upload_stress_constants(const double* pois_const_stress,
                                                         const double* pois_const_stress2) {
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
     int Nd_per_shift = is_kpt_ ? Nd_ : Ndc_;
     size_t bytes = (size_t)Nd_per_shift * (is_kpt_ ? Nkpts_shift_ : 1) * sizeof(double);
     if (pois_const_stress) {
         if (!d_pois_const_stress_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress_, bytes));
-        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice, 0));
+        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice, stream));
     }
     if (pois_const_stress2) {
         if (!d_pois_const_stress2_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress2_, bytes));
-        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice, 0));
+        CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice, stream));
     }
 }
 
