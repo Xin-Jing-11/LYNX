@@ -384,6 +384,43 @@ void nonlocal_projector_apply_gpu(
     cudaFreeAsync(d_ndc, 0); cudaFreeAsync(d_nproj, 0); cudaFreeAsync(d_ip, 0);
 }
 
+// ============================================================
+// Host wrapper for fused_gather_chitpsi_kernel (standalone)
+//
+// Launches the gather + Chi^T × psi kernel with the same grid/block/smem
+// configuration as nonlocal_projector_apply_gpu Step 1.
+// Caller is responsible for zeroing d_alpha before the first call.
+// ============================================================
+void nonlocal_gather_chitpsi_gpu(
+    const double* d_psi,
+    const double* d_Chi_flat,
+    const int* d_gpos_flat,
+    const int* d_gpos_offsets,
+    const int* d_chi_offsets,
+    const int* d_ndc_arr,
+    const int* d_nproj_arr,
+    const int* d_IP_displ,
+    double* d_alpha,
+    int Nd, int ncol_this,
+    int ncol_stride,
+    int col_start,
+    double dV, int n_atoms,
+    int max_ndc, int max_nproj,
+    cudaStream_t stream)
+{
+    if (n_atoms == 0) return;
+
+    int block_size = 256;
+    size_t smem = (NL_TILE + block_size / 32) * sizeof(double);
+    dim3 grid(n_atoms, ncol_this);
+
+    fused_gather_chitpsi_kernel<<<grid, block_size, smem, stream>>>(
+        d_psi, d_Chi_flat, d_gpos_flat,
+        d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+        d_alpha, Nd, ncol_this, ncol_stride, col_start, dV, n_atoms);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace gpu
 } // namespace lynx
 #endif // USE_CUDA
