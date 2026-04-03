@@ -551,17 +551,6 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
         }
     }
 
-    // K-point weights
-    std::vector<double> kpt_weights;
-    if (kpoints_) {
-        kpt_weights = kpoints_->normalized_weights();
-    } else {
-        kpt_weights = {1.0};
-    }
-
-    // Detect SOC mode
-    bool is_soc = (wfn.Nspinor() == 2);
-
     // Create and run GPU SCF
     XCType xc_type_gpu = is_hybrid(xc_type) ? hybrid_base_xc(xc_type) : xc_type;
     bool is_gga_gpu = (xc_type_gpu == XCType::GGA_PBE || xc_type_gpu == XCType::GGA_PBEsol ||
@@ -569,17 +558,14 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
     gpu_runner_ = std::make_unique<GPUSCFRunner>();
     gpu_runner_->set_context(*ctx_);
     double Etotal = gpu_runner_->run(
-        wfn, params_, *grid_, *domain_, *stencil_,
-        *hamiltonian_, *halo_, vnl_,
-        *crystal_, *nloc_influence_, *bandcomm_,
+        wfn, params_,
+        *hamiltonian_, vnl_,
+        *crystal_, *nloc_influence_,
         Nelectron, Natom,
         density_.rho_total().data(), rho_b,
         Eself, Ec, xc_type_gpu, rho_core, is_gga_gpu,
-        Nspin, is_kpt_, kpoints_, kpt_weights,
-        Nspin_local_, spin_start_, kpt_start_,
         density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(0).data() : nullptr,
         density_.Nd_d() > 0 && Nspin == 2 ? density_.rho(1).data() : nullptr,
-        is_soc,
         exx_,
         xc_type);
 

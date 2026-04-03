@@ -12,6 +12,10 @@
 #include "parallel/MPIComm.hpp"
 #include "io/InputParser.hpp"
 
+#ifdef USE_CUDA
+#include "core/GPUContext.cuh"
+#endif
+
 #include <memory>
 #include <mpi.h>
 
@@ -86,6 +90,12 @@ public:
     int rank()  const { return rank_; }
     int nproc() const { return nproc_; }
 
+#ifdef USE_CUDA
+    // ── GPU context ───────────────────────────────────────────
+    gpu::GPUContext& gpu_ctx() const { return *gpu_ctx_; }
+    bool has_gpu_ctx() const { return gpu_ctx_ != nullptr; }
+#endif
+
     // ── Setters for deferred initialization (atoms, electrons) ────
     void set_atom_info(int Natom, int Nelectron);
 
@@ -118,6 +128,10 @@ private:
     std::unique_ptr<HaloExchange>     halo_;
     std::unique_ptr<Laplacian>        laplacian_;
     std::unique_ptr<Gradient>         gradient_;
+
+#ifdef USE_CUDA
+    std::unique_ptr<gpu::GPUContext> gpu_ctx_;
+#endif
 
     // Non-owning pointer to the effective bandcomm
     const MPIComm* scf_bandcomm_ = nullptr;

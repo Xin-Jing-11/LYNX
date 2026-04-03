@@ -1294,7 +1294,7 @@ void GPUSCFRunner::hamiltonian_apply_cb(
     // mGGA Hamiltonian term: Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
     // Batched over all ncol bands to minimize kernel launch overhead
     if (s->d_vtau_active_) {
-        auto& ctx = gpu::GPUContext::instance();
+        auto& ctx = s->ctx_->gpu_ctx();
         int Nd = s->Nd_;
         int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
         int bs = 256;
@@ -1361,7 +1361,7 @@ void GPUSCFRunner::hamiltonian_apply_cb(
 
     // GPU exact exchange: Hx -= exx_frac * Xi * (Xi^T * X)
     if (s->exx_active_ && s->d_Xi_ && s->exx_Nocc_ > 0) {
-        auto& ctx = gpu::GPUContext::instance();
+        auto& ctx = s->ctx_->gpu_ctx();
         gpu::apply_Vx_gpu(ctx.cublas,
                           s->d_Xi_, s->Nd_, s->exx_Nocc_,
                           d_psi, s->Nd_, ncol,
@@ -1406,7 +1406,7 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
 
     // mGGA Hamiltonian term (complex): Hpsi -= 0.5 * div(vtau * lapcT * grad(psi))
     if (s->d_vtau_active_) {
-        auto& ctx = gpu::GPUContext::instance();
+        auto& ctx = s->ctx_->gpu_ctx();
         int Nd = s->Nd_;
         int nx_ex = s->nx_ + 2 * s->FDn_, ny_ex = s->ny_ + 2 * s->FDn_;
         int bs = 256;
@@ -1473,7 +1473,7 @@ void GPUSCFRunner::hamiltonian_apply_z_cb(
         int Nkpts = s->kpoints_ ? s->kpoints_->Nkpts() : 1;
         int idx = spin * Nkpts + kpt_loc;
         if (idx >= 0 && idx < (int)s->d_Xi_kpt_.size() && s->d_Xi_kpt_[idx]) {
-            auto& ctx = gpu::GPUContext::instance();
+            auto& ctx = s->ctx_->gpu_ctx();
             gpu::apply_Vx_kpt_gpu(ctx.cublas,
                                    s->d_Xi_kpt_[idx], s->Nd_, s->exx_Nocc_,
                                    d_psi, s->Nd_, ncol,
@@ -1547,7 +1547,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
     // Process in chunks of batch_size bands to limit memory usage
     // Each chunk needs: 4 * Nd * batch_size * 16 bytes (psi_up/dn + Hpsi_up/dn)
     //                 + Nd_ex * batch_size * 16 bytes (x_ex for halo exchange)
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = s->ctx_->gpu_ctx();
     int batch_size = ncol;  // process all at once
 
     // Limit batch_size so total scratch < ~200MB
@@ -1660,7 +1660,7 @@ void GPUSCFRunner::hamiltonian_apply_spinor_z_cb(
 // ============================================================
 void GPUSCFRunner::poisson_op_cb(const double* d_x, double* d_Ax) {
     auto* s = s_instance_;
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = s->ctx_->gpu_ctx();
 
     gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
@@ -1692,7 +1692,7 @@ void GPUSCFRunner::poisson_precond_cb(const double* d_r, double* d_f) {
 // ============================================================
 void GPUSCFRunner::kerker_op_cb(const double* d_x, double* d_Ax) {
     auto* s = s_instance_;
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = s->ctx_->gpu_ctx();
 
     gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
         s->nx_, s->ny_, s->nz_, s->FDn_, 1, true, true, true);
@@ -1735,7 +1735,7 @@ double GPUSCFRunner::gpu_sum(const double* d_x, int N) {
 // GPU XC evaluate (GGA PBE or LDA, orthogonal, non-spin)
 // ============================================================
 void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, int Nd) {
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
     int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
@@ -1839,7 +1839,7 @@ void GPUSCFRunner::gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc, 
 // d_Vxc layout: [up(Nd) | down(Nd)]
 // ============================================================
 void GPUSCFRunner::gpu_xc_evaluate_spin(double* d_rho, double* d_exc, double* d_Vxc, int Nd) {
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
     int nx_ex = nx_ + 2 * FDn_, ny_ex = ny_ + 2 * FDn_;
@@ -2036,7 +2036,7 @@ void GPUSCFRunner::setup_bloch_factors(
 // ============================================================
 int GPUSCFRunner::gpu_poisson_solve(double* d_rho, double* d_phi,
                                      double* d_rhs, int Nd, double tol) {
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
 
@@ -2085,7 +2085,7 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
     //   If Nd_kerker < Nd and beta_mag < 0: Kerker on EACH Nd_kerker-sized column (potential mixing).
     bool kerker_per_col = (beta_mag < 0.0 && Nd_kerker > 0 && Nd_kerker < Nd);
     if (Nd_kerker == 0) Nd_kerker = Nd;
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
 
@@ -2259,15 +2259,10 @@ void GPUSCFRunner::gpu_pulay_mix(double* d_x, const double* d_g,
 double GPUSCFRunner::run(
     Wavefunction& wfn,
     const SCFParams& params,
-    const FDGrid& grid,
-    const Domain& domain,
-    const FDStencil& stencil,
     const Hamiltonian& hamiltonian,
-    const HaloExchange& halo,
     const NonlocalProjector* vnl,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
-    const MPIComm& bandcomm,
     int Nelectron,
     int Natom,
     const double* rho_init,
@@ -2277,19 +2272,26 @@ double GPUSCFRunner::run(
     XCType xc_type,
     const double* rho_core,
     bool is_gga,
-    int Nspin,
-    bool is_kpt,
-    const KPoints* kpoints,
-    const std::vector<double>& kpt_weights_in,
-    int Nspin_local,
-    int spin_start,
-    int kpt_start,
     const double* rho_up_init,
     const double* rho_dn_init,
-    bool is_soc,
     ExactExchange* exx,
     XCType xc_type_hybrid)
 {
+    // Extract infrastructure from LynxContext
+    assert(ctx_ && "GPUSCFRunner: set_context() must be called before run()");
+    const auto& grid = ctx_->grid();
+    const auto& domain = ctx_->domain();
+    const auto& stencil = ctx_->stencil();
+    const auto& halo = ctx_->halo();
+    const auto& bandcomm = ctx_->scf_bandcomm();
+    int Nspin = ctx_->Nspin();
+    bool is_kpt = ctx_->is_kpt();
+    const KPoints* kpoints = &ctx_->kpoints();
+    std::vector<double> kpt_weights_in = kpoints->normalized_weights();
+    int Nspin_local = ctx_->Nspin_local();
+    int spin_start = ctx_->spin_start();
+    int kpt_start = ctx_->kpt_start();
+    bool is_soc = ctx_->is_soc();
     // Store EXX parameters
     exx_cpu_ = exx;
     xc_type_full_ = xc_type_hybrid;
@@ -2364,7 +2366,7 @@ double GPUSCFRunner::run(
     // ============================================================
     // GPU memory allocation + data upload
     // ============================================================
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     int mix_ncol = has_soc_ ? 4 : ((Nspin >= 2) ? 2 : 1);  // SOC: [rho|mx|my|mz]
     int Nspin_buf = has_soc_ ? 2 : Nspin;  // SOC uses spin-polarized XC internally
     ctx.init_scf_buffers(Nd_, nx_, ny_, nz_, FDn_,
@@ -2896,8 +2898,7 @@ double GPUSCFRunner::run(
 
             // --- GPU SOC force ---
             std::vector<double> gpu_f_soc(3 * n_phys, 0.0);
-            compute_soc_force(wfn, crystal, nloc_influence, domain, grid,
-                              kpt_weights_in, kpoints_, kpt_start_, gpu_f_soc.data());
+            compute_soc_force(wfn, crystal, nloc_influence, gpu_f_soc.data());
 
             // --- CPU SOC force (call compute_nonlocal_soc directly) ---
             std::vector<double> cpu_f_soc(3 * n_phys, 0.0);
@@ -2933,8 +2934,7 @@ double GPUSCFRunner::run(
             // --- GPU SOC stress ---
             std::array<double, 6> gpu_stress_soc = {};
             double gpu_energy_soc = 0;
-            compute_soc_stress(wfn, crystal, nloc_influence, domain, grid,
-                               kpt_weights_in, kpoints_, kpt_start_,
+            compute_soc_stress(wfn, crystal, nloc_influence,
                                gpu_stress_soc.data(), &gpu_energy_soc);
 
             // --- CPU SOC stress (call compute_nonlocal_kinetic directly) ---
@@ -3946,7 +3946,7 @@ double GPUSCFRunner::run(
 
             // 2. Build ACE on GPU for each spin channel
             {
-                auto& ctx = gpu::GPUContext::instance();
+                auto& ctx = ctx_->gpu_ctx();
                 for (int s = 0; s < Nspin_local; s++) {
                     int s_glob = spin_start + s;
 
@@ -3985,7 +3985,7 @@ double GPUSCFRunner::run(
             CUDA_CHECK(cudaMalloc(&d_Y_energy, (size_t)Nband * exx_Nocc_ * sizeof(double)));
             double Eexx_est = 0.0;
             {
-                auto& ctx = gpu::GPUContext::instance();
+                auto& ctx = ctx_->gpu_ctx();
                 for (int s = 0; s < Nspin_local; s++) {
                     int s_glob = spin_start + s;
                     std::vector<double> h_occ(Nband);
@@ -4300,7 +4300,7 @@ double GPUSCFRunner::run(
             // Recompute Eexx on GPU with post-SCF orbitals (psi stays on device)
             double Eexx_new = 0.0;
             {
-                auto& ctx = gpu::GPUContext::instance();
+                auto& ctx = ctx_->gpu_ctx();
                 double* d_Y_energy = nullptr;
                 CUDA_CHECK(cudaMalloc(&d_Y_energy, (size_t)Nband * exx_Nocc_ * sizeof(double)));
                 for (int s = 0; s < Nspin_local; s++) {
@@ -4501,7 +4501,7 @@ double GPUSCFRunner::run(
 
             // 3. Build ACE for each (spin, k-point)
             {
-                auto& ctx = gpu::GPUContext::instance();
+                auto& ctx = ctx_->gpu_ctx();
 
                 // Gather all psi to device as cuDoubleComplex for each (s, k)
                 // We need psi for all k-points simultaneously for the q-sum
@@ -4603,7 +4603,7 @@ double GPUSCFRunner::run(
             // 4. Compute exchange energy
             double Eexx_est = 0.0;
             {
-                auto& ctx = gpu::GPUContext::instance();
+                auto& ctx = ctx_->gpu_ctx();
                 auto sym_wts = kpoints_ ? kpoints_->weights() : std::vector<double>{1.0};
                 int Nkpts_full = kpoints_ ? kpoints_->Nkpts_full() : 1;
 
@@ -4950,7 +4950,7 @@ double GPUSCFRunner::run(
             // Recompute Eexx with new psi
             double Eexx_new = 0.0;
             {
-                auto& ctx_e = gpu::GPUContext::instance();
+                auto& ctx_e = ctx_->gpu_ctx();
                 auto sym_wts = kpoints_ ? kpoints_->weights() : std::vector<double>{1.0};
                 int Nkpts_full = kpoints_ ? kpoints_->Nkpts_full() : 1;
 
@@ -5057,7 +5057,7 @@ void GPUSCFRunner::download_results(double* phi, double* Vxc, double* exc,
                                      double* Veff, double* Dxcdgrho,
                                      double* rho, Wavefunction& wfn)
 {
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     int Nband = wfn.Nband();
     int vxc_size = Nd_ * Nspin_;
     int veff_size = Nd_ * Nspin_;
@@ -5133,14 +5133,14 @@ void GPUSCFRunner::compute_force_stress(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
-    const Domain& domain,
-    const FDGrid& grid,
     double* f_nloc,
     double* stress_k,
     double* stress_nl,
     double* energy_nl)
 {
-    auto& ctx = gpu::GPUContext::instance();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
+    auto& ctx = ctx_->gpu_ctx();
     int Nband = wfn.Nband();
     int n_phys = crystal.n_atom_total();
     int ntypes = crystal.n_types();
@@ -5208,9 +5208,6 @@ void GPUSCFRunner::compute_force_stress(
 // ============================================================
 void GPUSCFRunner::compute_mgga_stress(
     const Wavefunction& wfn,
-    const Domain& domain,
-    const FDGrid& grid,
-    int Nspin,
     double* stress_mgga,
     double* tau_vtau_dot)
 {
@@ -5220,7 +5217,10 @@ void GPUSCFRunner::compute_mgga_stress(
         return;
     }
 
-    auto& ctx = gpu::GPUContext::instance();
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
+    int Nspin = ctx_->Nspin();
+    auto& ctx = ctx_->gpu_ctx();
     int Nband = wfn.Nband();
     double occfac = (Nspin == 1 && wfn.Nspinor() == 1) ? 2.0 : 1.0;
     int Nspin_local = wfn.Nspin();
@@ -5325,7 +5325,7 @@ void GPUSCFRunner::download_tau_vtau(double* tau, double* vtau, int tau_size, in
 // Download spin-resolved densities from GPU
 // ============================================================
 void GPUSCFRunner::download_spin_densities(double* rho_up, double* rho_dn, int size) {
-    auto& ctx = gpu::GPUContext::instance();
+    auto& ctx = ctx_->gpu_ctx();
     if (rho_up && size > 0)
         CUDA_CHECK(cudaMemcpy(rho_up, ctx.buf.rho, size * sizeof(double), cudaMemcpyDeviceToHost));
     if (rho_dn && size > 0)
@@ -5339,13 +5339,14 @@ void GPUSCFRunner::compute_soc_force(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
-    const Domain& domain,
-    const FDGrid& grid,
-    const std::vector<double>& kpt_weights,
-    const KPoints* kpoints,
-    int kpt_start,
     double* f_soc)
 {
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
+    const auto& kpt_weights = ctx_->kpoints().normalized_weights();
+    const KPoints* kpoints = &ctx_->kpoints();
+    int kpt_start = ctx_->kpt_start();
+
     int n_phys = crystal.n_atom_total();
     int Nband = wfn.Nband();
     int Nkpts = wfn.Nkpts();
@@ -5482,14 +5483,15 @@ void GPUSCFRunner::compute_soc_stress(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
-    const Domain& domain,
-    const FDGrid& grid,
-    const std::vector<double>& kpt_weights,
-    const KPoints* kpoints,
-    int kpt_start,
     double* stress_soc,
     double* energy_soc)
 {
+    const auto& domain = ctx_->domain();
+    const auto& grid = ctx_->grid();
+    const auto& kpt_weights = ctx_->kpoints().normalized_weights();
+    const KPoints* kpoints = &ctx_->kpoints();
+    int kpt_start = ctx_->kpt_start();
+
     int n_phys = crystal.n_atom_total();
     int Nband = wfn.Nband();
     int Nkpts = wfn.Nkpts();
