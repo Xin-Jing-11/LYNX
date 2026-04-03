@@ -1,7 +1,7 @@
 #include "physics/Forces.hpp"
 #include "physics/SCF.hpp"
 #include "physics/Electrostatics.hpp"
-#include "core/Driver.hpp"
+#include "atoms/AtomSetup.hpp"
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -1078,60 +1078,42 @@ void Forces::symmetrize(std::vector<double>& forces, int n_atom) {
     }
 }
 
-void Forces::compute_and_print(const SystemConfig& /*config*/,
-                                const LynxContext& ctx,
-                                const Wavefunction& wfn,
-                                const SCF& scf,
-                                const Crystal& crystal,
-                                const AtomSetup& atoms,
-                                const NonlocalProjector& vnl) {
-    int rank = ctx.rank();
+void Forces::print(int rank, bool is_soc, bool has_nlcc, int Natom) const {
+    if (rank != 0) return;
 
-    Forces forces;
-    auto f = forces.compute(ctx, wfn, crystal,
-                            atoms.influence, atoms.nloc_influence, vnl,
-                            scf.phi(), scf.density().rho_total().data(),
-                            atoms.Vloc.data(),
-                            atoms.elec.pseudocharge().data(),
-                            atoms.elec.pseudocharge_ref().data(),
-                            scf.Vxc(),
-                            atoms.has_nlcc ? atoms.rho_core.data() : nullptr);
+    std::printf("\nLocal forces (Ha/Bohr):\n");
+    const auto& fl = f_local_;
+    for (int i = 0; i < Natom; ++i)
+        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                    i + 1, fl[3*i], fl[3*i+1], fl[3*i+2]);
 
-    if (rank == 0) {
-        int Natom = atoms.Natom;
-        std::printf("\nLocal forces (Ha/Bohr):\n");
-        const auto& fl = forces.local_forces();
+    std::printf("\nNonlocal forces (Ha/Bohr):\n");
+    const auto& fn = f_nloc_;
+    for (int i = 0; i < Natom; ++i)
+        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                    i + 1, fn[3*i], fn[3*i+1], fn[3*i+2]);
+
+    if (is_soc) {
+        std::printf("\nSOC forces (Ha/Bohr):\n");
+        const auto& fs = f_soc_;
         for (int i = 0; i < Natom; ++i)
             std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
-                        i + 1, fl[3*i], fl[3*i+1], fl[3*i+2]);
-
-        std::printf("\nNonlocal forces (Ha/Bohr):\n");
-        const auto& fn = forces.nonlocal_forces();
-        for (int i = 0; i < Natom; ++i)
-            std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
-                        i + 1, fn[3*i], fn[3*i+1], fn[3*i+2]);
-
-        if (ctx.is_soc()) {
-            std::printf("\nSOC forces (Ha/Bohr):\n");
-            const auto& fs = forces.soc_forces();
-            for (int i = 0; i < Natom; ++i)
-                std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
-                            i + 1, fs[3*i], fs[3*i+1], fs[3*i+2]);
-        }
-
-        if (atoms.has_nlcc) {
-            std::printf("\nNLCC XC forces (Ha/Bohr):\n");
-            const auto& fxc = forces.xc_forces();
-            for (int i = 0; i < Natom; ++i)
-                std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
-                            i + 1, fxc[3*i], fxc[3*i+1], fxc[3*i+2]);
-        }
-
-        std::printf("\nTotal forces (Ha/Bohr):\n");
-        for (int i = 0; i < Natom; ++i)
-            std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
-                        i + 1, f[3*i], f[3*i+1], f[3*i+2]);
+                        i + 1, fs[3*i], fs[3*i+1], fs[3*i+2]);
     }
+
+    if (has_nlcc) {
+        std::printf("\nNLCC XC forces (Ha/Bohr):\n");
+        const auto& fxc = f_xc_;
+        for (int i = 0; i < Natom; ++i)
+            std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                        i + 1, fxc[3*i], fxc[3*i+1], fxc[3*i+2]);
+    }
+
+    std::printf("\nTotal forces (Ha/Bohr):\n");
+    const auto& ft = f_total_;
+    for (int i = 0; i < Natom; ++i)
+        std::printf("  Atom %3d: %14.10f %14.10f %14.10f\n",
+                    i + 1, ft[3*i], ft[3*i+1], ft[3*i+2]);
 }
 
 } // namespace lynx

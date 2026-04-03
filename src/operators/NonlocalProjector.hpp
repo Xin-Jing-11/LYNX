@@ -10,6 +10,7 @@
 
 namespace lynx {
 
+class LynxContext;
 using Complex = std::complex<double>;
 
 // Stores precomputed nonlocal projectors Chi for all influencing atoms.
@@ -26,6 +27,11 @@ using Complex = std::complex<double>;
 class NonlocalProjector {
 public:
     NonlocalProjector() = default;
+
+    /// Factory: create and setup a NonlocalProjector (including SOC if enabled).
+    static NonlocalProjector create(const LynxContext& ctx,
+                                    const Crystal& crystal,
+                                    const std::vector<AtomNlocInfluence>& nloc_influence);
     NonlocalProjector(const NonlocalProjector&) = delete;
     NonlocalProjector& operator=(const NonlocalProjector&) = delete;
     NonlocalProjector(NonlocalProjector&&) = default;

@@ -38,6 +38,8 @@ namespace lynx {
 
 class ExactExchange;  // forward declaration
 struct SCFState;      // forward declaration (defined in SCFInitializer.hpp)
+struct AtomSetup;     // forward declaration (defined in AtomSetup.hpp)
+struct SCFResult;     // forward declaration (defined below SCF class)
 
 /// All fields must be fully resolved before passing to SCF.
 /// Call ParameterDefaults::update_default() in main.cpp after parsing to fill auto-defaults.
@@ -70,6 +72,14 @@ public:
     SCF& operator=(const SCF&) = delete;
     SCF(SCF&&) = default;
     SCF& operator=(SCF&&) = default;
+
+    /// High-level entry point: initialize density and run SCF to convergence.
+    static SCFResult run_calculation(const SystemConfig& config,
+                                     const LynxContext& ctx,
+                                     const Crystal& crystal,
+                                     AtomSetup& atoms,
+                                     const Hamiltonian& hamiltonian,
+                                     const NonlocalProjector& vnl);
 
     /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx,
@@ -209,6 +219,12 @@ public:
     void set_exx(ExactExchange* exx) { exx_ = exx; }
     const ExactExchange& exx() const { return *exx_; }
     ExactExchange& exx() { return *exx_; }
+};
+
+/// Result of an SCF calculation.
+struct SCFResult {
+    Wavefunction wfn;
+    SCF scf;
 };
 
 } // namespace lynx

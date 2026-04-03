@@ -18,7 +18,7 @@
 
 namespace lynx {
 
-struct AtomSetup;  // forward declaration (defined in Driver.hpp)
+struct AtomSetup;  // forward declaration (defined in AtomSetup.hpp)
 class SCF;         // forward declaration
 
 // Force calculation matching reference LYNX.
@@ -46,14 +46,8 @@ public:
         const double* Vxc,
         const double* rho_core);
 
-    /// Compute forces and print results to stdout. High-level entry point for main.
-    static void compute_and_print(const SystemConfig& config,
-                                  const LynxContext& ctx,
-                                  const Wavefunction& wfn,
-                                  const SCF& scf,
-                                  const Crystal& crystal,
-                                  const struct AtomSetup& atoms,
-                                  const NonlocalProjector& vnl);
+    /// Print computed forces to stdout.
+    void print(int rank, bool is_soc, bool has_nlcc, int Natom) const;
 
     const std::vector<double>& local_forces() const { return f_local_; }
     const std::vector<double>& nonlocal_forces() const { return f_nloc_; }

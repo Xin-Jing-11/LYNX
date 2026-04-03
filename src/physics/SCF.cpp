@@ -1,6 +1,9 @@
 #include "physics/SCF.hpp"
 #include "physics/SCFInitializer.hpp"
 #include "physics/HybridSCF.hpp"
+#include "atoms/AtomSetup.hpp"
+#include "io/DensityIO.hpp"
+#include "electronic/ElectronDensity.hpp"
 #include "xc/ExactExchange.hpp"
 #include "solvers/KerkerPreconditioner.hpp"
 #include "core/constants.hpp"
@@ -631,5 +634,123 @@ double SCF::run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
     return Etotal;
 }
 #endif
+
+SCFResult SCF::run_calculation(const SystemConfig& config,
+                               const LynxContext& ctx,
+                               const Crystal& crystal,
+                               AtomSetup& atoms,
+                               const Hamiltonian& hamiltonian,
+                               const NonlocalProjector& vnl) {
+    int rank = ctx.rank();
+    int Nd_d = ctx.domain().Nd_d();
+
+    auto scf_params = SCFParams::from_config(config);
+
+    SCF scf;
+    scf.setup(ctx, hamiltonian, &vnl, scf_params);
+#ifdef USE_CUDA
+    scf.set_gpu_data(crystal, atoms.nloc_influence, atoms.influence, atoms.elec);
+#endif
+
+    // Allocate wavefunctions
+    Wavefunction wfn;
+    wfn.allocate(Nd_d, ctx.Nband_local(), ctx.Nstates(),
+                 ctx.Nspin_local(), ctx.Nkpts_local(),
+                 ctx.is_kpt(), ctx.Nspinor());
+
+    // Initialize density
+    {
+        bool density_loaded = false;
+        if (!config.density_restart_file.empty()) {
+            ElectronDensity restart_rho;
+            restart_rho.allocate(Nd_d, ctx.Nspin());
+            if (DensityIO::read(config.density_restart_file, restart_rho,
+                                ctx.grid(), ctx.lattice())) {
+                scf.set_initial_density(restart_rho.rho_total().data(), Nd_d,
+                                        ctx.Nspin() == 2 ? restart_rho.mag().data() : nullptr);
+                density_loaded = true;
+                if (rank == 0) {
+                    double Ne = restart_rho.integrate(ctx.grid().dV());
+                    std::printf("Density restart: loaded from %s (Ne=%.6f)\n",
+                                config.density_restart_file.c_str(), Ne);
+                }
+            } else if (rank == 0) {
+                std::printf("WARNING: Failed to read density from %s, using atomic density\n",
+                            config.density_restart_file.c_str());
+            }
+        }
+
+        if (!density_loaded) {
+            std::vector<double> rho_at(Nd_d, 0.0);
+            atoms.elec.compute_atomic_density(crystal, atoms.influence, ctx.domain(),
+                                              ctx.grid(), rho_at.data(), atoms.Nelectron);
+
+            std::vector<double> mag_init;
+            if (!ctx.is_soc() && ctx.Nspin() == 2) {
+                mag_init.resize(Nd_d, 0.0);
+                double total_spin = 0.0;
+                for (size_t it = 0; it < config.atom_types.size(); ++it) {
+                    const auto& at_in = config.atom_types[it];
+                    for (size_t ia = 0; ia < at_in.coords.size(); ++ia) {
+                        double atom_spin = (ia < at_in.spin.size()) ? at_in.spin[ia] : 0.0;
+                        total_spin += atom_spin;
+                    }
+                }
+                if (std::abs(total_spin) > 1e-12) {
+                    double scale = total_spin / static_cast<double>(atoms.Nelectron);
+                    for (int i = 0; i < Nd_d; ++i)
+                        mag_init[i] = scale * rho_at[i];
+                }
+            }
+
+            scf.set_initial_density(rho_at.data(), Nd_d,
+                                    (!ctx.is_soc() && ctx.Nspin() == 2) ? mag_init.data() : nullptr);
+            if (rank == 0) {
+                double rho_max = 0, rsum = 0;
+                for (int i = 0; i < Nd_d; ++i) {
+                    rho_max = std::max(rho_max, rho_at[i]);
+                    rsum += rho_at[i];
+                }
+                std::printf("Atomic density: max=%.4f, int*dV=%.6f (expected %d)\n",
+                            rho_max, rsum * ctx.dV(), atoms.Nelectron);
+            }
+        }
+    }
+
+    // Run SCF
+    if (rank == 0) std::printf("\n===== Starting SCF =====\n");
+
+    double Etot = scf.run(wfn, atoms.Nelectron, atoms.Natom,
+                          atoms.elec.pseudocharge().data(), atoms.Vloc.data(),
+                          atoms.elec.Eself(), atoms.elec.Ec(), config.xc,
+                          atoms.has_nlcc ? atoms.rho_core.data() : nullptr);
+
+    if (rank == 0) {
+        std::printf("\n===== SCF %s =====\n", scf.converged() ? "CONVERGED" : "NOT CONVERGED");
+        const auto& E = scf.energy();
+        std::printf("  Eband   = %18.10f Ha\n", E.Eband);
+        std::printf("  Exc     = %18.10f Ha\n", E.Exc);
+        std::printf("  Ehart   = %18.10f Ha\n", E.Ehart);
+        std::printf("  Eself   = %18.10f Ha\n", E.Eself);
+        std::printf("  Ec      = %18.10f Ha\n", E.Ec);
+        std::printf("  Entropy = %18.10f Ha\n", E.Entropy);
+        std::printf("  Etotal  = %18.10f Ha\n", E.Etotal);
+        std::printf("  Eatom   = %18.10f Ha/atom\n", E.Etotal / atoms.Natom);
+        std::printf("  Ef      = %18.10f Ha\n", scf.fermi_energy());
+    }
+
+    // Write converged density
+    if (!config.density_output_file.empty() && rank == 0) {
+        if (DensityIO::write(config.density_output_file, scf.density(),
+                             ctx.grid(), ctx.lattice())) {
+            std::printf("Density written to %s\n", config.density_output_file.c_str());
+        } else {
+            std::fprintf(stderr, "WARNING: Failed to write density to %s\n",
+                         config.density_output_file.c_str());
+        }
+    }
+
+    return SCFResult{std::move(wfn), std::move(scf)};
+}
 
 } // namespace lynx

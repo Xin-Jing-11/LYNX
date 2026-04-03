@@ -20,7 +20,7 @@
 
 namespace lynx {
 
-struct AtomSetup;  // forward declaration (defined in Driver.hpp)
+struct AtomSetup;  // forward declaration (defined in AtomSetup.hpp)
 class SCF;         // forward declaration
 
 // Stress tensor calculation matching reference LYNX.
@@ -62,14 +62,8 @@ public:
         const double* gpu_mgga_psi_stress = nullptr,
         const double* gpu_tau_vtau_dot = nullptr);
 
-    /// Compute stress and print results to stdout. High-level entry point for main.
-    static void compute_and_print(const SystemConfig& config,
-                                  const LynxContext& ctx,
-                                  const Wavefunction& wfn,
-                                  SCF& scf,
-                                  const Crystal& crystal,
-                                  const AtomSetup& atoms,
-                                  const NonlocalProjector& vnl);
+    /// Print computed stress tensor to stdout.
+    void print(int rank) const;
 
     double pressure() const;
 
@@ -81,6 +75,9 @@ public:
     const std::array<double, 6>& soc_stress() const { return stress_soc_; }
     double soc_energy() const { return energy_soc_; }
     void set_cell_measure(double cm) { cell_measure_ = cm; }
+    void add_to_total(const std::array<double, 6>& extra) {
+        for (int i = 0; i < 6; ++i) stress_total_[i] += extra[i];
+    }
 
 private:
     std::array<double, 6> stress_k_ = {};

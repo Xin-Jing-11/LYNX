@@ -2,7 +2,7 @@
 #include "physics/SCF.hpp"
 #include "physics/Electrostatics.hpp"
 #include "xc/ExactExchange.hpp"
-#include "core/Driver.hpp"
+#include "atoms/AtomSetup.hpp"
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
 #include "atoms/Pseudopotential.hpp"
@@ -1578,75 +1578,18 @@ void Stress::compute_nonlocal_kinetic(
     }
 }
 
-void Stress::compute_and_print(const SystemConfig& config,
-                                const LynxContext& ctx,
-                                const Wavefunction& wfn,
-                                SCF& scf,
-                                const Crystal& crystal,
-                                const AtomSetup& atoms,
-                                const NonlocalProjector& vnl) {
-    int rank = ctx.rank();
+void Stress::print(int rank) const {
+    if (rank != 0) return;
 
-    int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 :
-                     (config.spin_type == SpinType::NonCollinear) ? 1 : 1;
-    const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
-    const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
-
-    // GPU mGGA stress
-    const double* gpu_mgga_ptr = nullptr;
-    const double* gpu_dot_ptr = nullptr;
-    std::array<double, 6> gpu_mgga_stress = {};
-    double gpu_tau_vtau_dot = 0.0;
-#ifdef USE_CUDA
-    {
-        bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
-                        config.xc == XCType::MGGA_RSCAN ||
-                        config.xc == XCType::MGGA_R2SCAN);
-        if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
-            scf.gpu_runner()->compute_mgga_stress(
-                wfn, ctx.domain(), ctx.grid(), Nspin_calc,
-                gpu_mgga_stress.data(), &gpu_tau_vtau_dot);
-            gpu_mgga_ptr = gpu_mgga_stress.data();
-            gpu_dot_ptr = &gpu_tau_vtau_dot;
-        }
-    }
-#endif
-
-    Stress stress;
-    auto sigma = stress.compute(ctx, wfn, crystal,
-                                atoms.influence, atoms.nloc_influence, vnl,
-                                scf.phi(), scf.density().rho_total().data(),
-                                rho_up_ptr, rho_dn_ptr,
-                                atoms.Vloc.data(),
-                                atoms.elec.pseudocharge().data(),
-                                atoms.elec.pseudocharge_ref().data(),
-                                scf.exc(), scf.Vxc(),
-                                scf.Dxcdgrho(),
-                                scf.energy().Exc,
-                                atoms.elec.Eself() + atoms.elec.Ec(),
-                                config.xc,
-                                Nspin_calc,
-                                atoms.has_nlcc ? atoms.rho_core.data() : nullptr,
-                                scf.vtau(), scf.tau(),
-                                gpu_mgga_ptr, gpu_dot_ptr);
-
-    // Add EXX stress for hybrid functionals
-    if (is_hybrid(config.xc) && scf.exx().is_setup()) {
-        auto stress_exx = scf.exx().compute_stress(wfn, ctx.gradient(), ctx.halo(), ctx.domain());
-        for (int i = 0; i < 6; i++)
-            sigma[i] += stress_exx[i];
-    }
-
-    if (rank == 0) {
-        const double au_to_gpa = 29421.01569650548;
-        std::printf("\nStress tensor (GPa):\n");
-        std::printf("  sigma_xx = %14.6f  sigma_xy = %14.6f  sigma_xz = %14.6f\n",
-                    sigma[0] * au_to_gpa, sigma[1] * au_to_gpa, sigma[2] * au_to_gpa);
-        std::printf("  sigma_yy = %14.6f  sigma_yz = %14.6f  sigma_zz = %14.6f\n",
-                    sigma[3] * au_to_gpa, sigma[4] * au_to_gpa, sigma[5] * au_to_gpa);
-        std::printf("\nPressure: %.6f GPa\n",
-                    -(sigma[0] + sigma[3] + sigma[5]) / 3.0 * au_to_gpa);
-    }
+    const double au_to_gpa = 29421.01569650548;
+    const auto& sigma = stress_total_;
+    std::printf("\nStress tensor (GPa):\n");
+    std::printf("  sigma_xx = %14.6f  sigma_xy = %14.6f  sigma_xz = %14.6f\n",
+                sigma[0] * au_to_gpa, sigma[1] * au_to_gpa, sigma[2] * au_to_gpa);
+    std::printf("  sigma_yy = %14.6f  sigma_yz = %14.6f  sigma_zz = %14.6f\n",
+                sigma[3] * au_to_gpa, sigma[4] * au_to_gpa, sigma[5] * au_to_gpa);
+    std::printf("\nPressure: %.6f GPa\n",
+                -(sigma[0] + sigma[3] + sigma[5]) / 3.0 * au_to_gpa);
 }
 
 } // namespace lynx
