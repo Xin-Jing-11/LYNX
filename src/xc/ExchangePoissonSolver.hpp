@@ -8,12 +8,6 @@
 #include <vector>
 #include <complex>
 
-#ifdef USE_MKL
-#ifndef USE_CUDA
-#include <mkl_dfti.h>
-#endif
-#endif
-
 namespace lynx {
 
 // FFT-based Poisson solver for exact exchange.
@@ -26,13 +20,13 @@ namespace lynx {
 class ExchangePoissonSolver {
 public:
     ExchangePoissonSolver() = default;
-    ~ExchangePoissonSolver();
+    ~ExchangePoissonSolver() = default;
 
-    // Non-copyable (owns DFTI descriptors)
+    // Non-copyable
     ExchangePoissonSolver(const ExchangePoissonSolver&) = delete;
     ExchangePoissonSolver& operator=(const ExchangePoissonSolver&) = delete;
-    ExchangePoissonSolver(ExchangePoissonSolver&&) noexcept;
-    ExchangePoissonSolver& operator=(ExchangePoissonSolver&&) noexcept;
+    ExchangePoissonSolver(ExchangePoissonSolver&&) = default;
+    ExchangePoissonSolver& operator=(ExchangePoissonSolver&&) = default;
 
     // Setup the solver and precompute FFT Poisson constants.
     // For gamma-point: Nkpts_shift=1, no phase factors.
@@ -141,19 +135,6 @@ private:
     // Apply phase factor to complex array
     void apply_phase_factor(Complex* data, int ncol, bool positive, int kpt_k, int kpt_q) const;
 
-#if defined(USE_MKL) && !defined(USE_CUDA)
-    // Persistent MKL DFTI descriptors (cached by ncol to avoid per-call creation)
-    DFTI_DESCRIPTOR_HANDLE desc_r2c_ = nullptr;  // gamma forward (real-to-complex)
-    DFTI_DESCRIPTOR_HANDLE desc_c2r_ = nullptr;  // gamma inverse (complex-to-real)
-    DFTI_DESCRIPTOR_HANDLE desc_fwd_ = nullptr;  // k-point forward (complex-to-complex)
-    DFTI_DESCRIPTOR_HANDLE desc_inv_ = nullptr;  // k-point inverse (complex-to-complex)
-    int cached_ncol_r2c_ = 0;  // ncol for which R2C/C2R descriptors are valid
-    int cached_ncol_c2c_ = 0;  // ncol for which C2C descriptors are valid
-
-    void ensure_r2c_descriptors(int ncol);
-    void ensure_c2c_descriptors(int ncol);
-    void free_descriptors();
-#endif
 };
 
 } // namespace lynx

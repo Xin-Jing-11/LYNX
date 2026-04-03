@@ -15,6 +15,10 @@
 #include <memory>
 #include <mpi.h>
 
+#if defined(USE_MKL) && !defined(USE_CUDA)
+#include <mkl_dfti.h>
+#endif
+
 namespace lynx {
 
 /// Singleton holding all infrastructure objects initialized once at startup.
@@ -85,6 +89,15 @@ public:
     // ── Setters for deferred initialization (atoms, electrons) ────
     void set_atom_info(int Natom, int Nelectron);
 
+    // ── MKL FFT descriptors (shared by EXX Poisson solver) ────────
+#if defined(USE_MKL) && !defined(USE_CUDA)
+    DFTI_DESCRIPTOR_HANDLE dfti_r2c() const { return desc_r2c_; }
+    DFTI_DESCRIPTOR_HANDLE dfti_c2r() const { return desc_c2r_; }
+    DFTI_DESCRIPTOR_HANDLE dfti_fwd() const { return desc_fwd_; }
+    DFTI_DESCRIPTOR_HANDLE dfti_inv() const { return desc_inv_; }
+    void init_fft_descriptors(int Nx, int Ny, int Nz, int ncol_r2c, int ncol_c2c);
+#endif
+
     // ── Reset (for testing — allows re-initialization) ─────────────
     void reset();
 
@@ -119,6 +132,18 @@ private:
     bool is_soc_  = false;
     int rank_     = 0;
     int nproc_    = 1;
+
+#if defined(USE_MKL) && !defined(USE_CUDA)
+    DFTI_DESCRIPTOR_HANDLE desc_r2c_ = nullptr;
+    DFTI_DESCRIPTOR_HANDLE desc_c2r_ = nullptr;
+    DFTI_DESCRIPTOR_HANDLE desc_fwd_ = nullptr;
+    DFTI_DESCRIPTOR_HANDLE desc_inv_ = nullptr;
+    int fft_ncol_r2c_ = 0;
+    int fft_ncol_c2c_ = 0;
+    int fft_Nx_ = 0, fft_Ny_ = 0, fft_Nz_ = 0;
+
+    void free_fft_descriptors();
+#endif
 };
 
 }  // namespace lynx

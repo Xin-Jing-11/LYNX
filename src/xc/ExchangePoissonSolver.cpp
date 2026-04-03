@@ -1,4 +1,5 @@
 #include "xc/ExchangePoissonSolver.hpp"
+#include "core/LynxContext.hpp"
 #include "core/constants.hpp"
 #include <cmath>
 #include <cstring>
@@ -13,174 +14,6 @@
 #endif
 
 namespace lynx {
-
-// ---------------------------------------------------------------------------
-// Destructor and move operations
-// ---------------------------------------------------------------------------
-ExchangePoissonSolver::~ExchangePoissonSolver() {
-#if defined(USE_MKL) && !defined(USE_CUDA)
-    free_descriptors();
-#endif
-}
-
-ExchangePoissonSolver::ExchangePoissonSolver(ExchangePoissonSolver&& o) noexcept
-    : Nx_(o.Nx_), Ny_(o.Ny_), Nz_(o.Nz_), Nd_(o.Nd_), Ndc_(o.Ndc_),
-      is_gamma_(o.is_gamma_), pois_const_(std::move(o.pois_const_)),
-      pois_const_stress_(std::move(o.pois_const_stress_)),
-      pois_const_stress2_(std::move(o.pois_const_stress2_)),
-      Nkpts_shift_(o.Nkpts_shift_), Nkpts_sym_(o.Nkpts_sym_), Nkpts_hf_(o.Nkpts_hf_),
-      k1_shift_(std::move(o.k1_shift_)), k2_shift_(std::move(o.k2_shift_)),
-      k3_shift_(std::move(o.k3_shift_)), Kptshift_map_(std::move(o.Kptshift_map_)),
-      neg_phase_(std::move(o.neg_phase_)), pos_phase_(std::move(o.pos_phase_)),
-      const_aux_(o.const_aux_), dx_(o.dx_), dy_(o.dy_), dz_(o.dz_),
-      L1_(o.L1_), L2_(o.L2_), L3_(o.L3_), lapcT_(o.lapcT_), Jacbdet_(o.Jacbdet_),
-      exx_div_flag_(o.exx_div_flag_), hyb_range_fock_(o.hyb_range_fock_),
-      Kx_hf_(o.Kx_hf_), Ky_hf_(o.Ky_hf_), Kz_hf_(o.Kz_hf_)
-#if defined(USE_MKL) && !defined(USE_CUDA)
-      , desc_r2c_(o.desc_r2c_), desc_c2r_(o.desc_c2r_),
-      desc_fwd_(o.desc_fwd_), desc_inv_(o.desc_inv_),
-      cached_ncol_r2c_(o.cached_ncol_r2c_), cached_ncol_c2c_(o.cached_ncol_c2c_)
-#endif
-{
-#if defined(USE_MKL) && !defined(USE_CUDA)
-    o.desc_r2c_ = nullptr; o.desc_c2r_ = nullptr;
-    o.desc_fwd_ = nullptr; o.desc_inv_ = nullptr;
-    o.cached_ncol_r2c_ = 0; o.cached_ncol_c2c_ = 0;
-#endif
-}
-
-ExchangePoissonSolver& ExchangePoissonSolver::operator=(ExchangePoissonSolver&& o) noexcept {
-    if (this != &o) {
-#if defined(USE_MKL) && !defined(USE_CUDA)
-        free_descriptors();
-#endif
-        Nx_ = o.Nx_; Ny_ = o.Ny_; Nz_ = o.Nz_; Nd_ = o.Nd_; Ndc_ = o.Ndc_;
-        is_gamma_ = o.is_gamma_;
-        pois_const_ = std::move(o.pois_const_);
-        pois_const_stress_ = std::move(o.pois_const_stress_);
-        pois_const_stress2_ = std::move(o.pois_const_stress2_);
-        Nkpts_shift_ = o.Nkpts_shift_; Nkpts_sym_ = o.Nkpts_sym_; Nkpts_hf_ = o.Nkpts_hf_;
-        k1_shift_ = std::move(o.k1_shift_); k2_shift_ = std::move(o.k2_shift_);
-        k3_shift_ = std::move(o.k3_shift_); Kptshift_map_ = std::move(o.Kptshift_map_);
-        neg_phase_ = std::move(o.neg_phase_); pos_phase_ = std::move(o.pos_phase_);
-        const_aux_ = o.const_aux_;
-        dx_ = o.dx_; dy_ = o.dy_; dz_ = o.dz_;
-        L1_ = o.L1_; L2_ = o.L2_; L3_ = o.L3_;
-        lapcT_ = o.lapcT_; Jacbdet_ = o.Jacbdet_;
-        exx_div_flag_ = o.exx_div_flag_; hyb_range_fock_ = o.hyb_range_fock_;
-        Kx_hf_ = o.Kx_hf_; Ky_hf_ = o.Ky_hf_; Kz_hf_ = o.Kz_hf_;
-#if defined(USE_MKL) && !defined(USE_CUDA)
-        desc_r2c_ = o.desc_r2c_; desc_c2r_ = o.desc_c2r_;
-        desc_fwd_ = o.desc_fwd_; desc_inv_ = o.desc_inv_;
-        cached_ncol_r2c_ = o.cached_ncol_r2c_; cached_ncol_c2c_ = o.cached_ncol_c2c_;
-        o.desc_r2c_ = nullptr; o.desc_c2r_ = nullptr;
-        o.desc_fwd_ = nullptr; o.desc_inv_ = nullptr;
-        o.cached_ncol_r2c_ = 0; o.cached_ncol_c2c_ = 0;
-#endif
-    }
-    return *this;
-}
-
-#if defined(USE_MKL) && !defined(USE_CUDA)
-void ExchangePoissonSolver::free_descriptors() {
-    if (desc_r2c_) { DftiFreeDescriptor(&desc_r2c_); desc_r2c_ = nullptr; }
-    if (desc_c2r_) { DftiFreeDescriptor(&desc_c2r_); desc_c2r_ = nullptr; }
-    if (desc_fwd_) { DftiFreeDescriptor(&desc_fwd_); desc_fwd_ = nullptr; }
-    if (desc_inv_) { DftiFreeDescriptor(&desc_inv_); desc_inv_ = nullptr; }
-    cached_ncol_r2c_ = 0;
-    cached_ncol_c2c_ = 0;
-}
-
-void ExchangePoissonSolver::ensure_r2c_descriptors(int ncol) {
-    if (ncol == cached_ncol_r2c_ && desc_r2c_ && desc_c2r_) return;
-
-    // Free old descriptors
-    if (desc_r2c_) { DftiFreeDescriptor(&desc_r2c_); desc_r2c_ = nullptr; }
-    if (desc_c2r_) { DftiFreeDescriptor(&desc_c2r_); desc_c2r_ = nullptr; }
-
-    MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-
-    // --- Forward (R2C) descriptor ---
-    DftiCreateDescriptor(&desc_r2c_, DFTI_DOUBLE, DFTI_REAL, 3, dims);
-    DftiSetValue(desc_r2c_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-    DftiSetValue(desc_r2c_, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-
-    if (ncol > 1) {
-        DftiSetValue(desc_r2c_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-        DftiSetValue(desc_r2c_, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-        DftiSetValue(desc_r2c_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Ndc_);
-    }
-
-    // Input strides: row-major layout [Nz][Ny][Nx]
-    // MKL DFTI strides are: offset, stride_dim1, stride_dim2, stride_dim3
-    // For a 3D array stored in row-major [Nz][Ny][Nx]:
-    //   element [k][j][i] = k * Ny*Nx + j * Nx + i
-    MKL_LONG in_strides[4] = {0, (MKL_LONG)(Ny_ * Nx_), (MKL_LONG)Nx_, 1};
-    DftiSetValue(desc_r2c_, DFTI_INPUT_STRIDES, in_strides);
-
-    // Output strides for R2C: complex output [Nz][Ny][Nx/2+1]
-    MKL_LONG Nx_half = Nx_ / 2 + 1;
-    MKL_LONG out_strides[4] = {0, (MKL_LONG)(Ny_ * Nx_half), Nx_half, 1};
-    DftiSetValue(desc_r2c_, DFTI_OUTPUT_STRIDES, out_strides);
-
-    DftiCommitDescriptor(desc_r2c_);
-
-    // --- Backward (C2R) descriptor ---
-    DftiCreateDescriptor(&desc_c2r_, DFTI_DOUBLE, DFTI_REAL, 3, dims);
-    DftiSetValue(desc_c2r_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-    DftiSetValue(desc_c2r_, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
-
-    if (ncol > 1) {
-        DftiSetValue(desc_c2r_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-        DftiSetValue(desc_c2r_, DFTI_INPUT_DISTANCE, (MKL_LONG)Ndc_);
-        DftiSetValue(desc_c2r_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-    }
-
-    // For backward: input is complex [Nz][Ny][Nx/2+1], output is real [Nz][Ny][Nx]
-    DftiSetValue(desc_c2r_, DFTI_INPUT_STRIDES, out_strides);   // complex layout
-    DftiSetValue(desc_c2r_, DFTI_OUTPUT_STRIDES, in_strides);   // real layout
-
-    DftiCommitDescriptor(desc_c2r_);
-
-    cached_ncol_r2c_ = ncol;
-}
-
-void ExchangePoissonSolver::ensure_c2c_descriptors(int ncol) {
-    if (ncol == cached_ncol_c2c_ && desc_fwd_ && desc_inv_) return;
-
-    // Free old descriptors
-    if (desc_fwd_) { DftiFreeDescriptor(&desc_fwd_); desc_fwd_ = nullptr; }
-    if (desc_inv_) { DftiFreeDescriptor(&desc_inv_); desc_inv_ = nullptr; }
-
-    MKL_LONG dims[3] = {Nz_, Ny_, Nx_};
-
-    // --- Forward (C2C) descriptor ---
-    DftiCreateDescriptor(&desc_fwd_, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
-    DftiSetValue(desc_fwd_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-
-    if (ncol > 1) {
-        DftiSetValue(desc_fwd_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-        DftiSetValue(desc_fwd_, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-        DftiSetValue(desc_fwd_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-    }
-
-    DftiCommitDescriptor(desc_fwd_);
-
-    // --- Backward (C2C) descriptor ---
-    DftiCreateDescriptor(&desc_inv_, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
-    DftiSetValue(desc_inv_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
-
-    if (ncol > 1) {
-        DftiSetValue(desc_inv_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol);
-        DftiSetValue(desc_inv_, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd_);
-        DftiSetValue(desc_inv_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd_);
-    }
-
-    DftiCommitDescriptor(desc_inv_);
-
-    cached_ncol_c2c_ = ncol;
-}
-#endif // USE_MKL && !USE_CUDA
 
 // ---------------------------------------------------------------------------
 // Singularity removal constant for a given G^2
@@ -783,12 +616,13 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
 void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
     if (ncol == 0) return;
 
-    ensure_r2c_descriptors(ncol);
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
 
     std::vector<Complex> rhs_bar(Ndc_ * ncol);
 
     // Forward R2C FFT
-    DftiComputeForward(desc_r2c_, rhs, rhs_bar.data());
+    DftiComputeForward(ctx.dfti_r2c(), rhs, rhs_bar.data());
 
     // Multiply by Poisson constants (last shift = zero shift for gamma)
     const double* alpha = pois_const_.data() + (Nkpts_shift_ - 1) * Ndc_;
@@ -799,7 +633,7 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
     }
 
     // Backward C2R FFT
-    DftiComputeBackward(desc_c2r_, rhs_bar.data(), sol);
+    DftiComputeBackward(ctx.dfti_c2r(), rhs_bar.data(), sol);
 
     // Normalize (MKL DFTI default: no normalization, same as FFTW)
     double inv_Nd = 1.0 / Nd_;
@@ -813,12 +647,13 @@ void ExchangePoissonSolver::solve_batch(double* rhs, int ncol, double* sol) {
 void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* sol, int option) {
     if (ncol == 0) return;
 
-    ensure_r2c_descriptors(ncol);
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
 
     std::vector<Complex> rhs_bar(Ndc_ * ncol);
 
     // Forward R2C FFT
-    DftiComputeForward(desc_r2c_, rhs, rhs_bar.data());
+    DftiComputeForward(ctx.dfti_r2c(), rhs, rhs_bar.data());
 
     // Multiply by stress Poisson constants
     const auto& pconst = (option == 2) ? pois_const_stress2_ : pois_const_stress_;
@@ -830,7 +665,7 @@ void ExchangePoissonSolver::solve_batch_stress(double* rhs, int ncol, double* so
     }
 
     // Backward C2R FFT
-    DftiComputeBackward(desc_c2r_, rhs_bar.data(), sol);
+    DftiComputeBackward(ctx.dfti_c2r(), rhs_bar.data(), sol);
 
     double inv_Nd = 1.0 / Nd_;
     for (int i = 0; i < Nd_ * ncol; i++)
@@ -844,7 +679,8 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
                                              int kpt_k, int kpt_q) {
     if (ncol == 0) return;
 
-    ensure_c2c_descriptors(ncol);
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
 
     // Work copy of rhs (apply_phase_factor modifies in-place)
     std::vector<Complex> rhs_copy(Nd_ * ncol);
@@ -855,7 +691,7 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
 
     // Forward C2C FFT
     std::vector<Complex> rhs_bar(Nd_ * ncol);
-    DftiComputeForward(desc_fwd_, rhs_copy.data(), rhs_bar.data());
+    DftiComputeForward(ctx.dfti_fwd(), rhs_copy.data(), rhs_bar.data());
 
     // Multiply by Poisson constants
     int l = Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
@@ -873,7 +709,7 @@ void ExchangePoissonSolver::solve_batch_kpt(const Complex* rhs, int ncol, Comple
     }
 
     // Backward C2C FFT
-    DftiComputeBackward(desc_inv_, rhs_bar.data(), sol);
+    DftiComputeBackward(ctx.dfti_inv(), rhs_bar.data(), sol);
 
     // Normalize
     double inv_Nd = 1.0 / Nd_;
@@ -892,14 +728,15 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
                                                     int kpt_k, int kpt_q, int option) {
     if (ncol == 0) return;
 
-    ensure_c2c_descriptors(ncol);
+    auto& ctx = LynxContext::instance();
+    ctx.init_fft_descriptors(Nx_, Ny_, Nz_, ncol, ncol);
 
     std::vector<Complex> rhs_copy(Nd_ * ncol);
     std::memcpy(rhs_copy.data(), rhs, sizeof(Complex) * Nd_ * ncol);
     apply_phase_factor(rhs_copy.data(), ncol, false, kpt_k, kpt_q);
 
     std::vector<Complex> rhs_bar(Nd_ * ncol);
-    DftiComputeForward(desc_fwd_, rhs_copy.data(), rhs_bar.data());
+    DftiComputeForward(ctx.dfti_fwd(), rhs_copy.data(), rhs_bar.data());
 
     // Select appropriate stress constants
     int l = Kptshift_map_[kpt_k + kpt_q * Nkpts_sym_];
@@ -917,7 +754,7 @@ void ExchangePoissonSolver::solve_batch_kpt_stress(const Complex* rhs, int ncol,
             bar[i] = Complex(bar[i].real() * alpha[i], bar[i].imag() * alpha[i]);
     }
 
-    DftiComputeBackward(desc_inv_, rhs_bar.data(), sol);
+    DftiComputeBackward(ctx.dfti_inv(), rhs_bar.data(), sol);
 
     double inv_Nd = 1.0 / Nd_;
     for (int i = 0; i < Nd_ * ncol; i++)

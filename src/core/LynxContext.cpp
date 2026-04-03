@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <cstdio>
 
+#if defined(USE_MKL) && !defined(USE_CUDA)
+#include <mkl_dfti.h>
+#endif
+
 namespace lynx {
 
 LynxContext& LynxContext::instance() {
@@ -35,11 +39,17 @@ LynxContext::~LynxContext() {
             grid_.reset();
             stencil_.reset();
             kpoints_.reset();
+#if defined(USE_MKL) && !defined(USE_CUDA)
+            free_fft_descriptors();
+#endif
         }
     }
 }
 
 void LynxContext::reset() {
+#if defined(USE_MKL) && !defined(USE_CUDA)
+    free_fft_descriptors();
+#endif
     lattice_.reset();
     grid_.reset();
     stencil_.reset();
@@ -173,5 +183,99 @@ void LynxContext::initialize(SystemConfig& config, MPI_Comm world_comm) {
 
     initialized_ = true;
 }
+
+#if defined(USE_MKL) && !defined(USE_CUDA)
+void LynxContext::free_fft_descriptors() {
+    if (desc_r2c_) { DftiFreeDescriptor(&desc_r2c_); desc_r2c_ = nullptr; }
+    if (desc_c2r_) { DftiFreeDescriptor(&desc_c2r_); desc_c2r_ = nullptr; }
+    if (desc_fwd_) { DftiFreeDescriptor(&desc_fwd_); desc_fwd_ = nullptr; }
+    if (desc_inv_) { DftiFreeDescriptor(&desc_inv_); desc_inv_ = nullptr; }
+    fft_ncol_r2c_ = 0;
+    fft_ncol_c2c_ = 0;
+    fft_Nx_ = 0; fft_Ny_ = 0; fft_Nz_ = 0;
+}
+
+void LynxContext::init_fft_descriptors(int Nx, int Ny, int Nz,
+                                        int ncol_r2c, int ncol_c2c) {
+    // Skip if already created with same parameters
+    if (fft_Nx_ == Nx && fft_Ny_ == Ny && fft_Nz_ == Nz &&
+        fft_ncol_r2c_ == ncol_r2c && fft_ncol_c2c_ == ncol_c2c &&
+        desc_r2c_ && desc_c2r_ && desc_fwd_ && desc_inv_)
+        return;
+
+    // Free any existing descriptors
+    free_fft_descriptors();
+
+    fft_Nx_ = Nx; fft_Ny_ = Ny; fft_Nz_ = Nz;
+    int Nd  = Nx * Ny * Nz;
+    int Ndc = Nz * Ny * (Nx / 2 + 1);
+
+    MKL_LONG dims[3] = {(MKL_LONG)Nz, (MKL_LONG)Ny, (MKL_LONG)Nx};
+
+    // ── R2C (forward) descriptor ──────────────────────────────────
+    DftiCreateDescriptor(&desc_r2c_, DFTI_DOUBLE, DFTI_REAL, 3, dims);
+    DftiSetValue(desc_r2c_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+    DftiSetValue(desc_r2c_, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
+
+    if (ncol_r2c > 1) {
+        DftiSetValue(desc_r2c_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol_r2c);
+        DftiSetValue(desc_r2c_, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd);
+        DftiSetValue(desc_r2c_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Ndc);
+    }
+
+    MKL_LONG in_strides[4] = {0, (MKL_LONG)(Ny * Nx), (MKL_LONG)Nx, 1};
+    DftiSetValue(desc_r2c_, DFTI_INPUT_STRIDES, in_strides);
+
+    MKL_LONG Nx_half = Nx / 2 + 1;
+    MKL_LONG out_strides[4] = {0, (MKL_LONG)(Ny * Nx_half), Nx_half, 1};
+    DftiSetValue(desc_r2c_, DFTI_OUTPUT_STRIDES, out_strides);
+
+    DftiCommitDescriptor(desc_r2c_);
+
+    // ── C2R (backward) descriptor ─────────────────────────────────
+    DftiCreateDescriptor(&desc_c2r_, DFTI_DOUBLE, DFTI_REAL, 3, dims);
+    DftiSetValue(desc_c2r_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+    DftiSetValue(desc_c2r_, DFTI_CONJUGATE_EVEN_STORAGE, DFTI_COMPLEX_COMPLEX);
+
+    if (ncol_r2c > 1) {
+        DftiSetValue(desc_c2r_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol_r2c);
+        DftiSetValue(desc_c2r_, DFTI_INPUT_DISTANCE, (MKL_LONG)Ndc);
+        DftiSetValue(desc_c2r_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd);
+    }
+
+    DftiSetValue(desc_c2r_, DFTI_INPUT_STRIDES, out_strides);
+    DftiSetValue(desc_c2r_, DFTI_OUTPUT_STRIDES, in_strides);
+
+    DftiCommitDescriptor(desc_c2r_);
+
+    fft_ncol_r2c_ = ncol_r2c;
+
+    // ── C2C forward descriptor ────────────────────────────────────
+    DftiCreateDescriptor(&desc_fwd_, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
+    DftiSetValue(desc_fwd_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+
+    if (ncol_c2c > 1) {
+        DftiSetValue(desc_fwd_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol_c2c);
+        DftiSetValue(desc_fwd_, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd);
+        DftiSetValue(desc_fwd_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd);
+    }
+
+    DftiCommitDescriptor(desc_fwd_);
+
+    // ── C2C backward descriptor ───────────────────────────────────
+    DftiCreateDescriptor(&desc_inv_, DFTI_DOUBLE, DFTI_COMPLEX, 3, dims);
+    DftiSetValue(desc_inv_, DFTI_PLACEMENT, DFTI_NOT_INPLACE);
+
+    if (ncol_c2c > 1) {
+        DftiSetValue(desc_inv_, DFTI_NUMBER_OF_TRANSFORMS, (MKL_LONG)ncol_c2c);
+        DftiSetValue(desc_inv_, DFTI_INPUT_DISTANCE, (MKL_LONG)Nd);
+        DftiSetValue(desc_inv_, DFTI_OUTPUT_DISTANCE, (MKL_LONG)Nd);
+    }
+
+    DftiCommitDescriptor(desc_inv_);
+
+    fft_ncol_c2c_ = ncol_c2c;
+}
+#endif // USE_MKL && !USE_CUDA
 
 }  // namespace lynx
