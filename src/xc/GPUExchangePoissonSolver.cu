@@ -128,6 +128,11 @@ void GPUExchangePoissonSolver::create_plans(int ncol) {
         assert(false);
     }
 
+    // Bind plans to compute_stream so FFTs run in the correct stream
+    cudaStream_t cs = GPUContext::instance().compute_stream;
+    cufftSetStream(plan_r2c_, cs);
+    cufftSetStream(plan_c2r_, cs);
+
     plans_created_ = true;
     max_ncol_ = ncol;
 }
@@ -162,6 +167,11 @@ void GPUExchangePoissonSolver::create_plans_z2z(int ncol) {
         std::fprintf(stderr, "GPUExchangePoissonSolver: cufftPlanMany Z2Z inverse failed (%d)\n", res);
         assert(false);
     }
+
+    // Bind plans to compute_stream so FFTs run in the correct stream
+    cudaStream_t cs = GPUContext::instance().compute_stream;
+    cufftSetStream(plan_z2z_fwd_, cs);
+    cufftSetStream(plan_z2z_inv_, cs);
 
     plans_created_ = true;
     max_ncol_ = ncol;
