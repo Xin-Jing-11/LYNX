@@ -62,16 +62,8 @@ struct GPUPoissonState {
     double poisson_diag = 0.0;
     double jacobi_m_inv = 0.0;
 
-    // AAR workspace (owned by this operator)
-    double* d_r       = nullptr;  // Nd — residual
-    double* d_f       = nullptr;  // Nd — preconditioned residual
-    double* d_Ax      = nullptr;  // Nd — operator applied
-    double* d_X_hist  = nullptr;  // Nd * m — iterate history
-    double* d_F_hist  = nullptr;  // Nd * m — residual history
-    double* d_x_old   = nullptr;  // Nd — previous iterate
-    double* d_f_old   = nullptr;  // Nd — previous residual
-    double* d_aar_x_ex= nullptr;  // nd_ex — halo workspace
-    double* d_rhs_buf = nullptr;  // Nd — RHS construction buffer
+    // NOTE: AAR workspace (r, f, Ax, history, x_ex, rhs_buf) is NOT owned
+    // here — it comes from GPUContext::buf and scratch_pool at call time.
     int m = 7;                    // AAR history depth
 };
 
@@ -148,39 +140,13 @@ void PoissonSolver::setup_gpu(const LynxContext& ctx) {
     gs->poisson_diag = -1.0 * D2sum;
     gs->jacobi_m_inv = -1.0 / D2sum;
 
-    int Nd = gs->Nd;
-    int nx_ex = gs->nx + 2 * gs->FDn;
-    int ny_ex = gs->ny + 2 * gs->FDn;
-    int nz_ex = gs->nz + 2 * gs->FDn;
-    size_t nd_ex = (size_t)nx_ex * ny_ex * nz_ex;
-    int m = gs->m;
-
-    CUDA_CHECK(cudaMalloc(&gs->d_r,        Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_f,        Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_Ax,       Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_X_hist,   (size_t)Nd * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_F_hist,   (size_t)Nd * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_x_old,    Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_f_old,    Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_aar_x_ex, nd_ex * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_rhs_buf,  Nd * sizeof(double)));
+    // AAR workspace is NOT allocated here — it comes from
+    // GPUContext::buf and scratch_pool at call time in solve().
 }
 
 void PoissonSolver::cleanup_gpu() {
     if (!gpu_state_raw_) return;
     auto* gs = static_cast<GPUPoissonState*>(gpu_state_raw_);
-
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
-
-    safe_free(gs->d_r);
-    safe_free(gs->d_f);
-    safe_free(gs->d_Ax);
-    safe_free(gs->d_X_hist);
-    safe_free(gs->d_F_hist);
-    safe_free(gs->d_x_old);
-    safe_free(gs->d_f_old);
-    safe_free(gs->d_aar_x_ex);
-    safe_free(gs->d_rhs_buf);
 
     delete gs;
     gpu_state_raw_ = nullptr;

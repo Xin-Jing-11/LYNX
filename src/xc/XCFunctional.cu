@@ -1766,12 +1766,9 @@ struct GPUXCState {
     double* d_vtau = nullptr;
     bool tau_valid = false;
 
-    // Workspace buffers (owned by this operator)
-    double* d_grad_rho = nullptr;  // 3*Nd (non-spin) or 3*2*Nd (spin)
-    double* d_sigma    = nullptr;  // Nd (non-spin) or 3*Nd (spin)
-    double* d_v2xc     = nullptr;  // Nd (non-spin) or 3*Nd (spin)
-    double* d_x_ex_xc  = nullptr;  // nd_ex (halo workspace for gradient)
-    double* d_rho_xc   = nullptr;  // Nd (temp for NLCC rho + rho_core)
+    // NOTE: GGA/mGGA workspace buffers (grad_rho, sigma, v2xc, x_ex, rho_xc)
+    // are NOT owned here — they come from GPUContext::buf or scratch_pool,
+    // allocated on use in evaluate()/evaluate_spin().
 };
 
 // ── setup_gpu / cleanup_gpu ──────────────────────────
@@ -1805,26 +1802,8 @@ void XCFunctional::setup_gpu(const LynxContext& ctx, int Nspin) {
                 gs->lapcT[i * 3 + j] = L(i, j);
     }
 
-    int Nd = gs->Nd;
-    int nx_ex = gs->nx + 2 * gs->FDn;
-    int ny_ex = gs->ny + 2 * gs->FDn;
-    int nz_ex = gs->nz + 2 * gs->FDn;
-    size_t nd_ex = (size_t)nx_ex * ny_ex * nz_ex;
-
-    // GGA/mGGA workspace
-    if (gs->is_gga) {
-        int grad_cols = (Nspin >= 2) ? 6 : 3;  // 3 dirs * Nspin columns
-        CUDA_CHECK(cudaMalloc(&gs->d_grad_rho, (size_t)grad_cols * Nd * sizeof(double)));
-
-        int sigma_cols = (Nspin >= 2) ? 3 : 1;  // uu, ud, dd for spin
-        CUDA_CHECK(cudaMalloc(&gs->d_sigma, (size_t)sigma_cols * Nd * sizeof(double)));
-
-        int v2_cols = (Nspin >= 2) ? 3 : 1;
-        CUDA_CHECK(cudaMalloc(&gs->d_v2xc, (size_t)v2_cols * Nd * sizeof(double)));
-
-        CUDA_CHECK(cudaMalloc(&gs->d_x_ex_xc, nd_ex * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gs->d_rho_xc,  Nd * sizeof(double)));
-    }
+    // GGA/mGGA workspace is NOT allocated here — it comes from
+    // GPUContext::buf (non-spin) or scratch_pool (spin) at call time.
 }
 
 void XCFunctional::cleanup_gpu() {
@@ -1834,11 +1813,6 @@ void XCFunctional::cleanup_gpu() {
     auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
 
     safe_free(gs->d_rho_core);
-    safe_free(gs->d_grad_rho);
-    safe_free(gs->d_sigma);
-    safe_free(gs->d_v2xc);
-    safe_free(gs->d_x_ex_xc);
-    safe_free(gs->d_rho_xc);
 
     delete gs;
     gpu_state_raw_ = nullptr;

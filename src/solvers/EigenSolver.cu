@@ -757,27 +757,10 @@ struct GPUEigenState {
     bool is_soc = false;
     double dV = 0.0;  // volume element for orthogonalization
 
-    // Workspace buffers (real, gamma-point)
-    double* d_Y     = nullptr;  // (Nd, Nband) filtered result
-    double* d_Xold  = nullptr;  // (Nd, Nband)
-    double* d_Xnew  = nullptr;  // (Nd, Nband)
-    double* d_HX    = nullptr;  // (Nd, Nband) = H*psi buffer
-
-    // Subspace matrices
-    double* d_Hs = nullptr;     // (Nband_global, Nband_global)
-    double* d_Ms = nullptr;     // (Nband_global, Nband_global)
-
-    // Eigenvalues and occupations (global size)
-    double* d_eigvals = nullptr;
-    double* d_occ     = nullptr;
-
-    // Complex buffers (k-point mode)
-    cuDoubleComplex* d_Y_z    = nullptr;
-    cuDoubleComplex* d_Xold_z = nullptr;
-    cuDoubleComplex* d_Xnew_z = nullptr;
-    cuDoubleComplex* d_HX_z   = nullptr;
-    cuDoubleComplex* d_Hs_z   = nullptr;
-    cuDoubleComplex* d_Ms_z   = nullptr;
+    // NOTE: All workspace buffers (Y, Xold, Xnew, HX, Hs, Ms, eigvals, occ)
+    // are allocated on use in solve()/solve_kpt() via cudaMallocAsync
+    // and freed at the end of each call via cudaFreeAsync.
+    // This uses CUDA's built-in memory pool (near-zero overhead after first call).
 };
 
 void EigenSolver::setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
@@ -794,62 +777,15 @@ void EigenSolver::setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
     gs->is_soc = is_soc;
     gs->dV = ctx.grid().dV();
 
-    int Nd = gs->Nd;
-    int Nd_eigen = is_soc ? 2 * Nd : Nd;
-    size_t psi_sz = (size_t)Nd_eigen * Nband;
-
-    if (!is_kpt) {
-        // Real (gamma-point) buffers
-        CUDA_CHECK(cudaMalloc(&gs->d_Y,    psi_sz * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gs->d_Xold, psi_sz * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gs->d_Xnew, psi_sz * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gs->d_HX,   psi_sz * sizeof(double)));
-    } else {
-        // Complex (k-point) buffers
-        CUDA_CHECK(cudaMalloc(&gs->d_Y_z,    psi_sz * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&gs->d_Xold_z, psi_sz * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&gs->d_Xnew_z, psi_sz * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&gs->d_HX_z,   psi_sz * sizeof(cuDoubleComplex)));
-    }
-
-    // Subspace matrices — always Nband_global x Nband_global
-    size_t sub_sz = (size_t)Nband_global * Nband_global;
-    if (!is_kpt) {
-        CUDA_CHECK(cudaMalloc(&gs->d_Hs, sub_sz * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gs->d_Ms, sub_sz * sizeof(double)));
-    } else {
-        CUDA_CHECK(cudaMalloc(&gs->d_Hs_z, sub_sz * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&gs->d_Ms_z, sub_sz * sizeof(cuDoubleComplex)));
-    }
-
-    // Eigenvalues and occupations
-    CUDA_CHECK(cudaMalloc(&gs->d_eigvals, Nband_global * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_occ,     Nband_global * sizeof(double)));
+    // Workspace buffers are allocated on use in solve()/solve_kpt()
+    // via cudaMallocAsync, freed at the end of each call.
 }
 
 void EigenSolver::cleanup_gpu() {
     if (!gpu_state_raw_) return;
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
-
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
-
-    safe_free(gs->d_Y);
-    safe_free(gs->d_Xold);
-    safe_free(gs->d_Xnew);
-    safe_free(gs->d_HX);
-    safe_free(gs->d_Hs);
-    safe_free(gs->d_Ms);
-    safe_free(gs->d_eigvals);
-    safe_free(gs->d_occ);
-
-    safe_free(gs->d_Y_z);
-    safe_free(gs->d_Xold_z);
-    safe_free(gs->d_Xnew_z);
-    safe_free(gs->d_HX_z);
-    safe_free(gs->d_Hs_z);
-    safe_free(gs->d_Ms_z);
-
-    delete gs;
+    // All workspace buffers are freed at the end of each solve() call,
+    // so nothing to free here — just delete the state object.
+    delete static_cast<GPUEigenState*>(gpu_state_raw_);
     gpu_state_raw_ = nullptr;
 }
 
@@ -895,46 +831,64 @@ void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
         return;
     }
 
-    // GPU path: upload psi to GPU, run CheFSI, download results.
+    // GPU path: allocate workspace, upload psi, run CheFSI, download results, free workspace.
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     size_t psi_bytes = (size_t)Nd_d * Nband * sizeof(double);
+    size_t psi_sz = (size_t)Nd_d * Nband;
+    size_t sub_sz = (size_t)gs->Nband_global * gs->Nband_global;
 
-    // Allocate temporary device buffers for psi (input/output) and Veff
-    double* d_psi_tmp = nullptr;
-    double* d_Veff_tmp = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_psi_tmp, psi_bytes));
-    CUDA_CHECK(cudaMalloc(&d_Veff_tmp, Nd_d * sizeof(double)));
-    CUDA_CHECK(cudaMemcpy(d_psi_tmp, psi, psi_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_Veff_tmp, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice));
+    // Allocate all workspace via cudaMallocAsync (CUDA pool: near-zero overhead)
+    double *d_psi_tmp = nullptr, *d_Veff_tmp = nullptr;
+    double *d_Y = nullptr, *d_Xold = nullptr, *d_Xnew = nullptr, *d_HX = nullptr;
+    double *d_Hs = nullptr, *d_Ms = nullptr, *d_eigvals_d = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_psi_tmp,   psi_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Veff_tmp,  Nd_d * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Y,         psi_sz * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Xold,      psi_sz * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Xnew,      psi_sz * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_HX,        psi_sz * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Hs,        sub_sz * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Ms,        sub_sz * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_eigvals_d, gs->Nband_global * sizeof(double), stream));
+
+    CUDA_CHECK(cudaMemcpyAsync(d_psi_tmp, psi, psi_bytes, cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_Veff_tmp, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice, stream));
 
     // Set up H*psi callback trampoline
     s_eigen_H_ptr_ = gs->H;
 
-    // The d_x_ex parameter is passed to the callback but our callback ignores it
-    // (Hamiltonian::apply(Device::GPU) uses its own internal halo buffer).
-    // Pass nullptr since the callback doesn't use it.
     gpu::eigensolver_solve_gpu(
         d_psi_tmp,         // d_psi: in/out
-        gs->d_eigvals,     // d_eigvals
+        d_eigvals_d,       // d_eigvals
         d_Veff_tmp,        // d_Veff
-        gs->d_Y,           // d_Y workspace
-        gs->d_Xold,        // d_Xold workspace
-        gs->d_Xnew,        // d_Xnew workspace
-        gs->d_HX,          // d_HX workspace
+        d_Y,               // d_Y workspace
+        d_Xold,            // d_Xold workspace
+        d_Xnew,            // d_Xnew workspace
+        d_HX,              // d_HX workspace
         nullptr,           // d_x_ex (ignored by callback)
-        gs->d_Hs,          // d_Hs
-        gs->d_Ms,          // d_Ms
+        d_Hs,              // d_Hs
+        d_Ms,              // d_Ms
         Nd_d, Nband,
         lambda_cutoff, eigval_min, eigval_max,
         cheb_degree, gs->dV,
         eigen_apply_H_cb);
 
     // Download eigenvalues and psi back to host
-    CUDA_CHECK(cudaMemcpy(eigvals, gs->d_eigvals, Nband * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(psi, d_psi_tmp, psi_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(eigvals, d_eigvals_d, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(psi, d_psi_tmp, psi_bytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    CUDA_CHECK(cudaFree(d_psi_tmp));
-    CUDA_CHECK(cudaFree(d_Veff_tmp));
+    // Free all workspace
+    CUDA_CHECK(cudaFreeAsync(d_psi_tmp, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Veff_tmp, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Y, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Xold, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Xnew, stream));
+    CUDA_CHECK(cudaFreeAsync(d_HX, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Hs, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Ms, stream));
+    CUDA_CHECK(cudaFreeAsync(d_eigvals_d, stream));
 }
 
 void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
@@ -950,48 +904,68 @@ void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
         return;
     }
 
-    // GPU path: upload psi (complex) to GPU, run complex CheFSI, download results.
+    // GPU path: allocate workspace, upload psi (complex), run complex CheFSI, download, free.
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     size_t psi_bytes = (size_t)Nd_d * Nband * sizeof(cuDoubleComplex);
+    size_t psi_sz = (size_t)Nd_d * Nband;
+    size_t sub_sz = (size_t)gs->Nband_global * gs->Nband_global;
 
-    // Allocate temporary device buffers
-    cuDoubleComplex* d_psi_tmp = nullptr;
-    double* d_Veff_tmp = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_psi_tmp, psi_bytes));
-    CUDA_CHECK(cudaMalloc(&d_Veff_tmp, Nd_d * sizeof(double)));
-    CUDA_CHECK(cudaMemcpy(d_psi_tmp, psi, psi_bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_Veff_tmp, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice));
+    // Allocate all workspace via cudaMallocAsync (CUDA pool: near-zero overhead)
+    cuDoubleComplex *d_psi_tmp = nullptr;
+    double *d_Veff_tmp = nullptr, *d_eigvals_d = nullptr;
+    cuDoubleComplex *d_Y_z = nullptr, *d_Xold_z = nullptr;
+    cuDoubleComplex *d_Xnew_z = nullptr, *d_HX_z = nullptr;
+    cuDoubleComplex *d_Hs_z = nullptr, *d_Ms_z = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_psi_tmp,   psi_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Veff_tmp,  Nd_d * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Y_z,       psi_sz * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Xold_z,    psi_sz * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Xnew_z,    psi_sz * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_HX_z,      psi_sz * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Hs_z,      sub_sz * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Ms_z,      sub_sz * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_eigvals_d, gs->Nband_global * sizeof(double), stream));
+
+    CUDA_CHECK(cudaMemcpyAsync(d_psi_tmp, psi, psi_bytes, cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_Veff_tmp, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice, stream));
 
     // Set up k-point Bloch factors in Hamiltonian's GPU state before calling
     // (The SCF loop already called set_kpoint + set_vnl_kpt, and the Hamiltonian's
     // GPU state stores kxLx/kyLy/kzLz. We need to update them for this k-point.)
-    // Note: Hamiltonian::apply_kpt(Device::GPU) reads kxLx etc from its GPU state.
-    // For the callback, we pass {0,0,0} for kpt_cart since kxLx/kyLy/kzLz are already set.
-
     s_eigen_H_ptr_ = gs->H;
 
     gpu::eigensolver_solve_z_gpu(
         d_psi_tmp,         // d_psi_z: in/out
-        gs->d_eigvals,     // d_eigvals (real)
+        d_eigvals_d,       // d_eigvals (real)
         d_Veff_tmp,        // d_Veff
-        gs->d_Y_z,         // d_Y_z workspace
-        gs->d_Xold_z,      // d_Xold_z workspace
-        gs->d_Xnew_z,      // d_Xnew_z workspace
-        gs->d_HX_z,        // d_HX_z workspace
+        d_Y_z,             // d_Y_z workspace
+        d_Xold_z,          // d_Xold_z workspace
+        d_Xnew_z,          // d_Xnew_z workspace
+        d_HX_z,            // d_HX_z workspace
         nullptr,           // d_x_ex_z (ignored by callback)
-        gs->d_Hs_z,        // d_Hs_z
-        gs->d_Ms_z,        // d_Ms_z
+        d_Hs_z,            // d_Hs_z
+        d_Ms_z,            // d_Ms_z
         Nd_d, Nband,
         lambda_cutoff, eigval_min, eigval_max,
         cheb_degree, gs->dV,
         eigen_apply_H_z_cb);
 
     // Download eigenvalues and psi back to host
-    CUDA_CHECK(cudaMemcpy(eigvals, gs->d_eigvals, Nband * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(psi, d_psi_tmp, psi_bytes, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(eigvals, d_eigvals_d, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(psi, d_psi_tmp, psi_bytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    CUDA_CHECK(cudaFree(d_psi_tmp));
-    CUDA_CHECK(cudaFree(d_Veff_tmp));
+    // Free all workspace
+    CUDA_CHECK(cudaFreeAsync(d_psi_tmp, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Veff_tmp, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Y_z, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Xold_z, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Xnew_z, stream));
+    CUDA_CHECK(cudaFreeAsync(d_HX_z, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Hs_z, stream));
+    CUDA_CHECK(cudaFreeAsync(d_Ms_z, stream));
+    CUDA_CHECK(cudaFreeAsync(d_eigvals_d, stream));
 }
 
 void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,

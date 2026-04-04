@@ -77,14 +77,13 @@ struct GPUVeffState {
     int Nd = 0;
     int Nspin = 1;
 
-    // Potential arrays (owned)
-    double* d_Veff       = nullptr;  // Nd * Nspin
-    double* d_phi        = nullptr;  // Nd
-    double* d_exc        = nullptr;  // Nd
-    double* d_Vxc        = nullptr;  // Nd * Nspin
+    // Persistent uploads (uploaded once from CPU, used every SCF iteration)
     double* d_pseudocharge = nullptr; // Nd
     double* d_rho_core   = nullptr;  // Nd (if NLCC)
-    double* d_Dxcdgrho   = nullptr;  // Nd * ncol (if GGA)
+
+    // NOTE: Intermediate potential arrays (Veff, phi, exc, Vxc, Dxcdgrho)
+    // are NOT owned here — compute() currently falls back to CPU,
+    // and when GPU compute is wired, they will come from GPUContext::buf.
 };
 
 void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
@@ -98,33 +97,19 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
     gs->Nspin = Nspin;
     int Nd = gs->Nd;
 
-    CUDA_CHECK(cudaMalloc(&gs->d_Veff, (size_t)Nd * Nspin * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_phi,  Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_exc,  Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_Vxc,  (size_t)Nd * Nspin * sizeof(double)));
-
-    // Upload pseudocharge
+    // Upload persistent data (pseudocharge and NLCC core density)
     CUDA_CHECK(cudaMalloc(&gs->d_pseudocharge, Nd * sizeof(double)));
     if (rho_b) {
         CUDA_CHECK(cudaMemcpy(gs->d_pseudocharge, rho_b, Nd * sizeof(double), cudaMemcpyHostToDevice));
     }
 
-    // Upload NLCC core density
     if (rho_core) {
         CUDA_CHECK(cudaMalloc(&gs->d_rho_core, Nd * sizeof(double)));
         CUDA_CHECK(cudaMemcpy(gs->d_rho_core, rho_core, Nd * sizeof(double), cudaMemcpyHostToDevice));
     }
 
-    // GGA Dxcdgrho buffer
-    bool is_gga = (xc_type == XCType::GGA_PBE || xc_type == XCType::GGA_PBEsol ||
-                   xc_type == XCType::GGA_RPBE || xc_type == XCType::HYB_PBE0 ||
-                   xc_type == XCType::HYB_HSE ||
-                   xc_type == XCType::MGGA_SCAN || xc_type == XCType::MGGA_RSCAN ||
-                   xc_type == XCType::MGGA_R2SCAN);
-    if (is_gga) {
-        int ncol = (Nspin >= 2) ? 3 : 1;
-        CUDA_CHECK(cudaMalloc(&gs->d_Dxcdgrho, (size_t)Nd * ncol * sizeof(double)));
-    }
+    // Intermediate arrays (Veff, phi, exc, Vxc, Dxcdgrho) are not allocated
+    // here — compute() currently falls back to CPU.
 }
 
 void EffectivePotential::cleanup_gpu() {
@@ -133,13 +118,8 @@ void EffectivePotential::cleanup_gpu() {
 
     auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
 
-    safe_free(gs->d_Veff);
-    safe_free(gs->d_phi);
-    safe_free(gs->d_exc);
-    safe_free(gs->d_Vxc);
     safe_free(gs->d_pseudocharge);
     safe_free(gs->d_rho_core);
-    safe_free(gs->d_Dxcdgrho);
 
     delete gs;
     gpu_state_raw_ = nullptr;

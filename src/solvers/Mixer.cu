@@ -80,11 +80,9 @@ struct GPUMixerState {
     double kerker_m_inv = 0.0;
     double precond_tol = 1e-3;
 
-    // Pulay history buffers (owned)
-    double* d_R     = nullptr;  // Nd * ncol * m — residual history
-    double* d_F     = nullptr;  // Nd * ncol * m — iterate history
-    double* d_fk    = nullptr;  // Nd * ncol — current residual
-    double* d_xkm1  = nullptr;  // Nd * ncol — previous iterate
+    // NOTE: Pulay history buffers (R, F, fk, xkm1) are NOT owned here —
+    // they come from GPUContext::buf at call time in mix().
+    // Only d_fkm1 is owned (previous residual, persistent across iterations).
     double* d_fkm1  = nullptr;  // Nd * ncol — previous residual
 };
 
@@ -139,13 +137,8 @@ void Mixer::setup_gpu(int Nd_d, int ncol, int m_depth, double beta_mix) {
     gs->mix_iter = 0;
     gs->Nd      = Nd_d;
 
-    size_t total = (size_t)Nd_d * ncol;
-
-    CUDA_CHECK(cudaMalloc(&gs->d_R,    total * m_depth * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_F,    total * m_depth * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_fk,   total * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_xkm1, total * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_fkm1, total * sizeof(double)));
+    // Pulay history buffers (R, F, fk, xkm1) come from GPUContext::buf.
+    // Only d_fkm1 is allocated lazily on first use in mix().
 }
 
 void Mixer::cleanup_gpu() {
@@ -154,10 +147,6 @@ void Mixer::cleanup_gpu() {
 
     auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
 
-    safe_free(gs->d_R);
-    safe_free(gs->d_F);
-    safe_free(gs->d_fk);
-    safe_free(gs->d_xkm1);
     safe_free(gs->d_fkm1);
 
     delete gs;
