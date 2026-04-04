@@ -643,16 +643,9 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         }
     }
 
-#ifdef USE_CUDA
-    // GPU-resident: upload updated Veff to device for next iteration's eigensolver.
-    // This is a small transfer (Nd doubles per spin channel, ~KB for typical grids).
-    if (dev_ == Device::GPU && eigsolver) {
-        // Upload Veff for the first spin channel (eigsolver uses per-spin Veff_s).
-        // The per-spin Veff upload happens at the start of solve_resident() via h_Veff arg,
-        // so we don't need to do it here — solve_resident reads from arrays_.Veff directly.
-        // No action needed here: Veff is on host, and solve_resident uploads it.
-    }
-#endif
+    // Note: Veff is on host after recomputation. For GPU-resident SCF,
+    // solve_resident() uploads Veff to device at the start of each call.
+    (void)eigsolver;  // suppress unused parameter warning on non-CUDA builds
 }
 
 
