@@ -43,7 +43,7 @@ void NonlocalProjector::setup(const Crystal& crystal,
 
             if (ndc == 0 || nproj == 0) continue;
 
-            Chi_[it][iat] = NDArray<double>(ndc, nproj);
+            Chi_[it][iat] = DeviceArray<double>(ndc, nproj);
 
             // Compute grid point coordinates relative to atom
             const auto& gpos = inf.grid_pos[iat];
@@ -399,7 +399,7 @@ void NonlocalProjector::setup_soc(const Crystal& crystal,
             int ndc = inf.ndc[iat];
             if (ndc == 0 || nproj_soc == 0) continue;
 
-            Chi_soc_[it][iat] = NDArray<Complex>(ndc, nproj_soc);
+            Chi_soc_[it][iat] = DeviceArray<Complex>(ndc, nproj_soc);
 
             const auto& gpos = inf.grid_pos[iat];
             Vec3 atom_pos = inf.coords[iat];

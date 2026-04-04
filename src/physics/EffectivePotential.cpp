@@ -6,23 +6,27 @@
 
 namespace lynx {
 
+#ifndef USE_CUDA
+EffectivePotential::~EffectivePotential() = default;
+#endif
+
 static bool is_mgga_type(XCType t) {
     return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
 }
 
 void VeffArrays::allocate(int Nd_d, int Nspin, XCType xc_type, bool is_soc) {
-    Veff = NDArray<double>(Nd_d * Nspin);
-    Vxc = NDArray<double>(Nd_d * Nspin);
-    exc = NDArray<double>(Nd_d);
-    phi = NDArray<double>(Nd_d);
+    Veff = DeviceArray<double>(Nd_d * Nspin);
+    Vxc = DeviceArray<double>(Nd_d * Nspin);
+    exc = DeviceArray<double>(Nd_d);
+    phi = DeviceArray<double>(Nd_d);
 
     if (is_soc) {
-        Veff_spinor = NDArray<double>(4 * Nd_d);
+        Veff_spinor = DeviceArray<double>(4 * Nd_d);
     }
 
     if (is_mgga_type(xc_type)) {
         int vtau_size = (Nspin == 2) ? 2 * Nd_d : Nd_d;
-        vtau = NDArray<double>(vtau_size);
+        vtau = DeviceArray<double>(vtau_size);
     }
 }
 
@@ -90,7 +94,7 @@ void EffectivePotential::compute(const ElectronDensity& density,
     // Allocate Dxcdgrho_ if GGA or mGGA
     int dxc_ncol = (Nspin == 2) ? 3 : 1;
     if ((xc.is_gga() || xc.is_mgga()) && arrays.Dxcdgrho.size() == 0) {
-        arrays.Dxcdgrho = NDArray<double>(Nd_d * dxc_ncol);
+        arrays.Dxcdgrho = DeviceArray<double>(Nd_d * dxc_ncol);
     }
     double* dxc_ptr = (xc.is_gga() || xc.is_mgga()) ? arrays.Dxcdgrho.data() : nullptr;
 
@@ -200,13 +204,13 @@ void EffectivePotential::compute_spinor(const ElectronDensity& density,
     }
 
     // Evaluate spin-polarized XC
-    NDArray<double> Vxc_spin(Nd_d * 2);
+    DeviceArray<double> Vxc_spin(Nd_d * 2);
     XCFunctional xc;
     xc.setup(xc_type, *domain_, *grid_, gradient_, halo_);
 
     int dxc_ncol = xc.is_gga() ? 3 : 0;
     if (xc.is_gga() && arrays.Dxcdgrho.size() == 0) {
-        arrays.Dxcdgrho = NDArray<double>(Nd_d * dxc_ncol);
+        arrays.Dxcdgrho = DeviceArray<double>(Nd_d * dxc_ncol);
     }
     double* dxc_ptr = xc.is_gga() ? arrays.Dxcdgrho.data() : nullptr;
 
@@ -249,5 +253,36 @@ void EffectivePotential::compute_spinor(const ElectronDensity& density,
         arrays.Veff.data()[i] = V_uu[i];
     }
 }
+
+// ============================================================
+// Device-dispatching methods (non-CUDA build: always CPU)
+// ============================================================
+#ifndef USE_CUDA
+void EffectivePotential::compute(const ElectronDensity& density,
+                                  const double* rho_b,
+                                  const double* rho_core,
+                                  XCType xc_type,
+                                  double exx_frac_scale,
+                                  double poisson_tol,
+                                  VeffArrays& arrays,
+                                  Device /*dev*/,
+                                  const double* tau,
+                                  bool tau_valid)
+{
+    compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
+            poisson_tol, arrays, tau, tau_valid);
+}
+
+void EffectivePotential::compute_spinor(const ElectronDensity& density,
+                                         const double* rho_b,
+                                         const double* rho_core,
+                                         XCType xc_type,
+                                         double poisson_tol,
+                                         VeffArrays& arrays,
+                                         Device /*dev*/)
+{
+    compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
+}
+#endif // !USE_CUDA
 
 } // namespace lynx

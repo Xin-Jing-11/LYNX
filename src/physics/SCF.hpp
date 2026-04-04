@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/KPoints.hpp"
@@ -24,13 +24,13 @@
 #include "parallel/HaloExchange.hpp"
 #include "io/InputParser.hpp"
 #include "core/LynxContext.hpp"
+#include "core/DeviceTag.hpp"
 
 #include <vector>
 #include <functional>
 #include <memory>
 
 #ifdef USE_CUDA
-#include "physics/GPUSCF.cuh"
 #include "physics/Electrostatics.hpp"
 #endif
 
@@ -61,9 +61,9 @@ struct SCFState {
 
     // Potential mixing state
     bool use_potential_mixing = false;
-    NDArray<double> Veff_mixed;   // zero-mean Veff for mixer (persistent)
+    DeviceArray<double> Veff_mixed;   // zero-mean Veff for mixer (persistent)
     std::vector<double> Veff_mean; // per-spin Veff mean
-    NDArray<double> Veff_out;     // Veff from rho_out (potential mixing), shared between energy & convergence
+    DeviceArray<double> Veff_out;     // Veff from rho_out (potential mixing), shared between energy & convergence
 };
 
 /// All fields must be fully resolved before passing to SCF.
@@ -103,12 +103,12 @@ public:
                                      const LynxContext& ctx,
                                      const Crystal& crystal,
                                      AtomSetup& atoms,
-                                     const Hamiltonian& hamiltonian,
+                                     Hamiltonian& hamiltonian,
                                      const NonlocalProjector& vnl);
 
     /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx,
-               const Hamiltonian& hamiltonian,
+               Hamiltonian& hamiltonian,
                const NonlocalProjector* vnl,
                const SCFParams& params);
 
@@ -140,7 +140,9 @@ public:
     const double* tau() const { return tau_.data(); }
 
 #ifdef USE_CUDA
-    GPUSCFRunner* gpu_runner() { return gpu_runner_.get(); }
+    // GPU mGGA stress: computed post-SCF using Hamiltonian's GPU state
+    // (psi stays on device; see Stress.cpp for usage)
+    const Hamiltonian* hamiltonian_ptr() const { return hamiltonian_; }
 #endif
 
 private:
@@ -153,12 +155,15 @@ private:
     const FDStencil* stencil_ = nullptr;
     const Laplacian* laplacian_ = nullptr;
     const Gradient* gradient_ = nullptr;
-    const Hamiltonian* hamiltonian_ = nullptr;
+    Hamiltonian* hamiltonian_ = nullptr;
     const HaloExchange* halo_ = nullptr;
     const NonlocalProjector* vnl_ = nullptr;
     const MPIComm* bandcomm_ = nullptr;
     const MPIComm* kptcomm_ = nullptr;
     const MPIComm* spincomm_ = nullptr;
+
+    // Device tag: CPU or GPU (unified dispatch — operators use this to select code path)
+    Device dev_ = Device::CPU;
 
     // Parameters and results
     SCFParams params_;
@@ -211,7 +216,7 @@ private:
         const LynxContext& ctx,
         Wavefunction& wfn, ElectronDensity& density,
         VeffArrays& arrays, EffectivePotential& veff_builder,
-        SCFParams& params, const Hamiltonian& hamiltonian,
+        SCFParams& params, Hamiltonian& hamiltonian,
         const NonlocalProjector* vnl, EigenSolver& eigsolver, Mixer& mixer,
         int Nelectron, XCType xc_type,
         const double* rho_b, const double* rho_core);
@@ -225,12 +230,10 @@ private:
         const double* Veff, const double* Veff_spinor,
         int Nd_d, int Nspin_local, int spin_start,
         bool is_kpt, bool is_soc, const KPoints* kpoints, int kpt_start,
-        const Vec3& cell_lengths, const Hamiltonian& hamiltonian,
+        const Vec3& cell_lengths, Hamiltonian& hamiltonian,
         const NonlocalProjector* vnl, int rank_world);
 
 #ifdef USE_CUDA
-    std::unique_ptr<GPUSCFRunner> gpu_runner_;
-
     // GPU-specific data (set via set_gpu_data before run)
     const Crystal* crystal_ = nullptr;
     const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;
@@ -238,9 +241,6 @@ private:
     const Electrostatics* elec_ = nullptr;
     bool gpu_enabled_ = false;
 
-    double run_gpu(Wavefunction& wfn, int Nelectron, int Natom,
-                   const double* rho_b, double Eself, double Ec,
-                   XCType xc_type, const double* rho_core);
 public:
     // Call before run() to enable GPU path
     void set_gpu_data(const Crystal& crystal,

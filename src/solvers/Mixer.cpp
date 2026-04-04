@@ -8,6 +8,10 @@
 
 namespace lynx {
 
+#ifndef USE_CUDA
+Mixer::~Mixer() = default;
+#endif
+
 void Mixer::setup(int Nd_d,
                    MixingVariable var,
                    MixingPrecond precond_type,
@@ -277,5 +281,19 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
 
     iter_++;
 }
+
+// ---------------------------------------------------------------------------
+// Device-dispatching overload (CPU-only fallback when USE_CUDA is off)
+// GPU implementation lives in Mixer.cu.
+// ---------------------------------------------------------------------------
+#ifndef USE_CUDA
+
+void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device dev) {
+    if (dev == Device::GPU)
+        throw std::runtime_error("Mixer::mix(GPU) called but USE_CUDA is off");
+    mix(x_k_inout, g_k, Nd_d, ncol);
+}
+
+#endif // !USE_CUDA
 
 } // namespace lynx

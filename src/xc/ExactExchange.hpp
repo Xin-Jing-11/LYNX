@@ -4,7 +4,7 @@
 #include "core/FDGrid.hpp"
 #include "core/Lattice.hpp"
 #include "core/KPoints.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/LynxContext.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "operators/Gradient.hpp"
@@ -126,9 +126,9 @@ private:
 
     // ACE operator storage
     // Gamma: Xi_[spin] has shape [Nd_d, Nstates_occ]
-    std::vector<NDArray<double>> Xi_;
+    std::vector<DeviceArray<double>> Xi_;
     // K-point: Xi_kpt_[spin * Nkpts + kpt] has shape [Nd_d, Nstates_occ]
-    std::vector<NDArray<Complex>> Xi_kpt_;
+    std::vector<DeviceArray<Complex>> Xi_kpt_;
 
     int Nstates_occ_ = 0;  // number of occupied states (occ > threshold)
     double Eexx_ = 0.0;

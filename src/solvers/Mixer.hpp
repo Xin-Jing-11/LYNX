@@ -1,7 +1,8 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
+#include "core/DeviceTag.hpp"
 #include "solvers/Preconditioner.hpp"
 
 #include <vector>
@@ -14,6 +15,11 @@ namespace lynx {
 class Mixer {
 public:
     Mixer() = default;
+    ~Mixer();
+    Mixer(Mixer&&) noexcept = default;
+    Mixer& operator=(Mixer&&) noexcept = default;
+    Mixer(const Mixer&) = delete;
+    Mixer& operator=(const Mixer&) = delete;
 
     void setup(int Nd_d,
                MixingVariable var,
@@ -38,6 +44,16 @@ public:
     // ncol: number of density columns (1 for non-spin, 3 for collinear spin [total,up,down])
     // Reference: Mixing_periodic_pulay
     void mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol = 1);
+
+    // ── Device-dispatching overload ─────────────────────────────
+    void mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device dev);
+
+#ifdef USE_CUDA
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUMixerState (defined in .cu)
+public:
+    void setup_gpu(int Nd_d, int ncol, int m_depth, double beta_mix);
+    void cleanup_gpu();
+#endif
 
     // Reset history (e.g., at start of new SCF)
     void reset();

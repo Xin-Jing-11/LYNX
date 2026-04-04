@@ -9,6 +9,8 @@
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 #include "solvers/EigenSolver.cuh"
+#include "solvers/EigenSolver.hpp"
+#include "operators/Hamiltonian.hpp"
 
 namespace lynx {
 namespace gpu {
@@ -738,6 +740,284 @@ void compute_density_z_gpu(const cuDoubleComplex* d_psi, const double* d_occ,
 }
 
 } // namespace gpu
+
+// ============================================================
+// Device-dispatching methods for EigenSolver
+// ============================================================
+
+// GPUEigenState — stub for future device workspace buffers
+struct GPUEigenState {
+    const Hamiltonian* H = nullptr;
+
+    // Grid dimensions
+    int Nd = 0;
+    int Nband = 0;
+    int Nband_global = 0;
+    bool is_kpt = false;
+    bool is_soc = false;
+    double dV = 0.0;  // volume element for orthogonalization
+
+    // Workspace buffers (real, gamma-point)
+    double* d_Y     = nullptr;  // (Nd, Nband) filtered result
+    double* d_Xold  = nullptr;  // (Nd, Nband)
+    double* d_Xnew  = nullptr;  // (Nd, Nband)
+    double* d_HX    = nullptr;  // (Nd, Nband) = H*psi buffer
+
+    // Subspace matrices
+    double* d_Hs = nullptr;     // (Nband_global, Nband_global)
+    double* d_Ms = nullptr;     // (Nband_global, Nband_global)
+
+    // Eigenvalues and occupations (global size)
+    double* d_eigvals = nullptr;
+    double* d_occ     = nullptr;
+
+    // Complex buffers (k-point mode)
+    cuDoubleComplex* d_Y_z    = nullptr;
+    cuDoubleComplex* d_Xold_z = nullptr;
+    cuDoubleComplex* d_Xnew_z = nullptr;
+    cuDoubleComplex* d_HX_z   = nullptr;
+    cuDoubleComplex* d_Hs_z   = nullptr;
+    cuDoubleComplex* d_Ms_z   = nullptr;
+};
+
+void EigenSolver::setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
+                                   bool is_kpt, bool is_soc) {
+    if (!gpu_state_raw_)
+        gpu_state_raw_ = new GPUEigenState();
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+
+    gs->H = H_;
+    gs->Nd = ctx.domain().Nd_d();
+    gs->Nband = Nband;
+    gs->Nband_global = Nband_global;
+    gs->is_kpt = is_kpt;
+    gs->is_soc = is_soc;
+    gs->dV = ctx.grid().dV();
+
+    int Nd = gs->Nd;
+    int Nd_eigen = is_soc ? 2 * Nd : Nd;
+    size_t psi_sz = (size_t)Nd_eigen * Nband;
+
+    if (!is_kpt) {
+        // Real (gamma-point) buffers
+        CUDA_CHECK(cudaMalloc(&gs->d_Y,    psi_sz * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&gs->d_Xold, psi_sz * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&gs->d_Xnew, psi_sz * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&gs->d_HX,   psi_sz * sizeof(double)));
+    } else {
+        // Complex (k-point) buffers
+        CUDA_CHECK(cudaMalloc(&gs->d_Y_z,    psi_sz * sizeof(cuDoubleComplex)));
+        CUDA_CHECK(cudaMalloc(&gs->d_Xold_z, psi_sz * sizeof(cuDoubleComplex)));
+        CUDA_CHECK(cudaMalloc(&gs->d_Xnew_z, psi_sz * sizeof(cuDoubleComplex)));
+        CUDA_CHECK(cudaMalloc(&gs->d_HX_z,   psi_sz * sizeof(cuDoubleComplex)));
+    }
+
+    // Subspace matrices — always Nband_global x Nband_global
+    size_t sub_sz = (size_t)Nband_global * Nband_global;
+    if (!is_kpt) {
+        CUDA_CHECK(cudaMalloc(&gs->d_Hs, sub_sz * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&gs->d_Ms, sub_sz * sizeof(double)));
+    } else {
+        CUDA_CHECK(cudaMalloc(&gs->d_Hs_z, sub_sz * sizeof(cuDoubleComplex)));
+        CUDA_CHECK(cudaMalloc(&gs->d_Ms_z, sub_sz * sizeof(cuDoubleComplex)));
+    }
+
+    // Eigenvalues and occupations
+    CUDA_CHECK(cudaMalloc(&gs->d_eigvals, Nband_global * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&gs->d_occ,     Nband_global * sizeof(double)));
+}
+
+void EigenSolver::cleanup_gpu() {
+    if (!gpu_state_raw_) return;
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+
+    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+
+    safe_free(gs->d_Y);
+    safe_free(gs->d_Xold);
+    safe_free(gs->d_Xnew);
+    safe_free(gs->d_HX);
+    safe_free(gs->d_Hs);
+    safe_free(gs->d_Ms);
+    safe_free(gs->d_eigvals);
+    safe_free(gs->d_occ);
+
+    safe_free(gs->d_Y_z);
+    safe_free(gs->d_Xold_z);
+    safe_free(gs->d_Xnew_z);
+    safe_free(gs->d_HX_z);
+    safe_free(gs->d_Hs_z);
+    safe_free(gs->d_Ms_z);
+
+    delete gs;
+    gpu_state_raw_ = nullptr;
+}
+
+EigenSolver::~EigenSolver() {
+    cleanup_gpu();
+#ifdef USE_SCALAPACK
+    cleanup_blacs();
+#endif
+}
+
+// File-static trampoline for gpu::eigensolver_solve_gpu callback.
+// Uses the same pattern as GPUSCF.cu's s_instance_ approach.
+static const Hamiltonian* s_eigen_H_ptr_ = nullptr;
+
+static void eigen_apply_H_cb(const double* psi, const double* Veff,
+                               double* Hpsi, double* /*x_ex*/, int ncol)
+{
+    // Delegate to Hamiltonian::apply(Device::GPU) which uses its own d_x_ex workspace.
+    // The x_ex parameter from the eigensolver is ignored — the Hamiltonian manages its own halo buffer.
+    s_eigen_H_ptr_->apply(psi, Veff, Hpsi, ncol, Device::GPU, 0.0);
+}
+
+static void eigen_apply_H_z_cb(const cuDoubleComplex* psi, const double* Veff,
+                                 cuDoubleComplex* Hpsi, cuDoubleComplex* /*x_ex*/, int ncol)
+{
+    // Delegate to Hamiltonian::apply_kpt(Device::GPU).
+    // kpt_cart and cell_lengths are already set in the Hamiltonian's GPU state (kxLx, kyLy, kzLz).
+    s_eigen_H_ptr_->apply_kpt(
+        reinterpret_cast<const std::complex<double>*>(psi),
+        Veff,
+        reinterpret_cast<std::complex<double>*>(Hpsi),
+        ncol, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
+}
+
+void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
+                         int Nd_d, int Nband,
+                         double lambda_cutoff, double eigval_min, double eigval_max,
+                         int cheb_degree, int ld, Device dev)
+{
+    if (dev == Device::CPU) {
+        solve(psi, eigvals, Veff, Nd_d, Nband,
+              lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld);
+        return;
+    }
+
+    // GPU path: upload psi to GPU, run CheFSI, download results.
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    size_t psi_bytes = (size_t)Nd_d * Nband * sizeof(double);
+
+    // Allocate temporary device buffers for psi (input/output) and Veff
+    double* d_psi_tmp = nullptr;
+    double* d_Veff_tmp = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_psi_tmp, psi_bytes));
+    CUDA_CHECK(cudaMalloc(&d_Veff_tmp, Nd_d * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_psi_tmp, psi, psi_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_Veff_tmp, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice));
+
+    // Set up H*psi callback trampoline
+    s_eigen_H_ptr_ = gs->H;
+
+    // The d_x_ex parameter is passed to the callback but our callback ignores it
+    // (Hamiltonian::apply(Device::GPU) uses its own internal halo buffer).
+    // Pass nullptr since the callback doesn't use it.
+    gpu::eigensolver_solve_gpu(
+        d_psi_tmp,         // d_psi: in/out
+        gs->d_eigvals,     // d_eigvals
+        d_Veff_tmp,        // d_Veff
+        gs->d_Y,           // d_Y workspace
+        gs->d_Xold,        // d_Xold workspace
+        gs->d_Xnew,        // d_Xnew workspace
+        gs->d_HX,          // d_HX workspace
+        nullptr,           // d_x_ex (ignored by callback)
+        gs->d_Hs,          // d_Hs
+        gs->d_Ms,          // d_Ms
+        Nd_d, Nband,
+        lambda_cutoff, eigval_min, eigval_max,
+        cheb_degree, gs->dV,
+        eigen_apply_H_cb);
+
+    // Download eigenvalues and psi back to host
+    CUDA_CHECK(cudaMemcpy(eigvals, gs->d_eigvals, Nband * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(psi, d_psi_tmp, psi_bytes, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(d_psi_tmp));
+    CUDA_CHECK(cudaFree(d_Veff_tmp));
+}
+
+void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
+                              int Nd_d, int Nband,
+                              double lambda_cutoff, double eigval_min, double eigval_max,
+                              const Vec3& kpt_cart, const Vec3& cell_lengths,
+                              int cheb_degree, int ld, Device dev)
+{
+    if (dev == Device::CPU) {
+        solve_kpt(psi, eigvals, Veff, Nd_d, Nband,
+                  lambda_cutoff, eigval_min, eigval_max,
+                  kpt_cart, cell_lengths, cheb_degree, ld);
+        return;
+    }
+
+    // GPU path: upload psi (complex) to GPU, run complex CheFSI, download results.
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    size_t psi_bytes = (size_t)Nd_d * Nband * sizeof(cuDoubleComplex);
+
+    // Allocate temporary device buffers
+    cuDoubleComplex* d_psi_tmp = nullptr;
+    double* d_Veff_tmp = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_psi_tmp, psi_bytes));
+    CUDA_CHECK(cudaMalloc(&d_Veff_tmp, Nd_d * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_psi_tmp, psi, psi_bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_Veff_tmp, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice));
+
+    // Set up k-point Bloch factors in Hamiltonian's GPU state before calling
+    // (The SCF loop already called set_kpoint + set_vnl_kpt, and the Hamiltonian's
+    // GPU state stores kxLx/kyLy/kzLz. We need to update them for this k-point.)
+    // Note: Hamiltonian::apply_kpt(Device::GPU) reads kxLx etc from its GPU state.
+    // For the callback, we pass {0,0,0} for kpt_cart since kxLx/kyLy/kzLz are already set.
+
+    s_eigen_H_ptr_ = gs->H;
+
+    gpu::eigensolver_solve_z_gpu(
+        d_psi_tmp,         // d_psi_z: in/out
+        gs->d_eigvals,     // d_eigvals (real)
+        d_Veff_tmp,        // d_Veff
+        gs->d_Y_z,         // d_Y_z workspace
+        gs->d_Xold_z,      // d_Xold_z workspace
+        gs->d_Xnew_z,      // d_Xnew_z workspace
+        gs->d_HX_z,        // d_HX_z workspace
+        nullptr,           // d_x_ex_z (ignored by callback)
+        gs->d_Hs_z,        // d_Hs_z
+        gs->d_Ms_z,        // d_Ms_z
+        Nd_d, Nband,
+        lambda_cutoff, eigval_min, eigval_max,
+        cheb_degree, gs->dV,
+        eigen_apply_H_z_cb);
+
+    // Download eigenvalues and psi back to host
+    CUDA_CHECK(cudaMemcpy(eigvals, gs->d_eigvals, Nband * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(psi, d_psi_tmp, psi_bytes, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(d_psi_tmp));
+    CUDA_CHECK(cudaFree(d_Veff_tmp));
+}
+
+void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
+                                     int Nd_d, int Nband,
+                                     double lambda_cutoff, double eigval_min, double eigval_max,
+                                     const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                     int cheb_degree, int ld, Device dev)
+{
+    if (dev == Device::CPU) {
+        solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
+                         lambda_cutoff, eigval_min, eigval_max,
+                         kpt_cart, cell_lengths, cheb_degree, ld);
+        return;
+    }
+
+    // GPU spinor path: SOC uses 2*Nd_d rows per band and complex CheFSI.
+    // The spinor Hamiltonian callback is different (needs Veff_spinor), so for now
+    // fall back to CPU. Full spinor GPU path requires a dedicated callback.
+    // TODO: Wire spinor GPU eigensolver with Hamiltonian::apply_spinor_kpt(Device::GPU).
+    static bool warned = false;
+    if (!warned) { fprintf(stderr, "INFO: Spinor eigensolver GPU path not yet wired, using CPU\n"); warned = true; }
+    solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
+                     lambda_cutoff, eigval_min, eigval_max,
+                     kpt_cart, cell_lengths, cheb_degree, ld);
+}
+
 } // namespace lynx
 
 #endif // USE_CUDA

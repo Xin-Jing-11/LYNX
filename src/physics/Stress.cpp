@@ -6,7 +6,7 @@
 #include "io/InputParser.hpp"
 
 #ifdef USE_CUDA
-#include "physics/GPUSCF.cuh"
+#include "physics/GPUStress.cuh"
 #endif
 #include "core/constants.hpp"
 #include "core/Lattice.hpp"
@@ -68,24 +68,11 @@ void Stress::compute(
     const double* rho_dn_ptr = (Nspin_calc == 2) ? scf.density().rho(1).data() : nullptr;
 
     // GPU mGGA stress
+    // TODO: Re-enable GPU mGGA stress via unified operator GPU state
+    //       (psi on device accessed through Hamiltonian::gpu_state_ptr()).
+    //       For now, falls back to CPU mGGA stress computation.
     const double* gpu_mgga_ptr = nullptr;
     const double* gpu_dot_ptr = nullptr;
-    [[maybe_unused]] std::array<double, 6> gpu_mgga_stress = {};
-    [[maybe_unused]] double gpu_tau_vtau_dot_val = 0.0;
-#ifdef USE_CUDA
-    {
-        bool is_mgga = (config.xc == XCType::MGGA_SCAN ||
-                        config.xc == XCType::MGGA_RSCAN ||
-                        config.xc == XCType::MGGA_R2SCAN);
-        if (is_mgga && scf.gpu_runner() && !ctx.is_kpt()) {
-            scf.gpu_runner()->compute_mgga_stress(
-                wfn,
-                gpu_mgga_stress.data(), &gpu_tau_vtau_dot_val);
-            gpu_mgga_ptr = gpu_mgga_stress.data();
-            gpu_dot_ptr = &gpu_tau_vtau_dot_val;
-        }
-    }
-#endif
 
     compute_impl(ctx, wfn, atoms.crystal,
                  atoms.influence, atoms.nloc_influence, vnl,

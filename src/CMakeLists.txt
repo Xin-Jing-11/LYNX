@@ -1,5 +1,5 @@
 add_library(lynx_core
-    core/NDArray.cpp
+    core/DeviceArray.cpp
     core/Lattice.cpp
     core/FDGrid.cpp
     core/Domain.cpp
@@ -69,6 +69,7 @@ target_link_libraries(lynx PRIVATE lynx_core)
 
 if(USE_CUDA)
     target_sources(lynx_core PRIVATE
+        core/DeviceArray.cu
         core/gpu_common.cu
         parallel/HaloExchange.cu
         operators/Laplacian.cu
@@ -77,12 +78,16 @@ if(USE_CUDA)
         operators/NonlocalProjector.cu
         operators/ComplexOperators.cu
         operators/SOCOperators.cu
+        electronic/ElectronDensity.cu
+        electronic/KineticEnergyDensity.cu
         solvers/EigenSolver.cu
         solvers/LinearSolver.cu
+        solvers/PoissonSolver.cu
+        solvers/Mixer.cu
         xc/XCFunctional.cu
         xc/GPUExactExchange.cu
         xc/GPUExchangePoissonSolver.cu
-        physics/GPUSCF.cu
+        physics/EffectivePotential.cu
         physics/GPUForce.cu
         physics/GPUStress.cu
     )

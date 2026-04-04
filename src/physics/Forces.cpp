@@ -468,11 +468,11 @@ void Forces::compute_nonlocal(
         for (int k = 0; k < Nkpts; ++k) {
             int k_glob = kpt_start + k;
             double wk = kpt_weights[k_glob];
-            const NDArray<double>& occ_sk = wfn.occupations(s, k);
+            const DeviceArray<double>& occ_sk = wfn.occupations(s, k);
 
             if (is_kpt) {
                 // ===== Complex k-point path =====
-                const NDArray<Complex>& psi_sk = wfn.psi_kpt(s, k);
+                const DeviceArray<Complex>& psi_sk = wfn.psi_kpt(s, k);
                 Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
 
                 for (int n = 0; n < Nband; ++n) {
@@ -563,7 +563,7 @@ void Forces::compute_nonlocal(
                 }
             } else {
                 // ===== Real gamma-point path =====
-                const NDArray<double>& psi_sk = wfn.psi(s, k);
+                const DeviceArray<double>& psi_sk = wfn.psi(s, k);
 
                 for (int n = 0; n < Nband; ++n) {
                     double g_n = occ_sk(band_start + n);
@@ -745,8 +745,8 @@ void Forces::compute_nonlocal_soc(
         int k_glob = kpt_start + k;
         double wk = kpt_weights[k_glob];
         // SOC: single spin channel (s=0), both components in spinor
-        const NDArray<double>& occ_k = wfn.occupations(0, k);
-        const NDArray<Complex>& psi_sk = wfn.psi_kpt(0, k);
+        const DeviceArray<double>& occ_k = wfn.occupations(0, k);
+        const DeviceArray<Complex>& psi_sk = wfn.psi_kpt(0, k);
         Vec3 kpt_cart = kpoints->kpts_cart()[k_glob];
         int Nd_d_spinor = 2 * Nd_d;
 

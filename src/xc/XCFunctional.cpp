@@ -13,6 +13,10 @@
 
 namespace lynx {
 
+#ifndef USE_CUDA
+XCFunctional::~XCFunctional() = default;
+#endif
+
 void XCFunctional::setup(XCType type, const Domain& domain, const FDGrid& grid,
                           const Gradient* gradient, const HaloExchange* halo) {
     type_ = type;
@@ -710,5 +714,31 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
     xc_func_end(&func_x);
     xc_func_end(&func_c);
 }
+
+// ---------------------------------------------------------------------------
+// Device-dispatching overloads (CPU-only fallbacks when USE_CUDA is off)
+// GPU implementations live in XCFunctional.cu.
+// ---------------------------------------------------------------------------
+#ifndef USE_CUDA
+
+void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
+                             Device dev,
+                             double* Dxcdgrho,
+                             const double* tau, double* vtau) const {
+    if (dev == Device::GPU)
+        throw std::runtime_error("XCFunctional::evaluate(GPU) called but USE_CUDA is off");
+    evaluate(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+}
+
+void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
+                                  Device dev,
+                                  double* Dxcdgrho,
+                                  const double* tau, double* vtau) const {
+    if (dev == Device::GPU)
+        throw std::runtime_error("XCFunctional::evaluate_spin(GPU) called but USE_CUDA is off");
+    evaluate_spin(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+}
+
+#endif // !USE_CUDA
 
 } // namespace lynx

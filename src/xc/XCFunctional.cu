@@ -4,8 +4,14 @@
 #include <vector>
 #include <xc.h>
 #include <xc_funcs.h>
+#include <cublas_v2.h>
 #include "core/gpu_common.cuh"
+#include "core/GPUContext.cuh"
+#include "core/LynxContext.hpp"
+#include "xc/XCFunctional.hpp"
 #include "xc/XCFunctional.cuh"
+#include "parallel/HaloExchange.cuh"
+#include "operators/Gradient.cuh"
 
 namespace lynx {
 namespace gpu {
@@ -1572,6 +1578,560 @@ void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
 }
 
 } // namespace gpu
+
+// ============================================================
+// Kernels duplicated from GPUSCF.cu for XC Device-dispatch
+// (file-static to avoid ODR violations)
+// ============================================================
+
+namespace {
+
+__global__ void xc_sigma_nonorth_kernel(
+    const double* __restrict__ Drho_x,
+    const double* __restrict__ Drho_y,
+    const double* __restrict__ Drho_z,
+    double* __restrict__ sigma, int N,
+    double L00, double L11, double L22, double L01, double L02, double L12)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
+        sigma[i] = L00*dx*dx + L11*dy*dy + L22*dz*dz
+                 + 2.0*L01*dx*dy + 2.0*L02*dx*dz + 2.0*L12*dy*dz;
+    }
+}
+
+__global__ void xc_sigma_3col_kernel(
+    const double* __restrict__ Drho_x,
+    const double* __restrict__ Drho_y,
+    const double* __restrict__ Drho_z,
+    double* __restrict__ sigma, int N, int ncol)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_N = N * ncol;
+    if (idx < total_N) {
+        double dx = Drho_x[idx], dy = Drho_y[idx], dz = Drho_z[idx];
+        sigma[idx] = dx*dx + dy*dy + dz*dz;
+    }
+}
+
+__global__ void xc_sigma_3col_nonorth_kernel(
+    const double* __restrict__ Drho_x,
+    const double* __restrict__ Drho_y,
+    const double* __restrict__ Drho_z,
+    double* __restrict__ sigma, int N, int ncol,
+    double L00, double L11, double L22, double L01, double L02, double L12)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_N = N * ncol;
+    if (idx < total_N) {
+        double dx = Drho_x[idx], dy = Drho_y[idx], dz = Drho_z[idx];
+        sigma[idx] = L00*dx*dx + L11*dy*dy + L22*dz*dz
+                   + 2.0*L01*dx*dy + 2.0*L02*dx*dz + 2.0*L12*dy*dz;
+    }
+}
+
+__global__ void xc_v2xc_scale_3col_kernel(
+    double* __restrict__ f,
+    const double* __restrict__ v2xc, int N, int ncol)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_N = N * ncol;
+    if (idx < total_N) f[idx] *= v2xc[idx];
+}
+
+__global__ void xc_nlcc_add_spin_kernel(
+    const double* __restrict__ rho_up,
+    const double* __restrict__ rho_dn,
+    const double* __restrict__ rho_core,
+    double* __restrict__ rho_xc, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double core_half = 0.5 * rho_core[i];
+        double rup = rho_up[i] + core_half;
+        double rdn = rho_dn[i] + core_half;
+        double rtot = rup + rdn;
+        rho_xc[i]       = (rtot > 1e-14) ? rtot : 1e-14;
+        rho_xc[N + i]   = (rup > 1e-14) ? rup : 1e-14;
+        rho_xc[2*N + i] = (rdn > 1e-14) ? rdn : 1e-14;
+    }
+}
+
+__global__ void xc_rho_xc_spin_kernel(
+    const double* __restrict__ rho_up,
+    const double* __restrict__ rho_dn,
+    double* __restrict__ rho_xc, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double rup = rho_up[i], rdn = rho_dn[i];
+        double rtot = rup + rdn;
+        rho_xc[i]       = (rtot > 1e-14) ? rtot : 1e-14;
+        rho_xc[N + i]   = (rup > 1e-14) ? rup : 1e-14;
+        rho_xc[2*N + i] = (rdn > 1e-14) ? rdn : 1e-14;
+    }
+}
+
+__global__ void xc_spin_divergence_add_kernel(
+    double* __restrict__ Vxc_up,
+    double* __restrict__ Vxc_dn,
+    const double* __restrict__ DDrho,
+    int Nd)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < Nd) {
+        Vxc_up[i] -= DDrho[i] + DDrho[Nd + i];
+        Vxc_dn[i] -= DDrho[i] + DDrho[2*Nd + i];
+    }
+}
+
+__global__ void xc_lapcT_flux_kernel(
+    double* __restrict__ Drho_x,
+    double* __restrict__ Drho_y,
+    double* __restrict__ Drho_z,
+    const double* __restrict__ v2xc, int N,
+    double L00, double L01, double L02,
+    double L10, double L11, double L12,
+    double L20, double L21, double L22)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double dx = Drho_x[i], dy = Drho_y[i], dz = Drho_z[i];
+        double v = v2xc[i];
+        Drho_x[i] = v * (L00*dx + L01*dy + L02*dz);
+        Drho_y[i] = v * (L10*dx + L11*dy + L12*dz);
+        Drho_z[i] = v * (L20*dx + L21*dy + L22*dz);
+    }
+}
+
+__global__ void xc_lapcT_flux_3col_kernel(
+    double* __restrict__ Drho_x,
+    double* __restrict__ Drho_y,
+    double* __restrict__ Drho_z,
+    const double* __restrict__ v2xc, int N, int ncol,
+    double L00, double L01, double L02,
+    double L10, double L11, double L12,
+    double L20, double L21, double L22)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_N = N * ncol;
+    if (idx < total_N) {
+        double dx = Drho_x[idx], dy = Drho_y[idx], dz = Drho_z[idx];
+        double v = v2xc[idx];
+        Drho_x[idx] = v * (L00*dx + L01*dy + L02*dz);
+        Drho_y[idx] = v * (L10*dx + L11*dy + L12*dz);
+        Drho_z[idx] = v * (L20*dx + L21*dy + L22*dz);
+    }
+}
+
+} // anonymous namespace
+
+// ============================================================
+// Helper: get libxc functional IDs for mGGA XC types
+// ============================================================
+static void get_mgga_libxc_ids(XCType xc_type, int& xc_x_id, int& xc_c_id) {
+    switch (xc_type) {
+        case XCType::MGGA_SCAN:   xc_x_id = XC_MGGA_X_SCAN;   xc_c_id = XC_MGGA_C_SCAN;   break;
+        case XCType::MGGA_RSCAN:  xc_x_id = XC_MGGA_X_RSCAN;  xc_c_id = XC_MGGA_C_RSCAN;  break;
+        case XCType::MGGA_R2SCAN: xc_x_id = XC_MGGA_X_R2SCAN; xc_c_id = XC_MGGA_C_R2SCAN; break;
+        default:                  xc_x_id = XC_MGGA_X_SCAN;    xc_c_id = XC_MGGA_C_SCAN;   break;
+    }
+}
+
+// ============================================================
+// GPUXCState — GPU-side data for Device-dispatching evaluate()
+// ============================================================
+
+struct GPUXCState {
+    // Grid parameters
+    int nx = 0, ny = 0, nz = 0, FDn = 0, Nd = 0;
+    bool is_orth = true;
+    bool has_mixed_deriv = false;
+
+    // Metric tensor (row-major 3x3)
+    double lapcT[9] = {};
+
+    // XC type flags
+    XCType xc_type = XCType::GGA_PBE;
+    bool is_gga = false;
+    bool is_mgga = false;
+
+    // NLCC
+    bool has_nlcc = false;
+    double* d_rho_core = nullptr;
+
+    // tau pointer (for mGGA, set externally)
+    double* d_tau = nullptr;
+    double* d_vtau = nullptr;
+    bool tau_valid = false;
+
+    // Workspace buffers (owned by this operator)
+    double* d_grad_rho = nullptr;  // 3*Nd (non-spin) or 3*2*Nd (spin)
+    double* d_sigma    = nullptr;  // Nd (non-spin) or 3*Nd (spin)
+    double* d_v2xc     = nullptr;  // Nd (non-spin) or 3*Nd (spin)
+    double* d_x_ex_xc  = nullptr;  // nd_ex (halo workspace for gradient)
+    double* d_rho_xc   = nullptr;  // Nd (temp for NLCC rho + rho_core)
+};
+
+// ── setup_gpu / cleanup_gpu ──────────────────────────
+
+void XCFunctional::setup_gpu(const LynxContext& ctx, int Nspin) {
+    if (!gpu_state_raw_)
+        gpu_state_raw_ = new GPUXCState();
+    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+
+    const auto& grid    = ctx.grid();
+    const auto& domain  = ctx.domain();
+    const auto& stencil = ctx.stencil();
+
+    gs->nx  = grid.Nx();
+    gs->ny  = grid.Ny();
+    gs->nz  = grid.Nz();
+    gs->FDn = stencil.FDn();
+    gs->Nd  = domain.Nd_d();
+    gs->is_orth         = grid.lattice().is_orthogonal();
+    gs->has_mixed_deriv = !gs->is_orth;
+
+    gs->xc_type = type_;
+    gs->is_gga  = is_gga() || is_mgga();
+    gs->is_mgga = is_mgga();
+
+    // Metric tensor
+    {
+        const auto& L = grid.lattice().lapc_T();
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                gs->lapcT[i * 3 + j] = L(i, j);
+    }
+
+    int Nd = gs->Nd;
+    int nx_ex = gs->nx + 2 * gs->FDn;
+    int ny_ex = gs->ny + 2 * gs->FDn;
+    int nz_ex = gs->nz + 2 * gs->FDn;
+    size_t nd_ex = (size_t)nx_ex * ny_ex * nz_ex;
+
+    // GGA/mGGA workspace
+    if (gs->is_gga) {
+        int grad_cols = (Nspin >= 2) ? 6 : 3;  // 3 dirs * Nspin columns
+        CUDA_CHECK(cudaMalloc(&gs->d_grad_rho, (size_t)grad_cols * Nd * sizeof(double)));
+
+        int sigma_cols = (Nspin >= 2) ? 3 : 1;  // uu, ud, dd for spin
+        CUDA_CHECK(cudaMalloc(&gs->d_sigma, (size_t)sigma_cols * Nd * sizeof(double)));
+
+        int v2_cols = (Nspin >= 2) ? 3 : 1;
+        CUDA_CHECK(cudaMalloc(&gs->d_v2xc, (size_t)v2_cols * Nd * sizeof(double)));
+
+        CUDA_CHECK(cudaMalloc(&gs->d_x_ex_xc, nd_ex * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&gs->d_rho_xc,  Nd * sizeof(double)));
+    }
+}
+
+void XCFunctional::cleanup_gpu() {
+    if (!gpu_state_raw_) return;
+    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+
+    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+
+    safe_free(gs->d_rho_core);
+    safe_free(gs->d_grad_rho);
+    safe_free(gs->d_sigma);
+    safe_free(gs->d_v2xc);
+    safe_free(gs->d_x_ex_xc);
+    safe_free(gs->d_rho_xc);
+
+    delete gs;
+    gpu_state_raw_ = nullptr;
+}
+
+XCFunctional::~XCFunctional() {
+    cleanup_gpu();
+}
+
+// ============================================================
+// Device-dispatching evaluate() — non-spin
+// ============================================================
+
+void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
+                             Device dev,
+                             double* Dxcdgrho,
+                             const double* tau, double* vtau) const {
+    if (dev == Device::CPU) {
+        evaluate(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+        return;
+    }
+
+    // GPU path — mirrors GPUSCF::gpu_xc_evaluate()
+    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    auto& ctx = gpu::GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
+    int bs = 256;
+    int grid_sz = gpu::ceildiv(Nd_d, bs);
+    int nx_ex = gs->nx + 2 * gs->FDn, ny_ex = gs->ny + 2 * gs->FDn;
+
+    bool use_gga = gs->is_gga || gs->is_mgga;
+    if (use_gga) {
+        // GGA / mGGA path
+        double* d_Drho_x = ctx.buf.grad_rho;
+        double* d_Drho_y = ctx.buf.grad_rho + Nd_d;
+        double* d_Drho_z = ctx.buf.grad_rho + 2 * Nd_d;
+        double* d_sigma  = ctx.buf.aar_r;      // reuse
+        double* d_v2xc   = ctx.buf.Dxcdgrho;
+        double* d_x_ex   = ctx.buf.aar_x_ex;
+
+        // NLCC: rho + rho_core
+        double* d_rho_xc;
+        if (gs->has_nlcc && gs->d_rho_core) {
+            d_rho_xc = ctx.buf.b;
+            gpu::nlcc_add_kernel<<<grid_sz, bs, 0, stream>>>(
+                rho, gs->d_rho_core, d_rho_xc, Nd_d);
+        } else {
+            d_rho_xc = const_cast<double*>(rho);
+        }
+
+        // Gradient
+        gpu::halo_exchange_gpu(d_rho_xc, d_x_ex, gs->nx, gs->ny, gs->nz,
+                               gs->FDn, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_Drho_x, gs->nx, gs->ny, gs->nz,
+                          gs->FDn, nx_ex, ny_ex, 0, 1, stream);
+        gpu::gradient_gpu(d_x_ex, d_Drho_y, gs->nx, gs->ny, gs->nz,
+                          gs->FDn, nx_ex, ny_ex, 1, 1, stream);
+        gpu::gradient_gpu(d_x_ex, d_Drho_z, gs->nx, gs->ny, gs->nz,
+                          gs->FDn, nx_ex, ny_ex, 2, 1, stream);
+
+        // sigma = |nabla rho|^2
+        if (gs->is_orth) {
+            gpu::sigma_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd_d);
+        } else {
+            xc_sigma_nonorth_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd_d,
+                gs->lapcT[0], gs->lapcT[4], gs->lapcT[8],
+                gs->lapcT[1], gs->lapcT[2], gs->lapcT[5]);
+        }
+
+        // XC kernel dispatch
+        if (gs->is_mgga && gs->tau_valid && tau) {
+            if (gs->xc_type == XCType::MGGA_SCAN) {
+                gpu::mgga_scan_gpu(d_rho_xc, d_sigma, tau, exc, Vxc, d_v2xc,
+                                   const_cast<double*>(vtau), Nd_d, stream);
+            } else {
+                int xc_x_id, xc_c_id;
+                get_mgga_libxc_ids(gs->xc_type, xc_x_id, xc_c_id);
+                gpu::mgga_libxc_gpu(xc_x_id, xc_c_id, d_rho_xc, d_sigma, tau,
+                                    exc, Vxc, d_v2xc, const_cast<double*>(vtau), Nd_d);
+            }
+        } else {
+            gpu::gga_pbe_gpu(d_rho_xc, d_sigma, exc, Vxc, d_v2xc, Nd_d, stream);
+        }
+
+        // Divergence correction
+        if (gs->is_orth) {
+            gpu::v2xc_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_x, d_v2xc, Nd_d);
+            gpu::v2xc_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_y, d_v2xc, Nd_d);
+            gpu::v2xc_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_Drho_z, d_v2xc, Nd_d);
+        } else {
+            xc_lapcT_flux_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd_d,
+                gs->lapcT[0], gs->lapcT[1], gs->lapcT[2],
+                gs->lapcT[3], gs->lapcT[4], gs->lapcT[5],
+                gs->lapcT[6], gs->lapcT[7], gs->lapcT[8]);
+        }
+
+        double* d_DDrho = d_sigma;  // reuse
+        // x-direction
+        gpu::halo_exchange_gpu(d_Drho_x, d_x_ex, gs->nx, gs->ny, gs->nz,
+                               gs->FDn, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_DDrho, gs->nx, gs->ny, gs->nz,
+                          gs->FDn, nx_ex, ny_ex, 0, 1, stream);
+        gpu::divergence_sub_kernel<<<grid_sz, bs, 0, stream>>>(Vxc, d_DDrho, Nd_d);
+        // y-direction
+        gpu::halo_exchange_gpu(d_Drho_y, d_x_ex, gs->nx, gs->ny, gs->nz,
+                               gs->FDn, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_DDrho, gs->nx, gs->ny, gs->nz,
+                          gs->FDn, nx_ex, ny_ex, 1, 1, stream);
+        gpu::divergence_sub_kernel<<<grid_sz, bs, 0, stream>>>(Vxc, d_DDrho, Nd_d);
+        // z-direction
+        gpu::halo_exchange_gpu(d_Drho_z, d_x_ex, gs->nx, gs->ny, gs->nz,
+                               gs->FDn, 1, true, true, true, stream);
+        gpu::gradient_gpu(d_x_ex, d_DDrho, gs->nx, gs->ny, gs->nz,
+                          gs->FDn, nx_ex, ny_ex, 2, 1, stream);
+        gpu::divergence_sub_kernel<<<grid_sz, bs, 0, stream>>>(Vxc, d_DDrho, Nd_d);
+
+    } else {
+        // LDA path
+        double* d_rho_xc;
+        if (gs->has_nlcc && gs->d_rho_core) {
+            d_rho_xc = ctx.buf.b;
+            gpu::nlcc_add_kernel<<<grid_sz, bs, 0, stream>>>(
+                rho, gs->d_rho_core, d_rho_xc, Nd_d);
+        } else {
+            d_rho_xc = const_cast<double*>(rho);
+        }
+        gpu::lda_pw_gpu(d_rho_xc, exc, Vxc, Nd_d, stream);
+    }
+}
+
+// ============================================================
+// Device-dispatching evaluate_spin() — spin-polarized
+// ============================================================
+
+void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
+                                  Device dev,
+                                  double* Dxcdgrho,
+                                  const double* tau, double* vtau) const {
+    if (dev == Device::CPU) {
+        evaluate_spin(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+        return;
+    }
+
+    // GPU path — mirrors GPUSCF::gpu_xc_evaluate_spin()
+    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    auto& ctx = gpu::GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
+    int bs = 256;
+    int grid_sz = gpu::ceildiv(Nd_d, bs);
+    int nx_ex = gs->nx + 2 * gs->FDn, ny_ex = gs->ny + 2 * gs->FDn;
+
+    // rho layout: [up(Nd)|dn(Nd)], Vxc layout: [up(Nd)|dn(Nd)]
+    const double* d_rho_up = rho;
+    const double* d_rho_dn = rho + Nd_d;
+
+    bool use_gga = gs->is_gga || gs->is_mgga;
+    if (use_gga) {
+        // Spin GGA / mGGA path
+        auto& sp = ctx.scratch_pool;
+        size_t sp_cp = sp.checkpoint();
+
+        double* d_rho_xc  = sp.alloc<double>(3 * Nd_d);
+        double* d_sigma    = sp.alloc<double>(3 * Nd_d);
+        double* d_Drho_x   = sp.alloc<double>(3 * Nd_d);
+        double* d_Drho_y   = sp.alloc<double>(3 * Nd_d);
+        double* d_Drho_z   = sp.alloc<double>(3 * Nd_d);
+        double* d_v2xc     = ctx.buf.Dxcdgrho;  // [3*Nd]
+        double* d_x_ex_tmp = ctx.buf.aar_x_ex;
+
+        // Build rho_xc = [total|up|dn]
+        if (gs->has_nlcc && gs->d_rho_core) {
+            xc_nlcc_add_spin_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_rho_up, d_rho_dn, gs->d_rho_core, d_rho_xc, Nd_d);
+        } else {
+            xc_rho_xc_spin_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_rho_up, d_rho_dn, d_rho_xc, Nd_d);
+        }
+
+        // Gradient of all 3 columns
+        for (int col = 0; col < 3; col++) {
+            gpu::halo_exchange_gpu(d_rho_xc + col * Nd_d, d_x_ex_tmp,
+                                   gs->nx, gs->ny, gs->nz, gs->FDn,
+                                   1, true, true, true, stream);
+            gpu::gradient_gpu(d_x_ex_tmp, d_Drho_x + col * Nd_d,
+                              gs->nx, gs->ny, gs->nz, gs->FDn,
+                              nx_ex, ny_ex, 0, 1, stream);
+            gpu::gradient_gpu(d_x_ex_tmp, d_Drho_y + col * Nd_d,
+                              gs->nx, gs->ny, gs->nz, gs->FDn,
+                              nx_ex, ny_ex, 1, 1, stream);
+            gpu::gradient_gpu(d_x_ex_tmp, d_Drho_z + col * Nd_d,
+                              gs->nx, gs->ny, gs->nz, gs->FDn,
+                              nx_ex, ny_ex, 2, 1, stream);
+        }
+
+        // sigma for 3 columns
+        int grid3 = gpu::ceildiv(3 * Nd_d, bs);
+        if (gs->is_orth) {
+            xc_sigma_3col_kernel<<<grid3, bs, 0, stream>>>(
+                d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd_d, 3);
+        } else {
+            xc_sigma_3col_nonorth_kernel<<<grid3, bs, 0, stream>>>(
+                d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd_d, 3,
+                gs->lapcT[0], gs->lapcT[4], gs->lapcT[8],
+                gs->lapcT[1], gs->lapcT[2], gs->lapcT[5]);
+        }
+
+        // XC kernel dispatch
+        if (gs->is_mgga && gs->tau_valid && tau) {
+            if (gs->xc_type == XCType::MGGA_SCAN) {
+                gpu::mgga_scan_spin_gpu(
+                    d_rho_xc + Nd_d, d_rho_xc + 2 * Nd_d,
+                    d_sigma + Nd_d, d_sigma + 2 * Nd_d, d_sigma,
+                    tau, tau + Nd_d,
+                    exc, Vxc, Vxc + Nd_d,
+                    d_v2xc, d_v2xc + Nd_d, d_v2xc + 2 * Nd_d,
+                    const_cast<double*>(vtau), const_cast<double*>(vtau) + Nd_d,
+                    Nd_d, stream);
+            } else {
+                int xc_x_id, xc_c_id;
+                get_mgga_libxc_ids(gs->xc_type, xc_x_id, xc_c_id);
+                gpu::mgga_libxc_spin_gpu(xc_x_id, xc_c_id,
+                    d_rho_xc + Nd_d, d_rho_xc + 2 * Nd_d,
+                    d_sigma + Nd_d, d_sigma + 2 * Nd_d, d_sigma,
+                    tau, tau + Nd_d,
+                    exc, Vxc, Vxc + Nd_d,
+                    d_v2xc, d_v2xc + Nd_d, d_v2xc + 2 * Nd_d,
+                    const_cast<double*>(vtau), const_cast<double*>(vtau) + Nd_d,
+                    Nd_d);
+            }
+        } else {
+            gpu::gga_pbe_spin_gpu(d_rho_xc, d_sigma, exc, Vxc, d_v2xc, Nd_d, stream);
+        }
+
+        // Divergence correction for 3 columns
+        if (gs->is_orth) {
+            xc_v2xc_scale_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_x, d_v2xc, Nd_d, 3);
+            xc_v2xc_scale_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_y, d_v2xc, Nd_d, 3);
+            xc_v2xc_scale_3col_kernel<<<grid3, bs, 0, stream>>>(d_Drho_z, d_v2xc, Nd_d, 3);
+        } else {
+            xc_lapcT_flux_3col_kernel<<<grid3, bs, 0, stream>>>(
+                d_Drho_x, d_Drho_y, d_Drho_z, d_v2xc, Nd_d, 3,
+                gs->lapcT[0], gs->lapcT[1], gs->lapcT[2],
+                gs->lapcT[3], gs->lapcT[4], gs->lapcT[5],
+                gs->lapcT[6], gs->lapcT[7], gs->lapcT[8]);
+        }
+
+        // Accumulate divergence
+        double* d_DDrho = d_sigma;  // reuse
+        CUDA_CHECK(cudaMemset(d_DDrho, 0, 3 * Nd_d * sizeof(double)));
+
+        for (int dir = 0; dir < 3; dir++) {
+            double* d_Drho_dir = (dir == 0) ? d_Drho_x : (dir == 1) ? d_Drho_y : d_Drho_z;
+            for (int col = 0; col < 3; col++) {
+                double* d_DDcol = sp.alloc<double>(Nd_d);
+                gpu::halo_exchange_gpu(d_Drho_dir + col * Nd_d, d_x_ex_tmp,
+                                       gs->nx, gs->ny, gs->nz, gs->FDn,
+                                       1, true, true, true, stream);
+                gpu::gradient_gpu(d_x_ex_tmp, d_DDcol,
+                                  gs->nx, gs->ny, gs->nz, gs->FDn,
+                                  nx_ex, ny_ex, dir, 1, stream);
+                double one = 1.0;
+                cublasDaxpy(ctx.cublas, Nd_d, &one, d_DDcol, 1,
+                            d_DDrho + col * Nd_d, 1);
+                sp.restore(sp.checkpoint() - Nd_d * sizeof(double));
+            }
+        }
+
+        // Apply spin divergence
+        xc_spin_divergence_add_kernel<<<grid_sz, bs, 0, stream>>>(
+            Vxc, Vxc + Nd_d, d_DDrho, Nd_d);
+
+        sp.restore(sp_cp);
+    } else {
+        // LDA spin path
+        if (gs->has_nlcc && gs->d_rho_core) {
+            auto& sp = ctx.scratch_pool;
+            size_t sp_cp = sp.checkpoint();
+            double* d_rho_xc_3 = sp.alloc<double>(3 * Nd_d);
+            xc_nlcc_add_spin_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_rho_up, d_rho_dn, gs->d_rho_core, d_rho_xc_3, Nd_d);
+            gpu::lda_pw_spin_gpu(d_rho_xc_3 + Nd_d, d_rho_xc_3 + 2 * Nd_d,
+                                 exc, Vxc, Vxc + Nd_d, Nd_d, stream);
+            sp.restore(sp_cp);
+        } else {
+            gpu::lda_pw_spin_gpu(d_rho_up, d_rho_dn, exc, Vxc, Vxc + Nd_d,
+                                 Nd_d, stream);
+        }
+    }
+}
+
 } // namespace lynx
 
 #endif // USE_CUDA

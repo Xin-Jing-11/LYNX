@@ -4,6 +4,10 @@
 
 namespace lynx {
 
+#ifndef USE_CUDA
+ElectronDensity::~ElectronDensity() = default;
+#endif
+
 void ElectronDensity::allocate(int Nd_d, int Nspin) {
     Nd_d_ = Nd_d;
     Nspin_ = Nspin;
@@ -12,9 +16,9 @@ void ElectronDensity::allocate(int Nd_d, int Nspin) {
     for (int s = 0; s < Nspin; ++s) {
         rho_.emplace_back(Nd_d);
     }
-    rho_total_ = NDArray<double>(Nd_d);
+    rho_total_ = DeviceArray<double>(Nd_d);
     if (Nspin > 1) {
-        mag_ = NDArray<double>(Nd_d);
+        mag_ = DeviceArray<double>(Nd_d);
     }
 }
 
@@ -173,10 +177,10 @@ void ElectronDensity::allocate_noncollinear(int Nd_d) {
 
     rho_.clear();
     rho_.emplace_back(Nd_d);
-    rho_total_ = NDArray<double>(Nd_d);
-    mag_x_ = NDArray<double>(Nd_d);
-    mag_y_ = NDArray<double>(Nd_d);
-    mag_z_ = NDArray<double>(Nd_d);
+    rho_total_ = DeviceArray<double>(Nd_d);
+    mag_x_ = DeviceArray<double>(Nd_d);
+    mag_y_ = DeviceArray<double>(Nd_d);
+    mag_z_ = DeviceArray<double>(Nd_d);
 }
 
 void ElectronDensity::compute_spinor(const Wavefunction& wfn,
@@ -278,5 +282,27 @@ double ElectronDensity::integrate(double dV) const {
     }
     return sum * dV;
 }
+
+// ============================================================
+// Device-dispatching methods (non-CUDA build: always CPU)
+// ============================================================
+#ifndef USE_CUDA
+void ElectronDensity::compute(const LynxContext& ctx,
+                               const Wavefunction& wfn,
+                               const std::vector<double>& kpt_weights,
+                               Device /*dev*/)
+{
+    // Non-CUDA build: ignore Device, call CPU implementation
+    compute(ctx, wfn, kpt_weights);
+}
+
+void ElectronDensity::compute_spinor(const LynxContext& ctx,
+                                      const Wavefunction& wfn,
+                                      const std::vector<double>& kpt_weights,
+                                      Device /*dev*/)
+{
+    compute_spinor(ctx, wfn, kpt_weights);
+}
+#endif // !USE_CUDA
 
 } // namespace lynx

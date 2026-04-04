@@ -1,11 +1,12 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/KPoints.hpp"
 #include "core/LynxContext.hpp"
+#include "core/DeviceTag.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "operators/Gradient.hpp"
 #include "parallel/MPIComm.hpp"
@@ -20,6 +21,28 @@ namespace lynx {
 class KineticEnergyDensity {
 public:
     KineticEnergyDensity() = default;
+    ~KineticEnergyDensity();
+    KineticEnergyDensity(KineticEnergyDensity&& o) noexcept
+        : tau_(std::move(o.tau_)), valid_(o.valid_)
+    {
+#ifdef USE_CUDA
+        gpu_state_raw_ = o.gpu_state_raw_;
+        o.gpu_state_raw_ = nullptr;
+#endif
+    }
+    KineticEnergyDensity& operator=(KineticEnergyDensity&& o) noexcept {
+        if (this != &o) {
+#ifdef USE_CUDA
+            cleanup_gpu();
+            gpu_state_raw_ = o.gpu_state_raw_;
+            o.gpu_state_raw_ = nullptr;
+#endif
+            tau_ = std::move(o.tau_); valid_ = o.valid_;
+        }
+        return *this;
+    }
+    KineticEnergyDensity(const KineticEnergyDensity&) = delete;
+    KineticEnergyDensity& operator=(const KineticEnergyDensity&) = delete;
 
     // Allocate tau array.
     // For Nspin==1: tau has Nd_d elements.
@@ -47,6 +70,19 @@ public:
                  int band_start,
                  int Nspin_global);
 
+    // Device-dispatching compute: CPU delegates to existing, GPU uses gpu:: kernels.
+    void compute(const LynxContext& ctx,
+                 const Wavefunction& wfn,
+                 const std::vector<double>& kpt_weights,
+                 Device dev);
+
+#ifdef USE_CUDA
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUTauState (defined in .cu)
+
+    void setup_gpu(const LynxContext& ctx, int Nspin);
+    void cleanup_gpu();
+#endif
+
     // Access tau data
     double* data() { return tau_.data(); }
     const double* data() const { return tau_.data(); }
@@ -57,7 +93,7 @@ public:
     void set_valid(bool v) { valid_ = v; }
 
 private:
-    NDArray<double> tau_;
+    DeviceArray<double> tau_;
     bool valid_ = false;
 };
 
