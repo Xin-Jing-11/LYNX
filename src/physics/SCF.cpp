@@ -442,6 +442,12 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
         }
 #endif
         tau_.compute(*ctx_, wfn, state.kpt_weights, dev_);
+#ifdef USE_CUDA
+        // Wire device tau → EffectivePotential for GPU mGGA XC pipeline
+        if (dev_ == Device::GPU) {
+            veff_builder_.set_device_tau(tau_.d_tau(), tau_.d_vtau());
+        }
+#endif
     }
 }
 

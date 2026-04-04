@@ -138,6 +138,10 @@ public:
 
     // Download potential arrays from device to host VeffArrays (for Energy::compute_all).
     void download_to_host(VeffArrays& arrays);
+
+    // Set device tau/vtau pointers for mGGA GPU pipeline.
+    // Called from SCF after KineticEnergyDensity::compute() to wire device tau → XC.
+    void set_device_tau(double* d_tau, double* d_vtau);
 #endif
 
 private:

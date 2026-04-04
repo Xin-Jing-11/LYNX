@@ -108,6 +108,10 @@ struct GPUVeffState {
 
     bool buffers_allocated = false;
 
+    // mGGA tau/vtau device pointers (owned by KineticEnergyDensity, set externally)
+    double* d_tau = nullptr;    // NOT owned — points to KineticEnergyDensity's buffer
+    double* d_vtau = nullptr;   // NOT owned
+
     // Persistent operator instances for GPU dispatch
     XCFunctional xc;
     PoissonSolver poisson;
@@ -254,18 +258,16 @@ void EffectivePotential::compute(const ElectronDensity& density,
 
     // 2. XC evaluation on GPU
     // XC handles NLCC internally (rho_core was uploaded in setup_gpu via set_gpu_nlcc).
-    // Pass device pointers for rho, Vxc, exc.
-    // Note: tau/vtau for mGGA must be device pointers. When tau is host-only
-    // (KineticEnergyDensity GPU path not yet wired), pass nullptr — XC GPU falls back to PBE.
-    // TODO: pass device tau/vtau when KineticEnergyDensity GPU path is complete.
+    // For mGGA: pass device tau/vtau when available (set via set_device_tau from SCF).
+    double* d_tau_ptr = (tau_valid && gs->d_tau) ? gs->d_tau : nullptr;
+    double* d_vtau_ptr = (tau_valid && gs->d_vtau) ? gs->d_vtau : nullptr;
+
     if (Nspin == 2) {
-        // Spin: GPU evaluate_spin expects [up(Nd)|dn(Nd)] — matches d_rho layout
         gs->xc.evaluate_spin(gs->d_rho, gs->d_Vxc, gs->d_exc, Nd,
-                              Device::GPU);
+                              Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
     } else {
-        // Non-spin: pass total density
         gs->xc.evaluate(gs->d_rho_total, gs->d_Vxc, gs->d_exc, Nd,
-                         Device::GPU);
+                         Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
     }
 
     // 3. Prepare Poisson RHS on device: 4*pi*(rho_total + pseudocharge)
@@ -291,8 +293,13 @@ void EffectivePotential::compute(const ElectronDensity& density,
     // 6. Download results to host arrays (for Energy::compute_all and convergence checks)
     download_to_host(arrays);
 
-    // 7. Set vtau on Hamiltonian for mGGA
-    if (is_mgga_type(xc_type) && tau_valid) {
+    // 7. For mGGA: download vtau from device and set on Hamiltonian
+    if (is_mgga_type(xc_type) && tau_valid && gs->d_vtau) {
+        int vtau_size = (Nspin == 2) ? 2 * Nd : Nd;
+        CUDA_CHECK(cudaMemcpyAsync(arrays.vtau.data(), gs->d_vtau,
+                                   vtau_size * sizeof(double),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(arrays.vtau.data());
     } else if (is_mgga_type(xc_type)) {
         const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(nullptr);
@@ -357,6 +364,16 @@ double* EffectivePotential::gpu_rho() {
 double* EffectivePotential::gpu_rho_total() {
     auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
     return gs ? gs->d_rho_total : nullptr;
+}
+
+// ============================================================
+// Set device tau/vtau pointers for mGGA GPU pipeline
+// ============================================================
+void EffectivePotential::set_device_tau(double* d_tau, double* d_vtau) {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gs) return;
+    gs->d_tau = d_tau;
+    gs->d_vtau = d_vtau;
 }
 
 // ============================================================

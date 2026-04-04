@@ -164,6 +164,16 @@ KineticEnergyDensity::~KineticEnergyDensity() {
     cleanup_gpu();
 }
 
+double* KineticEnergyDensity::d_tau() {
+    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    return gs ? gs->d_tau : nullptr;
+}
+
+double* KineticEnergyDensity::d_vtau() {
+    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    return gs ? gs->d_vtau : nullptr;
+}
+
 // ============================================================
 // Device-dispatching compute() — GPU path
 // ============================================================
@@ -348,6 +358,10 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
             tau_tot[i] = tau_up[i] + tau_dn[i];
         }
     }
+
+    // Re-upload final tau to device (host was modified by MPI reductions + spin finalize)
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_tau, tau_.data(), tau_size * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
 
     valid_ = true;
 }

@@ -81,6 +81,10 @@ public:
 
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
+
+    // Device pointer accessors (for GPU-resident mGGA pipeline)
+    double* d_tau();
+    double* d_vtau();
 #endif
 
     // Access tau data
