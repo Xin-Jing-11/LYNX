@@ -201,7 +201,7 @@ void halo_exchange_z_gpu(
     int nd_ex = nxny_ex * nz_ex;
 
     // Zero all x_ex columns
-    CUDA_CHECK(cudaMemset(d_x_ex, 0, (size_t)nd_ex * ncol * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMemsetAsync(d_x_ex, 0, (size_t)nd_ex * ncol * sizeof(cuDoubleComplex), stream));
 
     // Copy interior
     {
@@ -811,7 +811,7 @@ void nonlocal_projector_apply_z_gpu(
     if (n_atoms == 0 || total_nproj == 0) return;
 
     // Zero alpha
-    CUDA_CHECK(cudaMemset(d_alpha, 0, total_nproj * ncol * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMemsetAsync(d_alpha, 0, total_nproj * ncol * sizeof(cuDoubleComplex), stream));
 
     int block_size = 256;
     int nwarps = block_size / 32;

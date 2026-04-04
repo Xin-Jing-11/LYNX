@@ -3,6 +3,7 @@
 #include "xc/GPUExactExchange.cuh"
 #include "xc/GPUExchangePoissonSolver.cuh"
 #include "core/gpu_common.cuh"
+#include "core/GPUContext.cuh"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cusolverDn.h>
@@ -153,12 +154,12 @@ void build_ACE_gpu(cublasHandle_t cublas,
     int block = 256;
     int grid_Nd = (Nd + block - 1) / block;
 
-    CUDA_CHECK(cudaMemset(d_Xi, 0, (size_t)Nd * Nocc * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_Xi, 0, (size_t)Nd * Nocc * sizeof(double), stream));
 
     double* d_rhs = nullptr;
     double* d_sol = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_rhs, Nd * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_sol, Nd * sizeof(double)));
+    CUDA_CHECK(cudaMallocAsync(&d_rhs, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_sol, Nd * sizeof(double), stream));
 
     for (int j = 0; j < Nocc; j++) {
         if (occ[j] < OCC_THRESHOLD) continue;
@@ -180,12 +181,12 @@ void build_ACE_gpu(cublasHandle_t cublas,
         }
     }
 
-    cudaFree(d_rhs);
-    cudaFree(d_sol);
+    cudaFreeAsync(d_rhs, stream);
+    cudaFreeAsync(d_sol, stream);
 
     // Phase 2: ACE operator
     double* d_M = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_M, (size_t)Nocc * Nocc * sizeof(double)));
+    CUDA_CHECK(cudaMallocAsync(&d_M, (size_t)Nocc * Nocc * sizeof(double), stream));
 
     {
         double alpha = std::sqrt(dV);
@@ -212,19 +213,20 @@ void build_ACE_gpu(cublasHandle_t cublas,
                                      Nocc, d_M, Nocc, &work_size);
         double* d_work = nullptr;
         int* d_info = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_work, work_size * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_info, sizeof(int)));
+        CUDA_CHECK(cudaMallocAsync(&d_work, work_size * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_info, sizeof(int), stream));
 
         cusolverDnDpotrf(cusolver, CUBLAS_FILL_MODE_UPPER,
                           Nocc, d_M, Nocc, d_work, work_size, d_info);
 
         int h_info = 0;
         CUDA_CHECK(cudaMemcpyAsync(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);  // CPU needs this data now
         if (h_info != 0) {
             std::fprintf(stderr, "WARNING: cusolverDnDpotrf failed in build_ACE_gpu (info=%d, stream)\n", h_info);
         }
-        cudaFree(d_work);
-        cudaFree(d_info);
+        cudaFreeAsync(d_work, stream);
+        cudaFreeAsync(d_info, stream);
     }
 
     {
@@ -235,7 +237,7 @@ void build_ACE_gpu(cublasHandle_t cublas,
             Nd, Nocc, &alpha, d_M, Nocc, d_Xi, Nd);
     }
 
-    cudaFree(d_M);
+    cudaFreeAsync(d_M, stream);
 }
 
 double compute_energy_gpu(cublasHandle_t cublas,
@@ -260,7 +262,9 @@ double compute_energy_gpu(cublasHandle_t cublas,
     }
 
     std::vector<double> h_Y(Ns * Nocc);
-    CUDA_CHECK(cudaMemcpy(h_Y.data(), d_Y, Ns * Nocc * sizeof(double), cudaMemcpyDeviceToHost));
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    CUDA_CHECK(cudaMemcpyAsync(h_Y.data(), d_Y, Ns * Nocc * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);  // CPU needs this data now
 
     double Eexx = 0.0;
     for (int n = 0; n < Ns; n++) {
@@ -347,8 +351,8 @@ void build_ACE_kpt_accumulate_gpu(cublasHandle_t cublas,
     // Allocate scratch: rhs [Nd] and sol [Nd], both complex
     cuDoubleComplex* d_rhs = nullptr;
     cuDoubleComplex* d_sol = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_rhs, Nd * sizeof(cuDoubleComplex)));
-    CUDA_CHECK(cudaMalloc(&d_sol, Nd * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMallocAsync(&d_rhs, Nd * sizeof(cuDoubleComplex), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_sol, Nd * sizeof(cuDoubleComplex), stream));
 
     // Matching SPARC: j outer (occupied q-states), i inner (occupied k-states)
     for (int j = 0; j < Nocc; j++) {
@@ -370,8 +374,8 @@ void build_ACE_kpt_accumulate_gpu(cublasHandle_t cublas,
         }
     }
 
-    cudaFree(d_rhs);
-    cudaFree(d_sol);
+    cudaFreeAsync(d_rhs, stream);
+    cudaFreeAsync(d_sol, stream);
 }
 
 // Finalize ACE: Cholesky factorize M = -sqrt(dV)*Xi^H*psi, then Xi = Xi * L^{-H}
@@ -388,7 +392,7 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
 
     // M = sqrt(dV) * Xi^H * psi  [Nocc x Nocc]
     cuDoubleComplex* d_M = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_M, (size_t)Nocc * Nocc * sizeof(cuDoubleComplex)));
+    CUDA_CHECK(cudaMallocAsync(&d_M, (size_t)Nocc * Nocc * sizeof(cuDoubleComplex), stream));
 
     {
         cuDoubleComplex alpha = make_cuDoubleComplex(std::sqrt(dV), 0.0);
@@ -417,19 +421,20 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
                                      Nocc, d_M, Nocc, &work_size);
         cuDoubleComplex* d_work = nullptr;
         int* d_info = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_work, work_size * sizeof(cuDoubleComplex)));
-        CUDA_CHECK(cudaMalloc(&d_info, sizeof(int)));
+        CUDA_CHECK(cudaMallocAsync(&d_work, work_size * sizeof(cuDoubleComplex), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_info, sizeof(int), stream));
 
         cusolverDnZpotrf(cusolver, CUBLAS_FILL_MODE_UPPER,
                           Nocc, d_M, Nocc, d_work, work_size, d_info);
 
         int h_info = 0;
         CUDA_CHECK(cudaMemcpyAsync(&h_info, d_info, sizeof(int), cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);  // CPU needs this data now
         if (h_info != 0) {
             std::fprintf(stderr, "WARNING: cusolverDnZpotrf failed in build_ACE_kpt_finalize_gpu (info=%d, stream)\n", h_info);
         }
-        cudaFree(d_work);
-        cudaFree(d_info);
+        cudaFreeAsync(d_work, stream);
+        cudaFreeAsync(d_info, stream);
     }
 
     // Xi = Xi * L^{-H}: solve Xi * L^H = Xi_raw
@@ -442,7 +447,7 @@ void build_ACE_kpt_finalize_gpu(cublasHandle_t cublas,
             Nd, Nocc, &alpha, d_M, Nocc, d_Xi, Nd);
     }
 
-    cudaFree(d_M);
+    cudaFreeAsync(d_M, stream);
 }
 
 // Compute exchange energy for one k-point.
@@ -469,8 +474,10 @@ double compute_energy_kpt_gpu(cublasHandle_t cublas,
     }
 
     // Download Y to host (Nocc*Ns is small)
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     std::vector<cuDoubleComplex> h_Y(Nocc * Ns);
-    CUDA_CHECK(cudaMemcpy(h_Y.data(), d_Y, Nocc * Ns * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_Y.data(), d_Y, Nocc * Ns * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);  // CPU needs this data now
 
     // Eexx_k = wk * sum_n occ[n] * sum_j |Y[j + n*Nocc]|^2
     double Eexx_k = 0.0;

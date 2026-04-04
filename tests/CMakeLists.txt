@@ -2,7 +2,7 @@
 # Unit tests — fast component tests (~seconds each)
 # =============================================================================
 add_executable(lynx_unit_tests
-    unit/test_NDArray.cpp
+    unit/test_DeviceArray.cpp
     unit/test_Lattice.cpp
     unit/test_FDGrid.cpp
     unit/test_Domain.cpp
@@ -104,7 +104,8 @@ if(USE_CUDA)
     target_link_libraries(lynx_gpu_scf_tests PRIVATE lynx_core GTest::gtest)
     set_target_properties(lynx_gpu_scf_tests PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     add_test(NAME GPUSCF COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_gpu_scf_tests>)
-    set_tests_properties(GPUSCF PROPERTIES TIMEOUT 600 LABELS "e2e")
+    set_tests_properties(GPUSCF PROPERTIES TIMEOUT 600 LABELS "e2e"
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
     add_executable(lynx_gpu_soc_tests e2e/test_GPUSOC.cu)
     target_link_libraries(lynx_gpu_soc_tests PRIVATE lynx_core GTest::gtest)

@@ -38,7 +38,6 @@
 #include "physics/Forces.hpp"
 #include "physics/Stress.hpp"
 #include "physics/SCF.hpp"
-#include "physics/GPUSCF.cuh"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 
@@ -155,17 +154,10 @@ int main(int argc, char** argv) {
         // V_ud_re = V_ud_im = 0
     }
 
-    // Setup GPU SCF runner for SOC
-    SCFParams params;
-    params.cheb_degree = 53;
-    MPIComm bandcomm(MPI_COMM_SELF);
+    // SOC test infrastructure — GPU SCF now uses unified path via SCF::run().
+    // Here we just verify the CPU SOC force test infrastructure works.
 
-    GPUSCFRunner runner;
-
-    // We can't easily call runner.run() without a full SCF setup.
-    // Instead, test via the main executable's validation path.
-    // The validation is already embedded in GPUSCF.cu::run() and prints PASS/FAIL.
-    // Here we just verify the SOC test infrastructure works.
+    MPIComm bandcomm;  // default (MPI_COMM_SELF)
 
     // --- Direct CPU SOC force test ---
     printf("\n--- CPU SOC Force (reference) ---\n");

@@ -6,9 +6,13 @@
 
 namespace lynx {
 
+#ifndef USE_CUDA
+KineticEnergyDensity::~KineticEnergyDensity() = default;
+#endif
+
 void KineticEnergyDensity::allocate(int Nd_d, int Nspin) {
     int tau_size = (Nspin == 2) ? 3 * Nd_d : Nd_d;
-    tau_ = NDArray<double>(tau_size);
+    tau_ = DeviceArray<double>(tau_size);
     valid_ = false;
 }
 
@@ -170,5 +174,18 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
             &ctx.spin_bridge(), ctx.spin_start(), ctx.kpt_start(),
             ctx.band_start(), ctx.Nspin());
 }
+
+// ============================================================
+// Device-dispatching method (non-CUDA build: always CPU)
+// ============================================================
+#ifndef USE_CUDA
+void KineticEnergyDensity::compute(const LynxContext& ctx,
+                                    const Wavefunction& wfn,
+                                    const std::vector<double>& kpt_weights,
+                                    Device /*dev*/)
+{
+    compute(ctx, wfn, kpt_weights);
+}
+#endif // !USE_CUDA
 
 } // namespace lynx

@@ -194,7 +194,7 @@ void ExactExchange::allocate_ACE(const Wavefunction& wfn) {
 
     Xi_.resize(Nspin_);
     for (int s = 0; s < Nspin_; s++) {
-        Xi_[s] = NDArray<double>(Nd_d_ * Nstates_occ_);
+        Xi_[s] = DeviceArray<double>(Nd_d_ * Nstates_occ_);
         Xi_[s].zero();
     }
 }
@@ -220,7 +220,7 @@ void ExactExchange::allocate_ACE_kpt(const Wavefunction& wfn) {
     Xi_kpt_.resize(Nspin_ * Nkpts);
     for (int s = 0; s < Nspin_; s++) {
         for (int k = 0; k < Nkpts; k++) {
-            Xi_kpt_[s * Nkpts + k] = NDArray<Complex>(Nd_d_ * Nstates_occ_);
+            Xi_kpt_[s * Nkpts + k] = DeviceArray<Complex>(Nd_d_ * Nstates_occ_);
             Xi_kpt_[s * Nkpts + k].zero();
         }
     }

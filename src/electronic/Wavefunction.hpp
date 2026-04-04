@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/types.hpp"
 #include "core/Domain.hpp"
 
@@ -12,7 +12,7 @@ namespace lynx {
 using Complex = std::complex<double>;
 
 // Stores orbitals, eigenvalues, and occupations for one spin/kpt.
-// Orbitals are stored as (Nd_d, Nband) column-major in NDArray.
+// Orbitals are stored as (Nd_d, Nband) column-major in DeviceArray.
 // Supports both real (Gamma-point) and complex (k-point) wavefunctions.
 //
 // Band parallelism: psi has Nband_local columns (local bands on this process),
@@ -40,20 +40,20 @@ public:
                   int Nspin, int Nkpts, bool is_complex = false, int Nspinor = 1);
 
     // Real orbital access (Gamma-point)
-    NDArray<double>& psi(int spin, int kpt) { return psi_[spin * Nkpts_ + kpt]; }
-    const NDArray<double>& psi(int spin, int kpt) const { return psi_[spin * Nkpts_ + kpt]; }
+    DeviceArray<double>& psi(int spin, int kpt) { return psi_[spin * Nkpts_ + kpt]; }
+    const DeviceArray<double>& psi(int spin, int kpt) const { return psi_[spin * Nkpts_ + kpt]; }
 
     // Complex orbital access (k-point)
-    NDArray<Complex>& psi_kpt(int spin, int kpt) { return psi_kpt_[spin * Nkpts_ + kpt]; }
-    const NDArray<Complex>& psi_kpt(int spin, int kpt) const { return psi_kpt_[spin * Nkpts_ + kpt]; }
+    DeviceArray<Complex>& psi_kpt(int spin, int kpt) { return psi_kpt_[spin * Nkpts_ + kpt]; }
+    const DeviceArray<Complex>& psi_kpt(int spin, int kpt) const { return psi_kpt_[spin * Nkpts_ + kpt]; }
 
     // Eigenvalues: (Nband_global,) per spin/kpt — always real
-    NDArray<double>& eigenvalues(int spin, int kpt) { return eig_[spin * Nkpts_ + kpt]; }
-    const NDArray<double>& eigenvalues(int spin, int kpt) const { return eig_[spin * Nkpts_ + kpt]; }
+    DeviceArray<double>& eigenvalues(int spin, int kpt) { return eig_[spin * Nkpts_ + kpt]; }
+    const DeviceArray<double>& eigenvalues(int spin, int kpt) const { return eig_[spin * Nkpts_ + kpt]; }
 
     // Occupations: (Nband_global,) per spin/kpt — always real
-    NDArray<double>& occupations(int spin, int kpt) { return occ_[spin * Nkpts_ + kpt]; }
-    const NDArray<double>& occupations(int spin, int kpt) const { return occ_[spin * Nkpts_ + kpt]; }
+    DeviceArray<double>& occupations(int spin, int kpt) { return occ_[spin * Nkpts_ + kpt]; }
+    const DeviceArray<double>& occupations(int spin, int kpt) const { return occ_[spin * Nkpts_ + kpt]; }
 
     int Nd_d() const { return Nd_d_; }
     int Nband() const { return Nband_; }           // local band count (psi columns)
@@ -81,10 +81,10 @@ private:
     int Nspinor_ = 1;       // 1 = normal, 2 = SOC spinor
 
     // Indexed by [spin * Nkpts + kpt]
-    std::vector<NDArray<double>> psi_;         // real orbitals (Gamma)
-    std::vector<NDArray<Complex>> psi_kpt_;    // complex orbitals (k-point)
-    std::vector<NDArray<double>> eig_;
-    std::vector<NDArray<double>> occ_;
+    std::vector<DeviceArray<double>> psi_;         // real orbitals (Gamma)
+    std::vector<DeviceArray<Complex>> psi_kpt_;    // complex orbitals (k-point)
+    std::vector<DeviceArray<double>> eig_;
+    std::vector<DeviceArray<double>> occ_;
 };
 
 } // namespace lynx

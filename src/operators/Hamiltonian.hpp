@@ -1,9 +1,10 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/DeviceTag.hpp"
 #include "operators/FDStencil.hpp"
 #include "operators/Gradient.hpp"
 #include "operators/NonlocalProjector.hpp"
@@ -13,6 +14,7 @@
 namespace lynx {
 
 class ExactExchange;  // forward declaration
+class LynxContext;    // forward declaration
 
 using Complex = std::complex<double>;
 
@@ -23,6 +25,36 @@ using Complex = std::complex<double>;
 class Hamiltonian {
 public:
     Hamiltonian() = default;
+    ~Hamiltonian();
+    Hamiltonian(Hamiltonian&& other) noexcept
+        : stencil_(other.stencil_), domain_(other.domain_), grid_(other.grid_),
+          halo_(other.halo_), vnl_(other.vnl_), vnl_kpt_(other.vnl_kpt_),
+          vtau_(other.vtau_), exx_(other.exx_), exx_spin_(other.exx_spin_), exx_kpt_(other.exx_kpt_)
+    {
+#ifdef USE_CUDA
+        gpu_state_raw_ = other.gpu_state_raw_;
+        other.gpu_state_raw_ = nullptr;
+#endif
+    }
+    Hamiltonian& operator=(Hamiltonian&& other) noexcept {
+        if (this != &other) {
+#ifdef USE_CUDA
+            cleanup_gpu();
+#endif
+            stencil_ = other.stencil_; domain_ = other.domain_;
+            grid_ = other.grid_; halo_ = other.halo_;
+            vnl_ = other.vnl_; vnl_kpt_ = other.vnl_kpt_;
+            vtau_ = other.vtau_; exx_ = other.exx_;
+            exx_spin_ = other.exx_spin_; exx_kpt_ = other.exx_kpt_;
+#ifdef USE_CUDA
+            gpu_state_raw_ = other.gpu_state_raw_;
+            other.gpu_state_raw_ = nullptr;
+#endif
+        }
+        return *this;
+    }
+    Hamiltonian(const Hamiltonian&) = delete;
+    Hamiltonian& operator=(const Hamiltonian&) = delete;
 
     // Setup with all required components
     void setup(const FDStencil& stencil,
@@ -79,6 +111,39 @@ public:
 
     const FDStencil& stencil() const { return *stencil_; }
     const Domain& domain() const { return *domain_; }
+
+    // ── Device-dispatching overloads ─────────────────────────────
+    // These forward to the CPU methods (Device::CPU) or GPU kernels (Device::GPU).
+    // GPU path reads parameters from gpu_state_raw_.
+
+    void apply(const double* psi, const double* Veff, double* y,
+               int ncol, Device dev, double c = 0.0) const;
+
+    void apply_kpt(const Complex* psi, const double* Veff, Complex* y,
+                   int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                   Device dev, double c = 0.0) const;
+
+    void apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
+                          int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                          Device dev, double c = 0.0) const;
+
+#ifdef USE_CUDA
+    // ── GPU state management ─────────────────────────────────────
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUHamiltonianState (defined in .cu)
+public:
+    void setup_gpu(const LynxContext& ctx,
+                   const NonlocalProjector* vnl,
+                   const class Crystal& crystal,
+                   const std::vector<struct AtomNlocInfluence>& nloc_influence,
+                   int Nband);
+    void cleanup_gpu();
+    void* gpu_state_ptr() { return gpu_state_raw_; }
+    const void* gpu_state_ptr() const { return gpu_state_raw_; }
+
+    // Update k-point Bloch phase factors on GPU (kxLx, kyLy, kzLz).
+    // d_bloch_fac upload is deferred (TODO: add when nonlocal k-point GPU path is enabled).
+    void set_kpoint_gpu(const Vec3& kpt_cart, const Vec3& cell_lengths);
+#endif
 
 private:
     const FDStencil* stencil_ = nullptr;

@@ -1,8 +1,9 @@
 #pragma once
 
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/types.hpp"
 #include "core/LynxContext.hpp"
+#include "core/DeviceTag.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "parallel/MPIComm.hpp"
 
@@ -12,10 +13,34 @@ namespace lynx {
 class ElectronDensity {
 public:
     ElectronDensity() = default;
+    ~ElectronDensity();
     ElectronDensity(const ElectronDensity&) = delete;
     ElectronDensity& operator=(const ElectronDensity&) = delete;
-    ElectronDensity(ElectronDensity&&) = default;
-    ElectronDensity& operator=(ElectronDensity&&) = default;
+    ElectronDensity(ElectronDensity&& o) noexcept
+        : Nd_d_(o.Nd_d_), Nspin_(o.Nspin_),
+          rho_(std::move(o.rho_)), rho_total_(std::move(o.rho_total_)),
+          mag_(std::move(o.mag_)), mag_x_(std::move(o.mag_x_)),
+          mag_y_(std::move(o.mag_y_)), mag_z_(std::move(o.mag_z_))
+    {
+#ifdef USE_CUDA
+        gpu_state_raw_ = o.gpu_state_raw_;
+        o.gpu_state_raw_ = nullptr;
+#endif
+    }
+    ElectronDensity& operator=(ElectronDensity&& o) noexcept {
+        if (this != &o) {
+#ifdef USE_CUDA
+            cleanup_gpu();
+            gpu_state_raw_ = o.gpu_state_raw_;
+            o.gpu_state_raw_ = nullptr;
+#endif
+            Nd_d_ = o.Nd_d_; Nspin_ = o.Nspin_;
+            rho_ = std::move(o.rho_); rho_total_ = std::move(o.rho_total_);
+            mag_ = std::move(o.mag_); mag_x_ = std::move(o.mag_x_);
+            mag_y_ = std::move(o.mag_y_); mag_z_ = std::move(o.mag_z_);
+        }
+        return *this;
+    }
 
     void allocate(int Nd_d, int Nspin);
 
@@ -23,6 +48,25 @@ public:
     void compute(const LynxContext& ctx,
                  const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights);
+
+    // Device-dispatching compute: CPU delegates to existing method, GPU uses gpu:: kernels.
+    void compute(const LynxContext& ctx,
+                 const Wavefunction& wfn,
+                 const std::vector<double>& kpt_weights,
+                 Device dev);
+
+    // Device-dispatching spinor compute.
+    void compute_spinor(const LynxContext& ctx,
+                        const Wavefunction& wfn,
+                        const std::vector<double>& kpt_weights,
+                        Device dev);
+
+#ifdef USE_CUDA
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUDensityState (defined in .cu)
+
+    void setup_gpu(const LynxContext& ctx, int Nspin);
+    void cleanup_gpu();
+#endif
 
     // Compute density from wavefunctions and occupations (explicit params — GPU code paths).
     void compute(const Wavefunction& wfn,
@@ -37,24 +81,24 @@ public:
                  int band_start = 0);
 
     // Total density (sum over spins)
-    NDArray<double>& rho_total() { return rho_total_; }
-    const NDArray<double>& rho_total() const { return rho_total_; }
+    DeviceArray<double>& rho_total() { return rho_total_; }
+    const DeviceArray<double>& rho_total() const { return rho_total_; }
 
     // Spin-resolved density (index by spin)
-    NDArray<double>& rho(int spin) { return rho_[spin]; }
-    const NDArray<double>& rho(int spin) const { return rho_[spin]; }
+    DeviceArray<double>& rho(int spin) { return rho_[spin]; }
+    const DeviceArray<double>& rho(int spin) const { return rho_[spin]; }
 
     // Magnetization density (spin-up minus spin-down) — only for collinear
-    NDArray<double>& mag() { return mag_; }
-    const NDArray<double>& mag() const { return mag_; }
+    DeviceArray<double>& mag() { return mag_; }
+    const DeviceArray<double>& mag() const { return mag_; }
 
     // Vector magnetization components — for noncollinear/SOC
-    NDArray<double>& mag_x() { return mag_x_; }
-    const NDArray<double>& mag_x() const { return mag_x_; }
-    NDArray<double>& mag_y() { return mag_y_; }
-    const NDArray<double>& mag_y() const { return mag_y_; }
-    NDArray<double>& mag_z() { return mag_z_; }
-    const NDArray<double>& mag_z() const { return mag_z_; }
+    DeviceArray<double>& mag_x() { return mag_x_; }
+    const DeviceArray<double>& mag_x() const { return mag_x_; }
+    DeviceArray<double>& mag_y() { return mag_y_; }
+    const DeviceArray<double>& mag_y() const { return mag_y_; }
+    DeviceArray<double>& mag_z() { return mag_z_; }
+    const DeviceArray<double>& mag_z() const { return mag_z_; }
 
     int Nd_d() const { return Nd_d_; }
     int Nspin() const { return Nspin_; }
@@ -91,12 +135,12 @@ private:
     int Nd_d_ = 0;
     int Nspin_ = 0;
 
-    std::vector<NDArray<double>> rho_;  // per-spin density
-    NDArray<double> rho_total_;
-    NDArray<double> mag_;
-    NDArray<double> mag_x_;  // noncollinear magnetization x
-    NDArray<double> mag_y_;  // noncollinear magnetization y
-    NDArray<double> mag_z_;  // noncollinear magnetization z
+    std::vector<DeviceArray<double>> rho_;  // per-spin density
+    DeviceArray<double> rho_total_;
+    DeviceArray<double> mag_;
+    DeviceArray<double> mag_x_;  // noncollinear magnetization x
+    DeviceArray<double> mag_y_;  // noncollinear magnetization y
+    DeviceArray<double> mag_z_;  // noncollinear magnetization z
 };
 
 } // namespace lynx

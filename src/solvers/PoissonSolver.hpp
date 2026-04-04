@@ -1,9 +1,10 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/DeviceTag.hpp"
 #include "operators/Laplacian.hpp"
 #include "operators/FDStencil.hpp"
 #include "parallel/HaloExchange.hpp"
@@ -17,6 +18,11 @@ namespace lynx {
 class PoissonSolver {
 public:
     PoissonSolver() = default;
+    ~PoissonSolver();
+    PoissonSolver(PoissonSolver&&) noexcept = default;
+    PoissonSolver& operator=(PoissonSolver&&) noexcept = default;
+    PoissonSolver(const PoissonSolver&) = delete;
+    PoissonSolver& operator=(const PoissonSolver&) = delete;
 
     void setup(const Laplacian& laplacian,
                const FDStencil& stencil,
@@ -29,6 +35,16 @@ public:
     // phi: (Nd_d,) output electrostatic potential
     // Returns number of iterations
     int solve(const double* rhs, double* phi, double tol = 1e-8) const;
+
+    // ── Device-dispatching overload ─────────────────────────────
+    int solve(const double* rhs, double* phi, double tol, Device dev) const;
+
+#ifdef USE_CUDA
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUPoissonState (defined in .cu)
+public:
+    void setup_gpu(const class LynxContext& ctx);
+    void cleanup_gpu();
+#endif
 
     // Set AAR parameters
     void set_aar_params(const AARParams& params) { aar_params_ = params; }

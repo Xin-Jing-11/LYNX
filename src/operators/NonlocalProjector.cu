@@ -306,7 +306,7 @@ void nonlocal_projector_apply_gpu(
 {
     if (n_atoms == 0 || total_nproj == 0) return;
 
-    CUDA_CHECK(cudaMemset(d_alpha, 0, total_nproj * ncol * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_alpha, 0, total_nproj * ncol * sizeof(double), stream));
 
     int block_size = 256;
 

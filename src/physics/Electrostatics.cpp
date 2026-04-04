@@ -160,8 +160,8 @@ void Electrostatics::compute_pseudocharge(
     const double* D2_z = stencil.D2_coeff_z();
 
     // Initialize pseudocharge arrays
-    b_ = NDArray<double>(Nd_d);
-    b_ref_ = NDArray<double>(Nd_d);
+    b_ = DeviceArray<double>(Nd_d);
+    b_ref_ = DeviceArray<double>(Nd_d);
     b_.zero();
     b_ref_.zero();
 

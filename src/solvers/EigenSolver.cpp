@@ -149,11 +149,13 @@ inline MPI_Datatype mpi_type(const Complex*) { return MPI_C_DOUBLE_COMPLEX; }
 
 } // namespace blas
 
+#ifndef USE_CUDA
 EigenSolver::~EigenSolver() {
 #ifdef USE_SCALAPACK
     cleanup_blacs();
 #endif
 }
+#endif
 
 void EigenSolver::setup(const LynxContext& ctx, const Hamiltonian& H) {
     H_ = &H;
@@ -685,7 +687,7 @@ void EigenSolver::solve_impl(T* psi, double* eigvals, const double* Veff,
     double dV = domain_->global_grid().dV();
     int Nband_loc = Nband;
 
-    // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d)
+    // Pack from DeviceArray layout (stride=ld) to packed layout (stride=Nd_d)
     std::vector<T> psi_packed;
     T* psi_work = psi;
     if (ld != Nd_d) {
@@ -744,7 +746,7 @@ void EigenSolver::solve_impl(T* psi, double* eigvals, const double* Veff,
         std::memcpy(eigvals, eigs.data(), Nband_loc * sizeof(double));
     }
 
-    // Unpack from packed layout (stride=Nd_d) back to NDArray layout (stride=ld)
+    // Unpack from packed layout (stride=Nd_d) back to DeviceArray layout (stride=ld)
     if (ld != Nd_d) {
         for (int j = 0; j < Nband_loc; ++j)
             std::memcpy(psi + j * ld, Y.data() + j * Nd_d, Nd_d * sizeof(T));
@@ -838,7 +840,7 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
     double dV = domain_->global_grid().dV();
     int Nband_loc = Nband;
 
-    // Pack from NDArray layout (stride=ld) to packed layout (stride=Nd_d_spinor)
+    // Pack from DeviceArray layout (stride=ld) to packed layout (stride=Nd_d_spinor)
     std::vector<Complex> psi_packed;
     Complex* psi_work = psi;
     if (ld != Nd_d_spinor) {
@@ -1053,5 +1055,41 @@ void EigenSolver::lanczos_bounds_spinor_kpt(const double* Veff_spinor, int Nd_d,
     lynx::lanczos_bounds<Complex>(matvec, Nd_spinor, eigval_min, eigval_max,
                                    tol_lanczos, max_iter);
 }
+
+// ============================================================
+// Device-dispatching methods (non-CUDA build: always CPU)
+// ============================================================
+#ifndef USE_CUDA
+void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
+                         int Nd_d, int Nband,
+                         double lambda_cutoff, double eigval_min, double eigval_max,
+                         int cheb_degree, int ld, Device /*dev*/)
+{
+    solve(psi, eigvals, Veff, Nd_d, Nband,
+          lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld);
+}
+
+void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
+                              int Nd_d, int Nband,
+                              double lambda_cutoff, double eigval_min, double eigval_max,
+                              const Vec3& kpt_cart, const Vec3& cell_lengths,
+                              int cheb_degree, int ld, Device /*dev*/)
+{
+    solve_kpt(psi, eigvals, Veff, Nd_d, Nband,
+              lambda_cutoff, eigval_min, eigval_max,
+              kpt_cart, cell_lengths, cheb_degree, ld);
+}
+
+void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
+                                     int Nd_d, int Nband,
+                                     double lambda_cutoff, double eigval_min, double eigval_max,
+                                     const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                     int cheb_degree, int ld, Device /*dev*/)
+{
+    solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
+                     lambda_cutoff, eigval_min, eigval_max,
+                     kpt_cart, cell_lengths, cheb_degree, ld);
+}
+#endif // !USE_CUDA
 
 } // namespace lynx

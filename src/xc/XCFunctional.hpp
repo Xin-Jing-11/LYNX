@@ -1,9 +1,10 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/DeviceTag.hpp"
 #include "operators/Gradient.hpp"
 #include "parallel/HaloExchange.hpp"
 
@@ -14,6 +15,11 @@ namespace lynx {
 class XCFunctional {
 public:
     XCFunctional() = default;
+    ~XCFunctional();
+    XCFunctional(XCFunctional&&) noexcept = default;
+    XCFunctional& operator=(XCFunctional&&) noexcept = default;
+    XCFunctional(const XCFunctional&) = delete;
+    XCFunctional& operator=(const XCFunctional&) = delete;
 
     void setup(XCType type, const Domain& domain, const FDGrid& grid,
                const Gradient* gradient = nullptr,
@@ -42,6 +48,26 @@ public:
                        double* Dxcdgrho = nullptr,
                        const double* tau = nullptr,
                        double* vtau = nullptr) const;
+
+    // ── Device-dispatching overloads ─────────────────────────────
+    // Forward to CPU methods (Device::CPU) or GPU kernels (Device::GPU).
+
+    void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
+                  Device dev,
+                  double* Dxcdgrho = nullptr,
+                  const double* tau = nullptr, double* vtau = nullptr) const;
+
+    void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
+                       Device dev,
+                       double* Dxcdgrho = nullptr,
+                       const double* tau = nullptr, double* vtau = nullptr) const;
+
+#ifdef USE_CUDA
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUXCState (defined in .cu)
+public:
+    void setup_gpu(const class LynxContext& ctx, int Nspin);
+    void cleanup_gpu();
+#endif
 
     // Set exchange scaling factor (1.0 = full exchange, 0.75 = PBE0 during Fock loop)
     void set_exchange_scale(double s) { exchange_scale_ = s; }

@@ -4,9 +4,46 @@
 #include <cstring>
 #include <cmath>
 #include <type_traits>
+#include <stdexcept>
 #include <omp.h>
 
 namespace lynx {
+
+// Destructor — defined here for non-CUDA builds; CUDA builds define it in Hamiltonian.cu
+#ifndef USE_CUDA
+Hamiltonian::~Hamiltonian() = default;
+#endif
+
+// ---------------------------------------------------------------------------
+// Device-dispatching overloads (CPU-only fallbacks when USE_CUDA is off)
+// GPU implementations live in Hamiltonian.cu.
+// ---------------------------------------------------------------------------
+#ifndef USE_CUDA
+
+void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
+                        int ncol, Device dev, double c) const {
+    if (dev == Device::GPU)
+        throw std::runtime_error("Hamiltonian::apply(GPU) called but USE_CUDA is off");
+    apply(psi, Veff, y, ncol, c);
+}
+
+void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
+                            int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                            Device dev, double c) const {
+    if (dev == Device::GPU)
+        throw std::runtime_error("Hamiltonian::apply_kpt(GPU) called but USE_CUDA is off");
+    apply_kpt(psi, Veff, y, ncol, kpt_cart, cell_lengths, c);
+}
+
+void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
+                                    int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                    Device dev, double c) const {
+    if (dev == Device::GPU)
+        throw std::runtime_error("Hamiltonian::apply_spinor_kpt(GPU) called but USE_CUDA is off");
+    apply_spinor_kpt(psi, Veff_spinor, y, ncol, Nd_d, kpt_cart, cell_lengths, c);
+}
+
+#endif // !USE_CUDA
 
 void Hamiltonian::setup(const FDStencil& stencil,
                         const Domain& domain,

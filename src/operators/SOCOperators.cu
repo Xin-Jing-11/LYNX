@@ -423,8 +423,8 @@ void soc_apply_z_gpu(
     if (n_influence == 0 || total_soc_nproj == 0) return;
 
     // 1. Zero alpha arrays
-    cudaMemset(d_alpha_up, 0, total_soc_nproj * ncol * sizeof(cuDoubleComplex));
-    cudaMemset(d_alpha_dn, 0, total_soc_nproj * ncol * sizeof(cuDoubleComplex));
+    cudaMemsetAsync(d_alpha_up, 0, total_soc_nproj * ncol * sizeof(cuDoubleComplex), stream);
+    cudaMemsetAsync(d_alpha_dn, 0, total_soc_nproj * ncol * sizeof(cuDoubleComplex), stream);
 
     // 2. Launch gather kernel: one block per influence atom
     {

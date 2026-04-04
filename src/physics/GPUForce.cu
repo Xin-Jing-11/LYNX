@@ -321,9 +321,9 @@ void compute_force_stress_gpu(
     double* d_Dpsi_x = nullptr;
     double* d_Dpsi_y = nullptr;
     double* d_Dpsi_z = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_x, grad_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_y, grad_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z, grad_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_x, grad_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_y, grad_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z, grad_bytes, stream));
 
     // Small buffers from scratch pool
     size_t scratch_cp = ctx.scratch_pool.checkpoint();
@@ -333,19 +333,19 @@ void compute_force_stress_gpu(
 
     // Force output on device
     double* d_force = ctx.scratch_pool.alloc<double>(3 * n_phys_atoms);
-    CUDA_CHECK(cudaMemset(d_force, 0, 3 * n_phys_atoms * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_force, 0, 3 * n_phys_atoms * sizeof(double), stream));
 
     // Kinetic stress: 6 Voigt components on device
     double* d_sk = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemset(d_sk, 0, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_sk, 0, 6 * sizeof(double), stream));
 
     // Nonlocal stress: 6 Voigt components on device
     double* d_snl = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemset(d_snl, 0, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_snl, 0, 6 * sizeof(double), stream));
 
     // Nonlocal energy: single scalar
     double* d_enl = ctx.scratch_pool.alloc<double>(1);
-    CUDA_CHECK(cudaMemset(d_enl, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_enl, 0, sizeof(double), stream));
 
     // Upload physical atom IP_displ
     double* d_atom_pos = nullptr;
@@ -404,7 +404,7 @@ void compute_force_stress_gpu(
     // Tiled kernel: fixed shared memory ≈ 2 KB, independent of system size
     // ----------------------------------------------------------------
     if (total_nproj > 0 && n_influence > 0) {
-        CUDA_CHECK(cudaMemset(d_alpha, 0, (size_t)total_nproj * Nband * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(d_alpha, 0, (size_t)total_nproj * Nband * sizeof(double), stream));
 
         int block_size = 256;
         size_t smem_tiled = (NL_TILE_FS + block_size / 32) * sizeof(double);
@@ -434,7 +434,7 @@ void compute_force_stress_gpu(
             int bs_force = 256;
 
             for (int dim = 0; dim < 3; ++dim) {
-                CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
+                CUDA_CHECK(cudaMemsetAsync(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double), stream));
 
                 nonlocal_gather_chitpsi_gpu(
                     d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
@@ -463,7 +463,7 @@ void compute_force_stress_gpu(
                 int dim  = voigt_a[v];
                 int dim2 = voigt_b[v];
 
-                CUDA_CHECK(cudaMemset(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double)));
+                CUDA_CHECK(cudaMemsetAsync(d_beta, 0, (size_t)total_nproj * Nband * sizeof(double), stream));
 
                 weighted_gather_chitpsi_kernel<<<n_influence, block_size, smem_tiled, stream>>>(
                     d_Dpsi_arr[dim], d_Chi_flat, d_gpos_flat,
@@ -526,9 +526,9 @@ void compute_force_stress_gpu(
     }
 
     // Free gradient arrays
-    cudaFreeAsync(d_Dpsi_x, 0);
-    cudaFreeAsync(d_Dpsi_y, 0);
-    cudaFreeAsync(d_Dpsi_z, 0);
+    cudaFreeAsync(d_Dpsi_x, stream);
+    cudaFreeAsync(d_Dpsi_y, stream);
+    cudaFreeAsync(d_Dpsi_z, stream);
 
     // Restore scratch pool
     ctx.scratch_pool.restore(scratch_cp);
@@ -632,28 +632,28 @@ void compute_soc_force_gpu(
     cuDoubleComplex* d_alpha_dn = nullptr;
     cuDoubleComplex* d_beta_up  = nullptr;
     cuDoubleComplex* d_beta_dn  = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_alpha_up, alpha_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_alpha_dn, alpha_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_beta_up,  alpha_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_beta_dn,  alpha_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_up, alpha_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_dn, alpha_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_beta_up,  alpha_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_beta_dn,  alpha_bytes, stream));
 
     // Extracted psi_up/dn (Nd_d * Nband complex each)
     size_t psi_comp_bytes = (size_t)Nd_d * Nband * sizeof(cuDoubleComplex);
     cuDoubleComplex* d_psi_up = nullptr;
     cuDoubleComplex* d_psi_dn = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_psi_up, psi_comp_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_psi_dn, psi_comp_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_psi_up, psi_comp_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_psi_dn, psi_comp_bytes, stream));
 
     // Gradient output buffers (Nd_d * Nband complex)
     cuDoubleComplex* d_Dpsi_up = nullptr;
     cuDoubleComplex* d_Dpsi_dn = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_up, psi_comp_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_dn, psi_comp_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_up, psi_comp_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_dn, psi_comp_bytes, stream));
 
     // Halo exchange buffer (Nd_ex * Nband complex)
     size_t ex_bytes = (size_t)Nd_ex * Nband * sizeof(cuDoubleComplex);
     cuDoubleComplex* d_x_ex = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_x_ex, ex_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_x_ex, ex_bytes, stream));
 
     // ----------------------------------------------------------------
     // Step 1: Extract up/dn from spinor layout
@@ -675,8 +675,8 @@ void compute_soc_force_gpu(
     // Actually, the gather kernel expects spinor layout [up|dn] per band.
     // So we just call it with d_psi_spinor directly.
     // ----------------------------------------------------------------
-    CUDA_CHECK(cudaMemset(d_alpha_up, 0, alpha_bytes));
-    CUDA_CHECK(cudaMemset(d_alpha_dn, 0, alpha_bytes));
+    CUDA_CHECK(cudaMemsetAsync(d_alpha_up, 0, alpha_bytes, stream));
+    CUDA_CHECK(cudaMemsetAsync(d_alpha_dn, 0, alpha_bytes, stream));
 
     {
         int threads = 256;
@@ -726,7 +726,7 @@ void compute_soc_force_gpu(
         // Allocate temporary spinor-layout gradient buffer
         cuDoubleComplex* d_Dpsi_spinor = nullptr;
         size_t spinor_grad_bytes = (size_t)Nd_d_spinor * Nband * sizeof(cuDoubleComplex);
-        CUDA_CHECK(cudaMallocAsync(&d_Dpsi_spinor, spinor_grad_bytes, 0));
+        CUDA_CHECK(cudaMallocAsync(&d_Dpsi_spinor, spinor_grad_bytes, stream));
 
         // Scatter Dpsi_up/dn into spinor layout: [up0|dn0|up1|dn1|...]
         {
@@ -744,8 +744,8 @@ void compute_soc_force_gpu(
             }
         }
 
-        CUDA_CHECK(cudaMemset(d_beta_up, 0, alpha_bytes));
-        CUDA_CHECK(cudaMemset(d_beta_dn, 0, alpha_bytes));
+        CUDA_CHECK(cudaMemsetAsync(d_beta_up, 0, alpha_bytes, stream));
+        CUDA_CHECK(cudaMemsetAsync(d_beta_dn, 0, alpha_bytes, stream));
 
         {
             int threads = 256;
@@ -763,7 +763,7 @@ void compute_soc_force_gpu(
             CUDA_CHECK(cudaGetLastError());
         }
 
-        cudaFreeAsync(d_Dpsi_spinor, 0);
+        cudaFreeAsync(d_Dpsi_spinor, stream);
 
         // 3d. Download beta to host
         std::vector<cuDoubleComplex> h_beta_up(alpha_elems);
@@ -837,15 +837,15 @@ void compute_soc_force_gpu(
     }
 
     // Free scratch
-    cudaFreeAsync(d_alpha_up, 0);
-    cudaFreeAsync(d_alpha_dn, 0);
-    cudaFreeAsync(d_beta_up, 0);
-    cudaFreeAsync(d_beta_dn, 0);
-    cudaFreeAsync(d_psi_up, 0);
-    cudaFreeAsync(d_psi_dn, 0);
-    cudaFreeAsync(d_Dpsi_up, 0);
-    cudaFreeAsync(d_Dpsi_dn, 0);
-    cudaFreeAsync(d_x_ex, 0);
+    cudaFreeAsync(d_alpha_up, stream);
+    cudaFreeAsync(d_alpha_dn, stream);
+    cudaFreeAsync(d_beta_up, stream);
+    cudaFreeAsync(d_beta_dn, stream);
+    cudaFreeAsync(d_psi_up, stream);
+    cudaFreeAsync(d_psi_dn, stream);
+    cudaFreeAsync(d_Dpsi_up, stream);
+    cudaFreeAsync(d_Dpsi_dn, stream);
+    cudaFreeAsync(d_x_ex, stream);
 }
 
 } // namespace gpu

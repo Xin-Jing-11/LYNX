@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "atoms/Crystal.hpp"
@@ -31,7 +31,7 @@ public:
         const FDStencil& stencil);
 
     // Access results
-    const NDArray<double>& pseudocharge() const { return b_; }
+    const DeviceArray<double>& pseudocharge() const { return b_; }
     double Eself_Ec() const { return Eself_Ec_; }
     double Eself() const { return Eself_; }
     double Ec() const { return Ec_; }
@@ -59,7 +59,7 @@ public:
         double* rho_at,
         int Nelectron);
 
-    const NDArray<double>& pseudocharge_ref() const { return b_ref_; }
+    const DeviceArray<double>& pseudocharge_ref() const { return b_ref_; }
 
     // Compute NLCC core charge density on the grid
     // rho_core: output array of size Nd_d, stores interpolated core charge
@@ -94,8 +94,8 @@ public:
         double coef);
 
 private:
-    NDArray<double> b_;      // total pseudocharge density
-    NDArray<double> b_ref_;  // reference pseudocharge density (from -Z/r)
+    DeviceArray<double> b_;      // total pseudocharge density
+    DeviceArray<double> b_ref_;  // reference pseudocharge density (from -Z/r)
     double Eself_Ec_ = 0.0;  // combined self + correction energy
     double Eself_ = 0.0;
     double Ec_ = 0.0;

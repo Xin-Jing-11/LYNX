@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/KPoints.hpp"

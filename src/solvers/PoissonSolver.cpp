@@ -6,6 +6,10 @@
 
 namespace lynx {
 
+#ifndef USE_CUDA
+PoissonSolver::~PoissonSolver() = default;
+#endif
+
 void PoissonSolver::setup(const Laplacian& laplacian,
                             const FDStencil& stencil,
                             const Domain& domain,
@@ -58,5 +62,19 @@ int PoissonSolver::solve(const double* rhs, double* phi, double tol) const {
     int iters = LinearSolver::aar(op, rhs, phi, Nd_d, params, self_comm, &jacobi);
     return iters;
 }
+
+// ---------------------------------------------------------------------------
+// Device-dispatching overload (CPU-only fallback when USE_CUDA is off)
+// GPU implementation lives in PoissonSolver.cu.
+// ---------------------------------------------------------------------------
+#ifndef USE_CUDA
+
+int PoissonSolver::solve(const double* rhs, double* phi, double tol, Device dev) const {
+    if (dev == Device::GPU)
+        throw std::runtime_error("PoissonSolver::solve(GPU) called but USE_CUDA is off");
+    return solve(rhs, phi, tol);
+}
+
+#endif // !USE_CUDA
 
 } // namespace lynx

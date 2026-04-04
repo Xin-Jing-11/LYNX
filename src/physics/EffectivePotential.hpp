@@ -1,9 +1,10 @@
 #pragma once
 
 #include "core/types.hpp"
-#include "core/NDArray.hpp"
+#include "core/DeviceArray.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
+#include "core/DeviceTag.hpp"
 #include "operators/Laplacian.hpp"
 #include "operators/Gradient.hpp"
 #include "operators/FDStencil.hpp"
@@ -21,13 +22,13 @@ class ExactExchange;
 // Work arrays produced by EffectivePotential computation.
 // These are inputs/outputs that persist across SCF iterations.
 struct VeffArrays {
-    NDArray<double> Veff;       // effective potential (Nd_d * Nspin)
-    NDArray<double> Vxc;        // XC potential (Nd_d * Nspin)
-    NDArray<double> exc;        // XC energy density (Nd_d)
-    NDArray<double> phi;        // electrostatic potential (Nd_d)
-    NDArray<double> Dxcdgrho;   // GGA: dExc/d(|grad rho|^2) (Nd_d * dxc_ncol)
-    NDArray<double> vtau;       // d(n*exc)/d(tau) (mGGA) (Nd_d or 2*Nd_d for spin)
-    NDArray<double> Veff_spinor; // spinor Veff [V_uu|V_dd|Re(V_ud)|Im(V_ud)] (4*Nd_d)
+    DeviceArray<double> Veff;       // effective potential (Nd_d * Nspin)
+    DeviceArray<double> Vxc;        // XC potential (Nd_d * Nspin)
+    DeviceArray<double> exc;        // XC energy density (Nd_d)
+    DeviceArray<double> phi;        // electrostatic potential (Nd_d)
+    DeviceArray<double> Dxcdgrho;   // GGA: dExc/d(|grad rho|^2) (Nd_d * dxc_ncol)
+    DeviceArray<double> vtau;       // d(n*exc)/d(tau) (mGGA) (Nd_d or 2*Nd_d for spin)
+    DeviceArray<double> Veff_spinor; // spinor Veff [V_uu|V_dd|Re(V_ud)|Im(V_ud)] (4*Nd_d)
 
     // Allocate arrays for given system parameters
     void allocate(int Nd_d, int Nspin, XCType xc_type, bool is_soc);
@@ -38,6 +39,33 @@ struct VeffArrays {
 class EffectivePotential {
 public:
     EffectivePotential() = default;
+    ~EffectivePotential();
+    EffectivePotential(EffectivePotential&& o) noexcept
+        : domain_(o.domain_), grid_(o.grid_), stencil_(o.stencil_),
+          laplacian_(o.laplacian_), gradient_(o.gradient_),
+          hamiltonian_(o.hamiltonian_), halo_(o.halo_), Nspin_global_(o.Nspin_global_)
+    {
+#ifdef USE_CUDA
+        gpu_state_raw_ = o.gpu_state_raw_;
+        o.gpu_state_raw_ = nullptr;
+#endif
+    }
+    EffectivePotential& operator=(EffectivePotential&& o) noexcept {
+        if (this != &o) {
+#ifdef USE_CUDA
+            cleanup_gpu();
+            gpu_state_raw_ = o.gpu_state_raw_;
+            o.gpu_state_raw_ = nullptr;
+#endif
+            domain_ = o.domain_; grid_ = o.grid_; stencil_ = o.stencil_;
+            laplacian_ = o.laplacian_; gradient_ = o.gradient_;
+            hamiltonian_ = o.hamiltonian_; halo_ = o.halo_;
+            Nspin_global_ = o.Nspin_global_;
+        }
+        return *this;
+    }
+    EffectivePotential(const EffectivePotential&) = delete;
+    EffectivePotential& operator=(const EffectivePotential&) = delete;
 
     /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx, const Hamiltonian& hamiltonian);
@@ -66,6 +94,36 @@ public:
                         XCType xc_type,
                         double poisson_tol,
                         VeffArrays& arrays);
+
+    // --- Device-dispatching interfaces ---
+
+    void compute(const ElectronDensity& density,
+                 const double* rho_b,
+                 const double* rho_core,
+                 XCType xc_type,
+                 double exx_frac_scale,
+                 double poisson_tol,
+                 VeffArrays& arrays,
+                 Device dev,
+                 const double* tau = nullptr,
+                 bool tau_valid = false);
+
+    void compute_spinor(const ElectronDensity& density,
+                        const double* rho_b,
+                        const double* rho_core,
+                        XCType xc_type,
+                        double poisson_tol,
+                        VeffArrays& arrays,
+                        Device dev);
+
+#ifdef USE_CUDA
+    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUVeffState (defined in .cu)
+
+    void setup_gpu(const LynxContext& ctx, int Nspin,
+                        XCType xc_type, const double* rho_b,
+                        const double* rho_core);
+    void cleanup_gpu();
+#endif
 
 private:
     const Domain* domain_ = nullptr;
