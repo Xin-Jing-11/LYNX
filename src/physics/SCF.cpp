@@ -115,15 +115,15 @@ double SCF::run(Wavefunction& wfn,
     if (is_soc_) is_kpt_ = true;
 
     // Device dispatch: GPU when available, CPU otherwise.
-    // EigenSolver and ElectronDensity have working GPU paths (upload/compute/download per call).
-    // EffectivePotential and KineticEnergyDensity fall back to CPU internally (correct since
-    // arrays are host-resident). Mixer already supports GPU.
+    // All SCF operators dispatch internally: EigenSolver, ElectronDensity,
+    // EffectivePotential (XC+Poisson+combine), Mixer on GPU.
+    // KineticEnergyDensity still falls back to CPU (mGGA only).
     dev_ = Device::CPU;
 #ifdef USE_CUDA
     if (gpu_enabled_ && crystal_ && nloc_influence_) {
         dev_ = Device::GPU;
         if (rank_world == 0) {
-            std::printf("GPU unified dispatch enabled — EigenSolver+Density on GPU, Veff+Tau on CPU\n");
+            std::printf("GPU unified dispatch enabled — all SCF operators on GPU\n");
         }
     }
 #endif

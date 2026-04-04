@@ -67,6 +67,12 @@ public:
 public:
     void setup_gpu(const class LynxContext& ctx, int Nspin);
     void cleanup_gpu();
+
+    // Upload NLCC core density to GPU state (enables NLCC handling in GPU XC path).
+    void set_gpu_nlcc(const double* rho_core, int Nd);
+
+    // Set tau_valid flag on GPU state (for mGGA: true after first tau computation).
+    void set_gpu_tau_valid(bool valid);
 #endif
 
     // Set exchange scaling factor (1.0 = full exchange, 0.75 = PBE0 during Fock loop)
