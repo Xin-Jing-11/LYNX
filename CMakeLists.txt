@@ -116,7 +116,7 @@ endif()
 # libxc (required — built from submodule)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ENABLE_FORTRAN OFF CACHE BOOL "" FORCE)
-set(ENABLE_CUDA OFF CACHE BOOL "" FORCE)  # TODO: libxc 7.0.0 supports CUDA but crashes GGA fallback test — investigate
+set(ENABLE_CUDA OFF CACHE BOOL "" FORCE)  # libxc CUDA rejects host pointers (cudaMemoryTypeUnregistered) — requires all callers to use pinned memory
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(CMAKE_INSTALL_LIBDIR "lib" CACHE STRING "" FORCE)
 add_subdirectory(external/libxc EXCLUDE_FROM_ALL)

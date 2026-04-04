@@ -1009,38 +1009,14 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
         return;
     }
 
-    // GPU spinor path: SOC uses 2*Nd_d rows per band with complex CheFSI.
-    // Reuse eigensolver_solve_z_gpu with Nd_spinor = 2*Nd_d and spinor callback.
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
-    auto& gctx = gpu::GPUContext::instance();
-    cudaStream_t stream = gctx.compute_stream;
-    int Nd_spinor = 2 * Nd_d;
-    size_t psi_bytes = (size_t)Nd_spinor * Nband * sizeof(cuDoubleComplex);
-
-    // Upload spinor psi and Veff_spinor to device
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, psi, psi_bytes, cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff_spinor, Veff_spinor, 4 * Nd_d * sizeof(double),
-                               cudaMemcpyHostToDevice, stream));
-
-    // Set up callback trampolines
-    s_eigen_H_ptr_ = gs->H;
-    s_eigen_Nd_d_ = Nd_d;
-
-    gpu::eigensolver_solve_z_gpu(
-        gs->d_psi_z, gs->d_eigvals, gs->d_Veff_spinor,
-        gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
-        nullptr, gs->d_Hs_z, gs->d_Ms_z,
-        Nd_spinor, Nband,
-        lambda_cutoff, eigval_min, eigval_max,
-        cheb_degree, gs->dV,
-        eigen_apply_H_spinor_z_cb);
-
-    // Download eigenvalues and psi back to host
-    CUDA_CHECK(cudaMemcpyAsync(eigvals, gs->d_eigvals, Nband * sizeof(double),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(psi, gs->d_psi_z, psi_bytes,
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // GPU spinor path: SOC eigensolver is wired but needs further validation.
+    // The spinor H*psi callback and 2*Nd_d buffer sizing are in place, but the
+    // eigensolver produces incorrect results (NaN) — likely a dV scaling or
+    // inner product normalization issue with Nd_spinor=2*Nd_d.
+    // Fall back to CPU until validated.
+    solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
+                     lambda_cutoff, eigval_min, eigval_max,
+                     kpt_cart, cell_lengths, cheb_degree, ld);
 }
 
 // ============================================================
