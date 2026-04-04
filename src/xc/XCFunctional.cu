@@ -1827,6 +1827,27 @@ XCFunctional::~XCFunctional() {
     cleanup_gpu();
 }
 
+void XCFunctional::set_gpu_nlcc(const double* rho_core, int Nd) {
+    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    if (!gs) return;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
+    safe_free(gs->d_rho_core);
+    if (rho_core) {
+        gs->has_nlcc = true;
+        CUDA_CHECK(cudaMallocAsync(&gs->d_rho_core, Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMemcpyAsync(gs->d_rho_core, rho_core, Nd * sizeof(double),
+                                   cudaMemcpyHostToDevice, stream));
+    } else {
+        gs->has_nlcc = false;
+    }
+}
+
+void XCFunctional::set_gpu_tau_valid(bool valid) {
+    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    if (gs) gs->tau_valid = valid;
+}
+
 // ============================================================
 // Device-dispatching evaluate() — non-spin
 // ============================================================

@@ -3,6 +3,7 @@
 #include "physics/EffectivePotential.hpp"
 #include "core/LynxContext.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/constants.hpp"
 
 #include <cuda_runtime.h>
 #include "core/gpu_common.cuh"
@@ -11,11 +12,11 @@
 namespace lynx {
 
 // ============================================================
-// File-static kernels (duplicated from GPUSCF.cu)
+// File-static kernels
 // ============================================================
 
-// Veff = Vxc + phi
-static __global__ void veff_combine_kernel_local(
+// Veff = Vxc + phi (per spin channel)
+static __global__ void veff_combine_kernel(
     const double* __restrict__ vxc,
     const double* __restrict__ phi,
     double* __restrict__ veff,
@@ -25,19 +26,29 @@ static __global__ void veff_combine_kernel_local(
     if (i < N) veff[i] = vxc[i] + phi[i];
 }
 
-// Veff_s = Vxc_s + phi (spin-resolved: Vxc at offset, phi shared)
-static __global__ void veff_combine_spin_kernel_local(
-    const double* __restrict__ vxc_s,
-    const double* __restrict__ phi,
-    double* __restrict__ veff_s,
-    int N)
+// rhs = fourpi * (rho + pseudocharge)
+static __global__ void poisson_rhs_kernel(
+    const double* __restrict__ rho,
+    const double* __restrict__ pseudocharge,
+    double* __restrict__ rhs,
+    double fourpi, int N)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) veff_s[i] = vxc_s[i] + phi[i];
+    if (i < N) rhs[i] = fourpi * (rho[i] + pseudocharge[i]);
+}
+
+// rhs = fourpi * rho (no pseudocharge)
+static __global__ void poisson_rhs_nob_kernel(
+    const double* __restrict__ rho,
+    double* __restrict__ rhs,
+    double fourpi, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) rhs[i] = fourpi * rho[i];
 }
 
 // Construct 4-component Veff_spinor from XC output and magnetization
-static __global__ void veff_spinor_from_xc_kernel_local(
+static __global__ void veff_spinor_from_xc_kernel(
     const double* __restrict__ Vxc_up,
     const double* __restrict__ Vxc_dn,
     const double* __restrict__ phi,
@@ -71,6 +82,10 @@ static __global__ void veff_spinor_from_xc_kernel_local(
     }
 }
 
+static bool is_mgga_type(XCType t) {
+    return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
+}
+
 // ============================================================
 // GPUVeffState — device-resident potential and density arrays
 // ============================================================
@@ -82,9 +97,51 @@ struct GPUVeffState {
     double* d_pseudocharge = nullptr; // Nd
     double* d_rho_core   = nullptr;  // Nd (if NLCC)
 
-    // NOTE: Intermediate potential arrays (Veff, phi, exc, Vxc, Dxcdgrho)
-    // are NOT owned here — compute() currently falls back to CPU,
-    // and when GPU compute is wired, they will come from GPUContext::buf.
+    // Persistent device arrays for GPU-resident Veff computation.
+    double* d_Veff = nullptr;        // (Nd * Nspin) effective potential
+    double* d_Vxc  = nullptr;        // (Nd * Nspin) XC potential
+    double* d_exc  = nullptr;        // (Nd) XC energy density
+    double* d_phi  = nullptr;        // (Nd) electrostatic potential
+    double* d_rho  = nullptr;        // (Nd * Nspin) electron density (working copy)
+    double* d_rho_total = nullptr;   // (Nd) total density
+    double* d_rhs  = nullptr;        // (Nd) Poisson RHS
+
+    bool buffers_allocated = false;
+
+    // mGGA tau/vtau device pointers (owned by KineticEnergyDensity, set externally)
+    double* d_tau = nullptr;    // NOT owned — points to KineticEnergyDensity's buffer
+    double* d_vtau = nullptr;   // NOT owned
+
+    // Persistent operator instances for GPU dispatch
+    XCFunctional xc;
+    PoissonSolver poisson;
+
+    void allocate_buffers() {
+        if (buffers_allocated) return;
+        cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+        CUDA_CHECK(cudaMallocAsync(&d_Veff, Nd * Nspin * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_Vxc,  Nd * Nspin * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_exc,  Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_phi,  Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_rho,  Nd * Nspin * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_rho_total, Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_rhs,  Nd * sizeof(double), stream));
+
+        buffers_allocated = true;
+    }
+
+    void free_buffers() {
+        if (!buffers_allocated) return;
+        cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+        auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
+
+        safe_free(d_Veff); safe_free(d_Vxc); safe_free(d_exc);
+        safe_free(d_phi); safe_free(d_rho); safe_free(d_rho_total);
+        safe_free(d_rhs);
+
+        buffers_allocated = false;
+    }
 };
 
 void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
@@ -103,6 +160,8 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
     CUDA_CHECK(cudaMallocAsync(&gs->d_pseudocharge, Nd * sizeof(double), stream));
     if (rho_b) {
         CUDA_CHECK(cudaMemcpyAsync(gs->d_pseudocharge, rho_b, Nd * sizeof(double), cudaMemcpyHostToDevice, stream));
+    } else {
+        CUDA_CHECK(cudaMemsetAsync(gs->d_pseudocharge, 0, Nd * sizeof(double), stream));
     }
 
     if (rho_core) {
@@ -110,8 +169,19 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
         CUDA_CHECK(cudaMemcpyAsync(gs->d_rho_core, rho_core, Nd * sizeof(double), cudaMemcpyHostToDevice, stream));
     }
 
-    // Intermediate arrays (Veff, phi, exc, Vxc, Dxcdgrho) are not allocated
-    // here — compute() currently falls back to CPU.
+    // Allocate persistent potential/density device arrays
+    gs->allocate_buffers();
+
+    // Setup XCFunctional for GPU dispatch
+    gs->xc.setup(xc_type, ctx.domain(), ctx.grid(), &ctx.gradient(), &ctx.halo());
+    gs->xc.setup_gpu(ctx, Nspin);
+    if (rho_core) {
+        gs->xc.set_gpu_nlcc(rho_core, Nd);
+    }
+
+    // Setup PoissonSolver for GPU dispatch
+    gs->poisson.setup(ctx.laplacian(), ctx.stencil(), ctx.domain(), ctx.grid(), ctx.halo());
+    gs->poisson.setup_gpu(ctx);
 }
 
 void EffectivePotential::cleanup_gpu() {
@@ -124,6 +194,12 @@ void EffectivePotential::cleanup_gpu() {
     safe_free(gs->d_pseudocharge);
     safe_free(gs->d_rho_core);
 
+    gs->free_buffers();
+
+    // XCFunctional and PoissonSolver clean up their own GPU state in destructors
+    gs->xc.cleanup_gpu();
+    gs->poisson.cleanup_gpu();
+
     delete gs;
     gpu_state_raw_ = nullptr;
 }
@@ -133,7 +209,7 @@ EffectivePotential::~EffectivePotential() {
 }
 
 // ============================================================
-// Device-dispatching compute()
+// Device-dispatching compute() — GPU path
 // ============================================================
 void EffectivePotential::compute(const ElectronDensity& density,
                                   const double* rho_b,
@@ -152,15 +228,86 @@ void EffectivePotential::compute(const ElectronDensity& density,
         return;
     }
 
-    // GPU path: XC and Poisson sub-components don't yet have Device dispatch,
-    // so we run the CPU path. This is correct since arrays are host-resident
-    // and the SCF loop reads from host arrays.
-    compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
-            poisson_tol, arrays, tau, tau_valid);
+    // GPU path: XC + Poisson + combine all on GPU
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gs || !gs->buffers_allocated) {
+        // Fallback to CPU if GPU state not initialized
+        compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
+                poisson_tol, arrays, tau, tau_valid);
+        return;
+    }
+
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int Nd = gs->Nd;
+    int Nspin = gs->Nspin;
+    int bs = 256;
+    int grid_sz = gpu::ceildiv(Nd, bs);
+
+    // For hybrid functionals: scale exchange
+    if (exx_frac_scale > 0.0) {
+        gs->xc.set_exchange_scale(1.0 - exx_frac_scale);
+    }
+
+    // For mGGA: set tau_valid so GPU XC path uses SCAN kernels when tau is available
+    if (is_mgga_type(xc_type)) {
+        gs->xc.set_gpu_tau_valid(tau_valid);
+    }
+
+    // 1. Upload density from host to device
+    upload_density(density);
+
+    // 2. XC evaluation on GPU
+    // XC handles NLCC internally (rho_core was uploaded in setup_gpu via set_gpu_nlcc).
+    // For mGGA: pass device tau/vtau when available (set via set_device_tau from SCF).
+    double* d_tau_ptr = (tau_valid && gs->d_tau) ? gs->d_tau : nullptr;
+    double* d_vtau_ptr = (tau_valid && gs->d_vtau) ? gs->d_vtau : nullptr;
+
+    if (Nspin == 2) {
+        gs->xc.evaluate_spin(gs->d_rho, gs->d_Vxc, gs->d_exc, Nd,
+                              Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
+    } else {
+        gs->xc.evaluate(gs->d_rho_total, gs->d_Vxc, gs->d_exc, Nd,
+                         Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
+    }
+
+    // 3. Prepare Poisson RHS on device: 4*pi*(rho_total + pseudocharge)
+    if (rho_b) {
+        poisson_rhs_kernel<<<grid_sz, bs, 0, stream>>>(
+            gs->d_rho_total, gs->d_pseudocharge, gs->d_rhs,
+            4.0 * constants::PI, Nd);
+    } else {
+        poisson_rhs_nob_kernel<<<grid_sz, bs, 0, stream>>>(
+            gs->d_rho_total, gs->d_rhs,
+            4.0 * constants::PI, Nd);
+    }
+
+    // 4. Solve Poisson equation on GPU (handles mean-subtraction internally)
+    gs->poisson.solve(gs->d_rhs, gs->d_phi, poisson_tol, Device::GPU);
+
+    // 5. Veff = Vxc + phi (per spin channel)
+    for (int s = 0; s < Nspin; ++s) {
+        veff_combine_kernel<<<grid_sz, bs, 0, stream>>>(
+            gs->d_Vxc + s * Nd, gs->d_phi, gs->d_Veff + s * Nd, Nd);
+    }
+
+    // 6. Download results to host arrays (for Energy::compute_all and convergence checks)
+    download_to_host(arrays);
+
+    // 7. For mGGA: download vtau from device and set on Hamiltonian
+    if (is_mgga_type(xc_type) && tau_valid && gs->d_vtau) {
+        int vtau_size = (Nspin == 2) ? 2 * Nd : Nd;
+        CUDA_CHECK(cudaMemcpyAsync(arrays.vtau.data(), gs->d_vtau,
+                                   vtau_size * sizeof(double),
+                                   cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(arrays.vtau.data());
+    } else if (is_mgga_type(xc_type)) {
+        const_cast<Hamiltonian*>(hamiltonian_)->set_vtau(nullptr);
+    }
 }
 
 // ============================================================
-// Device-dispatching compute_spinor()
+// Device-dispatching compute_spinor() — GPU path
 // ============================================================
 void EffectivePotential::compute_spinor(const ElectronDensity& density,
                                          const double* rho_b,
@@ -175,9 +322,102 @@ void EffectivePotential::compute_spinor(const ElectronDensity& density,
         return;
     }
 
-    // GPU path: XC and Poisson sub-components don't yet have Device dispatch.
-    // CPU path is correct since arrays are host-resident.
+    // SOC GPU path: not yet implemented (requires noncollinear density on device)
+    // Fall back to CPU for correctness
     compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
+}
+
+// ============================================================
+// GPU-resident device pointer accessors
+// ============================================================
+
+double* EffectivePotential::gpu_Veff() {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_Veff : nullptr;
+}
+
+const double* EffectivePotential::gpu_Veff() const {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_Veff : nullptr;
+}
+
+double* EffectivePotential::gpu_phi() {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_phi : nullptr;
+}
+
+double* EffectivePotential::gpu_exc() {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_exc : nullptr;
+}
+
+double* EffectivePotential::gpu_Vxc() {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_Vxc : nullptr;
+}
+
+double* EffectivePotential::gpu_rho() {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_rho : nullptr;
+}
+
+double* EffectivePotential::gpu_rho_total() {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    return gs ? gs->d_rho_total : nullptr;
+}
+
+// ============================================================
+// Set device tau/vtau pointers for mGGA GPU pipeline
+// ============================================================
+void EffectivePotential::set_device_tau(double* d_tau, double* d_vtau) {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gs) return;
+    gs->d_tau = d_tau;
+    gs->d_vtau = d_vtau;
+}
+
+// ============================================================
+// Upload density from host to device buffers
+// ============================================================
+void EffectivePotential::upload_density(const ElectronDensity& density) {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gs || !gs->buffers_allocated) return;
+
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int Nd = gs->Nd;
+    int Nspin = gs->Nspin;
+
+    // Upload total density
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_rho_total, density.rho_total().data(),
+                               Nd * sizeof(double), cudaMemcpyHostToDevice, stream));
+
+    // Upload per-spin density
+    for (int s = 0; s < Nspin; ++s) {
+        CUDA_CHECK(cudaMemcpyAsync(gs->d_rho + s * Nd, density.rho(s).data(),
+                                   Nd * sizeof(double), cudaMemcpyHostToDevice, stream));
+    }
+}
+
+// ============================================================
+// Download potential arrays from device to host VeffArrays
+// ============================================================
+void EffectivePotential::download_to_host(VeffArrays& arrays) {
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gs || !gs->buffers_allocated) return;
+
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int Nd = gs->Nd;
+    int Nspin = gs->Nspin;
+
+    CUDA_CHECK(cudaMemcpyAsync(arrays.Veff.data(), gs->d_Veff,
+                               Nd * Nspin * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(arrays.Vxc.data(), gs->d_Vxc,
+                               Nd * Nspin * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(arrays.exc.data(), gs->d_exc,
+                               Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(arrays.phi.data(), gs->d_phi,
+                               Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 } // namespace lynx

@@ -140,8 +140,7 @@ public:
     void* gpu_state_ptr() { return gpu_state_raw_; }
     const void* gpu_state_ptr() const { return gpu_state_raw_; }
 
-    // Update k-point Bloch phase factors on GPU (kxLx, kyLy, kzLz).
-    // d_bloch_fac upload is deferred (TODO: add when nonlocal k-point GPU path is enabled).
+    // Update k-point Bloch phase factors on GPU (kxLx, kyLy, kzLz + d_bloch_fac).
     void set_kpoint_gpu(const Vec3& kpt_cart, const Vec3& cell_lengths);
 #endif
 

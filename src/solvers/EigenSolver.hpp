@@ -94,6 +94,47 @@ public:
     void setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
                          bool is_kpt, bool is_soc);
     void cleanup_gpu();
+
+    // --- GPU-resident data accessors ---
+    // Returns device pointer to persistent psi (real, gamma-point).
+    // Valid after setup_gpu() + first solve() or upload_psi_to_device().
+    double* gpu_psi();
+    const double* gpu_psi() const;
+
+    // Returns device pointer to eigenvalues on GPU.
+    double* gpu_eigvals();
+
+    // Returns device pointer to Veff on GPU (set by SCF before solve).
+    double* gpu_Veff();
+
+    // Upload psi from host to persistent device buffer (call once before SCF loop).
+    void upload_psi_to_device(const double* h_psi, int Nd, int Nband);
+
+    // Upload complex psi from host to persistent device buffer.
+    void upload_psi_z_to_device(const Complex* h_psi, int Nd, int Nband);
+
+    // Download eigvals from device to host (tiny transfer, per-iteration).
+    void download_eigvals(double* h_eigvals, int Nband);
+
+    // Download psi from device to host (once after SCF loop completes).
+    void download_psi(double* h_psi, int Nd, int Nband);
+    void download_psi_z(Complex* h_psi, int Nd, int Nband);
+
+    // Upload Veff to device buffer (from EffectivePotential host arrays).
+    void upload_Veff(const double* h_Veff, int Nd);
+
+    // GPU-resident solve: psi is already on device, only upload Veff and
+    // download eigvals. psi stays on device after the call.
+    void solve_resident(double* h_eigvals, const double* h_Veff,
+                        int Nd_d, int Nband,
+                        double lambda_cutoff, double eigval_min, double eigval_max,
+                        int cheb_degree);
+
+    // GPU-resident solve for k-point (complex): psi_z already on device.
+    void solve_kpt_resident(double* h_eigvals, const double* h_Veff,
+                            int Nd_d, int Nband,
+                            double lambda_cutoff, double eigval_min, double eigval_max,
+                            int cheb_degree);
 #endif
 
     double lambda_cutoff() const { return lambda_cutoff_; }

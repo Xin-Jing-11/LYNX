@@ -66,6 +66,18 @@ public:
 
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
+
+    // GPU-resident compute: reads psi and occ from device pointers directly.
+    // d_rho_out: (Nd * Nspin) device output — density accumulated on GPU.
+    // After compute, rho is downloaded to host for MPI reductions.
+    // d_psi/d_occ: device pointers to wavefunctions and occupations.
+    // For k-point: d_psi_z is cuDoubleComplex*, d_occ is double*.
+    void compute_from_device(const LynxContext& ctx,
+                             const Wavefunction& wfn,
+                             const std::vector<double>& kpt_weights,
+                             const double* d_psi_real,      // device psi (gamma, may be null)
+                             const void* d_psi_z,           // device psi (kpt, cuDoubleComplex*, may be null)
+                             const double* d_occ);          // device occupations
 #endif
 
     // Compute density from wavefunctions and occupations (explicit params — GPU code paths).

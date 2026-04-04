@@ -1,4 +1,6 @@
 #ifdef USE_CUDA
+#include <cmath>
+#include <vector>
 #include "core/gpu_common.cuh"
 #include "core/GPUContext.cuh"
 #include "core/KPoints.hpp"
@@ -210,6 +212,7 @@ struct GPUHamiltonianState {
     // Bloch factors
     double kxLx = 0, kyLy = 0, kzLz = 0;
     double* d_bloch_fac = nullptr;
+    std::vector<Vec3> h_image_shifts;  // per-atom image shifts for Bloch phase computation
 
     // GPU nonlocal data (mirroring GPUSCF's GPUNonlocalData)
     struct {
@@ -357,6 +360,9 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
 
         const auto& Chi = vnl->Chi();
 
+        gs->h_image_shifts.clear();
+        gs->h_image_shifts.reserve(gv.n_influence);
+
         for (int it = 0; it < ntypes; it++) {
             const auto& inf = nloc_influence[it];
             int nproj = crystal.types()[it].psd().nproj_per_atom();
@@ -371,6 +377,12 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
 
                 h_gpos_offsets.push_back(h_gpos_offsets.back() + ndc);
                 h_chi_offsets.push_back(h_chi_offsets.back() + ndc * nproj);
+
+                // Store image shift for Bloch factor computation
+                if (iat < static_cast<int>(inf.image_shift.size()))
+                    gs->h_image_shifts.push_back(inf.image_shift[iat]);
+                else
+                    gs->h_image_shifts.push_back({0.0, 0.0, 0.0});
 
                 for (int ig = 0; ig < ndc; ig++)
                     h_gpos_flat.push_back(inf.grid_pos[iat][ig]);
@@ -590,9 +602,32 @@ void Hamiltonian::set_kpoint_gpu(const Vec3& kpt_cart, const Vec3& cell_lengths)
     gs->kxLx = kpt_cart.x * cell_lengths.x;
     gs->kyLy = kpt_cart.y * cell_lengths.y;
     gs->kzLz = kpt_cart.z * cell_lengths.z;
-    // TODO: compute and upload d_bloch_fac for nonlocal projector k-point path.
-    // Currently the nonlocal GPU kernel checks d_bloch_fac for null and skips
-    // when not set, so this is safe for now.
+
+    // Compute and upload Bloch factors for nonlocal projector k-point path.
+    // bloch_fac[2*iat+0] = cos(theta), bloch_fac[2*iat+1] = sin(theta)
+    // where theta = -k . image_shift[iat]
+    int n_inf = gs->gpu_vnl.n_influence;
+    if (n_inf > 0 && !gs->h_image_shifts.empty()) {
+        cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+        // Allocate d_bloch_fac if not yet allocated
+        if (!gs->d_bloch_fac) {
+            CUDA_CHECK(cudaMallocAsync(&gs->d_bloch_fac, 2 * n_inf * sizeof(double), stream));
+        }
+
+        // Compute on CPU (n_inf is small, ~tens of atoms)
+        std::vector<double> h_bf(2 * n_inf);
+        for (int i = 0; i < n_inf; ++i) {
+            const Vec3& R = gs->h_image_shifts[i];
+            double theta = -(kpt_cart.x * R.x + kpt_cart.y * R.y + kpt_cart.z * R.z);
+            h_bf[2*i]     = std::cos(theta);
+            h_bf[2*i + 1] = std::sin(theta);
+        }
+
+        CUDA_CHECK(cudaMemcpyAsync(gs->d_bloch_fac, h_bf.data(),
+                                   2 * n_inf * sizeof(double),
+                                   cudaMemcpyHostToDevice, stream));
+    }
 }
 
 // ============================================================
