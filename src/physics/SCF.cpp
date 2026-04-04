@@ -6,6 +6,9 @@
 #include "xc/ExactExchange.hpp"
 #include "solvers/KerkerPreconditioner.hpp"
 #include "core/constants.hpp"
+#ifdef USE_CUDA
+#include "core/GPUContext.cuh"
+#endif
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -170,6 +173,24 @@ double SCF::run(Wavefunction& wfn,
     if (dev_ == Device::GPU) {
         int Nband_loc = state.Nband_loc;
         int Nband_g = state.Nband;
+
+        // Initialize shared GPU workspace pool (SCFBuffers in GPUContext).
+        // Must be called before any operator setup_gpu since they use ctx.buf.
+        {
+            auto& gctx = gpu::GPUContext::instance();
+            const auto& grid = ctx_->grid();
+            const auto& stencil = ctx_->stencil();
+            bool is_gga = (xc_type != XCType::LDA_PW && xc_type != XCType::LDA_PZ);
+            bool band_parallel = (!ctx_->scf_bandcomm().is_null() && ctx_->scf_bandcomm().size() > 1);
+            int mix_ncol = Nspin_global_;
+            if (is_soc_) mix_ncol = 4;
+            gctx.init_scf_buffers(
+                Nd_d, grid.Nx(), grid.Ny(), grid.Nz(), stencil.FDn(),
+                Nband_loc, Nband_g, Nspin_global_,
+                7, params_.mixing_history, mix_ncol,
+                0, 0, 0,  // nonlocal projector sizes (operators alloc their own)
+                is_gga, band_parallel, is_kpt_);
+        }
 
         // Hamiltonian: upload stencil, nonlocal projectors, allocate halo workspace
         hamiltonian_->setup_gpu(*ctx_, vnl_, *crystal_, *nloc_influence_, Nband_loc);
