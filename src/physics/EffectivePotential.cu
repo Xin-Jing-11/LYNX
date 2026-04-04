@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 #include "core/gpu_common.cuh"
+#include "core/GPUContext.cuh"
 
 namespace lynx {
 
@@ -98,14 +99,15 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
     int Nd = gs->Nd;
 
     // Upload persistent data (pseudocharge and NLCC core density)
-    CUDA_CHECK(cudaMalloc(&gs->d_pseudocharge, Nd * sizeof(double)));
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    CUDA_CHECK(cudaMallocAsync(&gs->d_pseudocharge, Nd * sizeof(double), stream));
     if (rho_b) {
-        CUDA_CHECK(cudaMemcpy(gs->d_pseudocharge, rho_b, Nd * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(gs->d_pseudocharge, rho_b, Nd * sizeof(double), cudaMemcpyHostToDevice, stream));
     }
 
     if (rho_core) {
-        CUDA_CHECK(cudaMalloc(&gs->d_rho_core, Nd * sizeof(double)));
-        CUDA_CHECK(cudaMemcpy(gs->d_rho_core, rho_core, Nd * sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMallocAsync(&gs->d_rho_core, Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMemcpyAsync(gs->d_rho_core, rho_core, Nd * sizeof(double), cudaMemcpyHostToDevice, stream));
     }
 
     // Intermediate arrays (Veff, phi, exc, Vxc, Dxcdgrho) are not allocated
@@ -116,7 +118,8 @@ void EffectivePotential::cleanup_gpu() {
     if (!gpu_state_raw_) return;
     auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
 
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
     safe_free(gs->d_pseudocharge);
     safe_free(gs->d_rho_core);

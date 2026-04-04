@@ -268,6 +268,8 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
         gpu_state_raw_ = new GPUHamiltonianState();
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
 
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
     // ── Grid parameters ─────────────────────────────────────────
     const auto& grid    = ctx.grid();
     const auto& domain  = ctx.domain();
@@ -309,13 +311,13 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
     int nz_ex = gs->nz + 2 * gs->FDn;
     size_t nd_ex = (size_t)nx_ex * ny_ex * nz_ex;
 
-    if (gs->d_x_ex) cudaFree(gs->d_x_ex);
-    CUDA_CHECK(cudaMalloc(&gs->d_x_ex, nd_ex * Nband * sizeof(double)));
+    if (gs->d_x_ex) cudaFreeAsync(gs->d_x_ex, stream);
+    CUDA_CHECK(cudaMallocAsync(&gs->d_x_ex, nd_ex * Nband * sizeof(double), stream));
 
     bool is_kpt = ctx.is_kpt();
     if (is_kpt) {
-        if (gs->d_x_ex_z) cudaFree(gs->d_x_ex_z);
-        CUDA_CHECK(cudaMalloc(&gs->d_x_ex_z, nd_ex * Nband * sizeof(cuDoubleComplex)));
+        if (gs->d_x_ex_z) cudaFreeAsync(gs->d_x_ex_z, stream);
+        CUDA_CHECK(cudaMallocAsync(&gs->d_x_ex_z, nd_ex * Nband * sizeof(cuDoubleComplex), stream));
     }
 
     // ── Nonlocal projector data upload ──────────────────────────
@@ -414,32 +416,32 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
         int total_gpos = h_gpos_offsets.back();
         int total_chi  = h_chi_offsets.back();
 
-        CUDA_CHECK(cudaMalloc(&gv.d_Chi_flat,    std::max(1, total_chi) * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gv.d_gpos_flat,   std::max(1, total_gpos) * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&gv.d_gpos_offsets, (gv.n_influence + 1) * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&gv.d_chi_offsets,  (gv.n_influence + 1) * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&gv.d_ndc_arr,      gv.n_influence * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&gv.d_nproj_arr,    gv.n_influence * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&gv.d_IP_displ,     gv.n_influence * sizeof(int)));
-        CUDA_CHECK(cudaMalloc(&gv.d_Gamma,        gv.total_phys_nproj * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&gv.d_alpha,        (size_t)gv.total_phys_nproj * Nband * sizeof(double)));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_Chi_flat,    std::max(1, total_chi) * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_gpos_flat,   std::max(1, total_gpos) * sizeof(int), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_gpos_offsets, (gv.n_influence + 1) * sizeof(int), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_chi_offsets,  (gv.n_influence + 1) * sizeof(int), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_ndc_arr,      gv.n_influence * sizeof(int), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_nproj_arr,    gv.n_influence * sizeof(int), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_IP_displ,     gv.n_influence * sizeof(int), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_Gamma,        gv.total_phys_nproj * sizeof(double), stream));
+        CUDA_CHECK(cudaMallocAsync(&gv.d_alpha,        (size_t)gv.total_phys_nproj * Nband * sizeof(double), stream));
 
         if (total_chi > 0)
-            CUDA_CHECK(cudaMemcpy(gv.d_Chi_flat, h_Chi_flat.data(), total_chi * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(gv.d_Chi_flat, h_Chi_flat.data(), total_chi * sizeof(double), cudaMemcpyHostToDevice, stream));
         if (total_gpos > 0)
-            CUDA_CHECK(cudaMemcpy(gv.d_gpos_flat, h_gpos_flat.data(), total_gpos * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(gv.d_gpos_offsets, h_gpos_offsets.data(), (gv.n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(gv.d_chi_offsets, h_chi_offsets.data(), (gv.n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(gv.d_ndc_arr, h_ndc_arr.data(), gv.n_influence * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(gv.d_nproj_arr, h_nproj_arr.data(), gv.n_influence * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(gv.d_IP_displ, h_IP_displ_arr.data(), gv.n_influence * sizeof(int), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(gv.d_Gamma, h_Gamma.data(), gv.total_phys_nproj * sizeof(double), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(gv.d_gpos_flat, h_gpos_flat.data(), total_gpos * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(gv.d_gpos_offsets, h_gpos_offsets.data(), (gv.n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(gv.d_chi_offsets, h_chi_offsets.data(), (gv.n_influence + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(gv.d_ndc_arr, h_ndc_arr.data(), gv.n_influence * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(gv.d_nproj_arr, h_nproj_arr.data(), gv.n_influence * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(gv.d_IP_displ, h_IP_displ_arr.data(), gv.n_influence * sizeof(int), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(gv.d_Gamma, h_Gamma.data(), gv.total_phys_nproj * sizeof(double), cudaMemcpyHostToDevice, stream));
 
         // Complex alpha for k-point
         if (is_kpt) {
-            if (gs->d_alpha_z) cudaFree(gs->d_alpha_z);
-            CUDA_CHECK(cudaMalloc(&gs->d_alpha_z,
-                (size_t)gv.total_phys_nproj * Nband * sizeof(cuDoubleComplex)));
+            if (gs->d_alpha_z) cudaFreeAsync(gs->d_alpha_z, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_alpha_z,
+                (size_t)gv.total_phys_nproj * Nband * sizeof(cuDoubleComplex), stream));
         }
 
         printf("Hamiltonian::setup_gpu: %d influence atoms, %d phys projectors, "
@@ -452,47 +454,47 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
     if (is_mgga) {
         size_t Nd_Nb = (size_t)gs->Nd * Nband;
 
-        if (gs->d_mgga_dpsi) cudaFree(gs->d_mgga_dpsi);
-        CUDA_CHECK(cudaMalloc(&gs->d_mgga_dpsi, Nd_Nb * sizeof(double)));
+        if (gs->d_mgga_dpsi) cudaFreeAsync(gs->d_mgga_dpsi, stream);
+        CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_dpsi, Nd_Nb * sizeof(double), stream));
 
-        if (gs->d_mgga_vtdpsi) cudaFree(gs->d_mgga_vtdpsi);
-        CUDA_CHECK(cudaMalloc(&gs->d_mgga_vtdpsi, Nd_Nb * sizeof(double)));
+        if (gs->d_mgga_vtdpsi) cudaFreeAsync(gs->d_mgga_vtdpsi, stream);
+        CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_vtdpsi, Nd_Nb * sizeof(double), stream));
 
-        if (gs->d_mgga_div) cudaFree(gs->d_mgga_div);
-        CUDA_CHECK(cudaMalloc(&gs->d_mgga_div, Nd_Nb * sizeof(double)));
+        if (gs->d_mgga_div) cudaFreeAsync(gs->d_mgga_div, stream);
+        CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_div, Nd_Nb * sizeof(double), stream));
 
-        if (gs->d_mgga_vt_ex) cudaFree(gs->d_mgga_vt_ex);
-        CUDA_CHECK(cudaMalloc(&gs->d_mgga_vt_ex, nd_ex * Nband * sizeof(double)));
+        if (gs->d_mgga_vt_ex) cudaFreeAsync(gs->d_mgga_vt_ex, stream);
+        CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_vt_ex, nd_ex * Nband * sizeof(double), stream));
 
         // Extra gradient buffers for non-orthogonal cells
         if (!gs->is_orth) {
-            if (gs->d_mgga_dpsi_y) cudaFree(gs->d_mgga_dpsi_y);
-            CUDA_CHECK(cudaMalloc(&gs->d_mgga_dpsi_y, Nd_Nb * sizeof(double)));
+            if (gs->d_mgga_dpsi_y) cudaFreeAsync(gs->d_mgga_dpsi_y, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_dpsi_y, Nd_Nb * sizeof(double), stream));
 
-            if (gs->d_mgga_dpsi_z_r) cudaFree(gs->d_mgga_dpsi_z_r);
-            CUDA_CHECK(cudaMalloc(&gs->d_mgga_dpsi_z_r, Nd_Nb * sizeof(double)));
+            if (gs->d_mgga_dpsi_z_r) cudaFreeAsync(gs->d_mgga_dpsi_z_r, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_dpsi_z_r, Nd_Nb * sizeof(double), stream));
         }
 
         // Complex mGGA buffers for k-point
         if (is_kpt) {
-            if (gs->d_mgga_dpsi_z) cudaFree(gs->d_mgga_dpsi_z);
-            CUDA_CHECK(cudaMalloc(&gs->d_mgga_dpsi_z, gs->Nd * sizeof(cuDoubleComplex)));
+            if (gs->d_mgga_dpsi_z) cudaFreeAsync(gs->d_mgga_dpsi_z, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_dpsi_z, gs->Nd * sizeof(cuDoubleComplex), stream));
 
-            if (gs->d_mgga_vtdpsi_z) cudaFree(gs->d_mgga_vtdpsi_z);
-            CUDA_CHECK(cudaMalloc(&gs->d_mgga_vtdpsi_z, gs->Nd * sizeof(cuDoubleComplex)));
+            if (gs->d_mgga_vtdpsi_z) cudaFreeAsync(gs->d_mgga_vtdpsi_z, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_vtdpsi_z, gs->Nd * sizeof(cuDoubleComplex), stream));
 
-            if (gs->d_mgga_div_z) cudaFree(gs->d_mgga_div_z);
-            CUDA_CHECK(cudaMalloc(&gs->d_mgga_div_z, gs->Nd * sizeof(cuDoubleComplex)));
+            if (gs->d_mgga_div_z) cudaFreeAsync(gs->d_mgga_div_z, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_div_z, gs->Nd * sizeof(cuDoubleComplex), stream));
 
-            if (gs->d_mgga_vt_ex_z) cudaFree(gs->d_mgga_vt_ex_z);
-            CUDA_CHECK(cudaMalloc(&gs->d_mgga_vt_ex_z, nd_ex * sizeof(cuDoubleComplex)));
+            if (gs->d_mgga_vt_ex_z) cudaFreeAsync(gs->d_mgga_vt_ex_z, stream);
+            CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_vt_ex_z, nd_ex * sizeof(cuDoubleComplex), stream));
 
             if (!gs->is_orth) {
-                if (gs->d_mgga_dpsi_yz) cudaFree(gs->d_mgga_dpsi_yz);
-                CUDA_CHECK(cudaMalloc(&gs->d_mgga_dpsi_yz, gs->Nd * sizeof(cuDoubleComplex)));
+                if (gs->d_mgga_dpsi_yz) cudaFreeAsync(gs->d_mgga_dpsi_yz, stream);
+                CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_dpsi_yz, gs->Nd * sizeof(cuDoubleComplex), stream));
 
-                if (gs->d_mgga_dpsi_zz) cudaFree(gs->d_mgga_dpsi_zz);
-                CUDA_CHECK(cudaMalloc(&gs->d_mgga_dpsi_zz, gs->Nd * sizeof(cuDoubleComplex)));
+                if (gs->d_mgga_dpsi_zz) cudaFreeAsync(gs->d_mgga_dpsi_zz, stream);
+                CUDA_CHECK(cudaMallocAsync(&gs->d_mgga_dpsi_zz, gs->Nd * sizeof(cuDoubleComplex), stream));
             }
         }
     }
@@ -512,7 +514,8 @@ void Hamiltonian::cleanup_gpu() {
     if (!gpu_state_raw_) return;
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
 
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
     // x_ex workspace
     safe_free(gs->d_x_ex);
@@ -645,7 +648,7 @@ void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
         double* d_div    = gs->d_mgga_div;
         double* d_vt_ex  = gs->d_mgga_vt_ex;
 
-        CUDA_CHECK(cudaMemset(d_div, 0, (size_t)total * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(d_div, 0, (size_t)total * sizeof(double), stream));
 
         if (gs->is_orth) {
             gpu::halo_exchange_batched_nomemset_gpu(psi, gs->d_x_ex,
@@ -769,7 +772,7 @@ void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
             const cuDoubleComplex* d_psi_n = d_psi + (size_t)n * Nd;
             cuDoubleComplex* d_Hpsi_n = d_Hpsi + (size_t)n * Nd;
 
-            CUDA_CHECK(cudaMemset(d_div_z, 0, Nd * sizeof(cuDoubleComplex)));
+            CUDA_CHECK(cudaMemsetAsync(d_div_z, 0, Nd * sizeof(cuDoubleComplex), stream));
 
             if (gs->is_orth) {
                 for (int dir = 0; dir < 3; dir++) {

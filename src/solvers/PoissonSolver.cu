@@ -104,8 +104,10 @@ static void poisson_precond_cb(const double* d_r, double* d_f) {
 
 // Helper: sum on CPU
 static double poisson_gpu_sum(const double* d_x, int N) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     std::vector<double> h(N);
-    CUDA_CHECK(cudaMemcpy(h.data(), d_x, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h.data(), d_x, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);  // CPU needs this data now
     double s = 0;
     for (int i = 0; i < N; i++) s += h[i];
     return s;

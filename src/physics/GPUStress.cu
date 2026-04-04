@@ -119,26 +119,26 @@ void compute_soc_stress_gpu(
 
     cuDoubleComplex* d_alpha_up = nullptr;
     cuDoubleComplex* d_alpha_dn = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_alpha_up, alpha_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_alpha_dn, alpha_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_up, alpha_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_alpha_dn, alpha_bytes, stream));
 
     // Extracted psi_up/dn (Nd_d * Nband complex each)
     size_t psi_comp_bytes = (size_t)Nd_d * Nband * sizeof(cuDoubleComplex);
     cuDoubleComplex* d_psi_up = nullptr;
     cuDoubleComplex* d_psi_dn = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_psi_up, psi_comp_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_psi_dn, psi_comp_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_psi_up, psi_comp_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_psi_dn, psi_comp_bytes, stream));
 
     // Gradient output buffers
     cuDoubleComplex* d_Dpsi_up = nullptr;
     cuDoubleComplex* d_Dpsi_dn = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_up, psi_comp_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_dn, psi_comp_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_up, psi_comp_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_dn, psi_comp_bytes, stream));
 
     // Halo exchange buffer
     size_t ex_bytes = (size_t)Nd_ex * Nband * sizeof(cuDoubleComplex);
     cuDoubleComplex* d_x_ex = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_x_ex, ex_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_x_ex, ex_bytes, stream));
 
     // ----------------------------------------------------------------
     // Step 1: Extract up/dn from spinor layout
@@ -156,8 +156,8 @@ void compute_soc_stress_gpu(
     // ----------------------------------------------------------------
     // Step 2: Compute alpha_up/dn = bloch * dV * Chi_soc^T * psi_up/dn
     // ----------------------------------------------------------------
-    CUDA_CHECK(cudaMemset(d_alpha_up, 0, alpha_bytes));
-    CUDA_CHECK(cudaMemset(d_alpha_dn, 0, alpha_bytes));
+    CUDA_CHECK(cudaMemsetAsync(d_alpha_up, 0, alpha_bytes, stream));
+    CUDA_CHECK(cudaMemsetAsync(d_alpha_dn, 0, alpha_bytes, stream));
 
     {
         int threads = 256;
@@ -444,13 +444,13 @@ void compute_soc_stress_gpu(
     *h_energy_soc = energy_soc;
 
     // Free GPU scratch
-    cudaFreeAsync(d_alpha_up, 0);
-    cudaFreeAsync(d_alpha_dn, 0);
-    cudaFreeAsync(d_psi_up, 0);
-    cudaFreeAsync(d_psi_dn, 0);
-    cudaFreeAsync(d_Dpsi_up, 0);
-    cudaFreeAsync(d_Dpsi_dn, 0);
-    cudaFreeAsync(d_x_ex, 0);
+    cudaFreeAsync(d_alpha_up, stream);
+    cudaFreeAsync(d_alpha_dn, stream);
+    cudaFreeAsync(d_psi_up, stream);
+    cudaFreeAsync(d_psi_dn, stream);
+    cudaFreeAsync(d_Dpsi_up, stream);
+    cudaFreeAsync(d_Dpsi_dn, stream);
+    cudaFreeAsync(d_x_ex, stream);
 }
 
 // ============================================================
@@ -624,20 +624,20 @@ void compute_mgga_stress_gpu(
     double* d_Dpsi_x = nullptr;
     double* d_Dpsi_y = nullptr;
     double* d_Dpsi_z = nullptr;
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_x, grad_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_y, grad_bytes, 0));
-    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z, grad_bytes, 0));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_x, grad_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_y, grad_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z, grad_bytes, stream));
 
     // Scratch pool for small buffers
     size_t scratch_cp = ctx.scratch_pool.checkpoint();
 
     // mGGA psi stress: 6 Voigt components
     double* d_smgga = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemset(d_smgga, 0, 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_smgga, 0, 6 * sizeof(double), stream));
 
     // tau·vtau dot product result
     double* d_dot = ctx.scratch_pool.alloc<double>(1);
-    CUDA_CHECK(cudaMemset(d_dot, 0, sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_dot, 0, sizeof(double), stream));
 
     // Halo exchange + gradients (batched V2 — single launch per direction)
     double* d_x_ex = ctx.buf.x_ex;
@@ -694,9 +694,9 @@ void compute_mgga_stress_gpu(
     *h_tau_vtau_dot = dot_val * dV;
 
     // Cleanup
-    cudaFreeAsync(d_Dpsi_x, 0);
-    cudaFreeAsync(d_Dpsi_y, 0);
-    cudaFreeAsync(d_Dpsi_z, 0);
+    cudaFreeAsync(d_Dpsi_x, stream);
+    cudaFreeAsync(d_Dpsi_y, stream);
+    cudaFreeAsync(d_Dpsi_z, stream);
     ctx.scratch_pool.restore(scratch_cp);
 }
 

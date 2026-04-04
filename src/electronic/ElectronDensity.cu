@@ -15,6 +15,7 @@
 #include <mpi.h>
 #include <cstring>
 #include "core/gpu_common.cuh"
+#include "core/GPUContext.cuh"
 
 namespace lynx {
 
@@ -76,6 +77,7 @@ void ElectronDensity::compute(const LynxContext& ctx,
     // GPU path: upload psi/occ per spin/kpt, accumulate density on GPU, download.
     // Then do the same MPI reductions as the CPU path.
     // This is correct but not optimal (upload/download per kpt).
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int Nd = ctx.domain().Nd_d();
     int Nband = wfn.Nband();
     int Nspin_local = ctx.Nspin_local();
@@ -96,8 +98,8 @@ void ElectronDensity::compute(const LynxContext& ctx,
 
         // Allocate device rho for this spin channel
         double* d_rho_s = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_rho_s, Nd * sizeof(double)));
-        CUDA_CHECK(cudaMemset(d_rho_s, 0, Nd * sizeof(double)));
+        CUDA_CHECK(cudaMallocAsync(&d_rho_s, Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMemsetAsync(d_rho_s, 0, Nd * sizeof(double), stream));
 
         for (int k = 0; k < Nkpts; ++k) {
             int k_glob = kpt_start + k;
@@ -110,15 +112,15 @@ void ElectronDensity::compute(const LynxContext& ctx,
                 cuDoubleComplex* d_psi_z = nullptr;
                 double* d_occ = nullptr;
                 size_t psi_bytes = (size_t)Nd * Nband * sizeof(cuDoubleComplex);
-                CUDA_CHECK(cudaMalloc(&d_psi_z, psi_bytes));
-                CUDA_CHECK(cudaMalloc(&d_occ, Nband * sizeof(double)));
-                CUDA_CHECK(cudaMemcpy(d_psi_z, psi_k.data(), psi_bytes, cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(d_occ, occ, Nband * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMallocAsync(&d_psi_z, psi_bytes, stream));
+                CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+                CUDA_CHECK(cudaMemcpyAsync(d_psi_z, psi_k.data(), psi_bytes, cudaMemcpyHostToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(d_occ, occ, Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
                 gpu::compute_density_z_gpu(d_psi_z, d_occ, d_rho_s, Nd, Nband, wk);
 
-                CUDA_CHECK(cudaFree(d_psi_z));
-                CUDA_CHECK(cudaFree(d_occ));
+                cudaFreeAsync(d_psi_z, stream);
+                cudaFreeAsync(d_occ, stream);
             } else {
                 const double* psi_data = wfn.psi(s, k).data();
                 const double* occ = wfn.occupations(s, k).data();
@@ -126,22 +128,23 @@ void ElectronDensity::compute(const LynxContext& ctx,
                 double* d_psi = nullptr;
                 double* d_occ = nullptr;
                 size_t psi_bytes = (size_t)Nd * Nband * sizeof(double);
-                CUDA_CHECK(cudaMalloc(&d_psi, psi_bytes));
-                CUDA_CHECK(cudaMalloc(&d_occ, Nband * sizeof(double)));
-                CUDA_CHECK(cudaMemcpy(d_psi, psi_data, psi_bytes, cudaMemcpyHostToDevice));
-                CUDA_CHECK(cudaMemcpy(d_occ, occ, Nband * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMallocAsync(&d_psi, psi_bytes, stream));
+                CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+                CUDA_CHECK(cudaMemcpyAsync(d_psi, psi_data, psi_bytes, cudaMemcpyHostToDevice, stream));
+                CUDA_CHECK(cudaMemcpyAsync(d_occ, occ, Nband * sizeof(double), cudaMemcpyHostToDevice, stream));
 
                 gpu::compute_density_gpu(d_psi, d_occ, d_rho_s, Nd, Nband, wk);
 
-                CUDA_CHECK(cudaFree(d_psi));
-                CUDA_CHECK(cudaFree(d_occ));
+                cudaFreeAsync(d_psi, stream);
+                cudaFreeAsync(d_occ, stream);
             }
         }
 
         // Download per-spin density to host
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaMemcpy(rho(s_glob).data(), d_rho_s, Nd * sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(d_rho_s));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaMemcpyAsync(rho(s_glob).data(), d_rho_s, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);  // CPU needs this data now
+        cudaFreeAsync(d_rho_s, stream);
     }
 
     // MPI reductions — same logic as CPU path

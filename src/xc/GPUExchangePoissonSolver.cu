@@ -79,14 +79,15 @@ void GPUExchangePoissonSolver::cleanup() {
         }
         plans_created_ = false;
     }
-    if (d_pois_const_) { cudaFree(d_pois_const_); d_pois_const_ = nullptr; }
-    if (d_pois_const_stress_) { cudaFree(d_pois_const_stress_); d_pois_const_stress_ = nullptr; }
-    if (d_pois_const_stress2_) { cudaFree(d_pois_const_stress2_); d_pois_const_stress2_ = nullptr; }
-    if (d_fft_work_) { cudaFree(d_fft_work_); d_fft_work_ = nullptr; }
-    if (d_neg_phase_) { cudaFree(d_neg_phase_); d_neg_phase_ = nullptr; }
-    if (d_pos_phase_) { cudaFree(d_pos_phase_); d_pos_phase_ = nullptr; }
-    if (d_Kptshift_map_) { cudaFree(d_Kptshift_map_); d_Kptshift_map_ = nullptr; }
-    if (d_kpt_scratch_) { cudaFree(d_kpt_scratch_); d_kpt_scratch_ = nullptr; }
+    cudaStream_t stream = GPUContext::instance().compute_stream;
+    if (d_pois_const_) { cudaFreeAsync(d_pois_const_, stream); d_pois_const_ = nullptr; }
+    if (d_pois_const_stress_) { cudaFreeAsync(d_pois_const_stress_, stream); d_pois_const_stress_ = nullptr; }
+    if (d_pois_const_stress2_) { cudaFreeAsync(d_pois_const_stress2_, stream); d_pois_const_stress2_ = nullptr; }
+    if (d_fft_work_) { cudaFreeAsync(d_fft_work_, stream); d_fft_work_ = nullptr; }
+    if (d_neg_phase_) { cudaFreeAsync(d_neg_phase_, stream); d_neg_phase_ = nullptr; }
+    if (d_pos_phase_) { cudaFreeAsync(d_pos_phase_, stream); d_pos_phase_ = nullptr; }
+    if (d_Kptshift_map_) { cudaFreeAsync(d_Kptshift_map_, stream); d_Kptshift_map_ = nullptr; }
+    if (d_kpt_scratch_) { cudaFreeAsync(d_kpt_scratch_, stream); d_kpt_scratch_ = nullptr; }
     is_setup_ = false;
     is_kpt_ = false;
 }
@@ -192,13 +193,13 @@ void GPUExchangePoissonSolver::setup(int Nx, int Ny, int Nz,
     is_kpt_ = false;
 
     size_t pois_bytes = Ndc_ * sizeof(double);
-    CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
     auto& gctx = gpu::GPUContext::instance();
     cudaStream_t stream = gctx.compute_stream;
+    CUDA_CHECK(cudaMallocAsync(&d_pois_const_, pois_bytes, stream));
     CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, stream));
 
     size_t work_bytes = (size_t)Ndc_ * max_ncol * sizeof(cufftDoubleComplex);
-    CUDA_CHECK(cudaMalloc(&d_fft_work_, work_bytes));
+    CUDA_CHECK(cudaMallocAsync(&d_fft_work_, work_bytes, stream));
 
     create_plans(max_ncol);
 
@@ -230,30 +231,30 @@ void GPUExchangePoissonSolver::setup_kpt(int Nx, int Ny, int Nz,
 
     // Upload all Poisson constants [Nd * Nkpts_shift]
     size_t pois_bytes = (size_t)Nd_ * Nkpts_shift * sizeof(double);
-    CUDA_CHECK(cudaMalloc(&d_pois_const_, pois_bytes));
+    CUDA_CHECK(cudaMallocAsync(&d_pois_const_, pois_bytes, stream));
     CUDA_CHECK(cudaMemcpyAsync(d_pois_const_, pois_const, pois_bytes, cudaMemcpyHostToDevice, stream));
 
     // Upload phase factors [Nd * (Nkpts_shift - 1)] complex each
     if (Nkpts_shift > 1) {
         size_t phase_bytes = (size_t)Nd_ * (Nkpts_shift - 1) * sizeof(cuDoubleComplex);
-        CUDA_CHECK(cudaMalloc(&d_neg_phase_, phase_bytes));
+        CUDA_CHECK(cudaMallocAsync(&d_neg_phase_, phase_bytes, stream));
         CUDA_CHECK(cudaMemcpyAsync(d_neg_phase_, neg_phase, phase_bytes, cudaMemcpyHostToDevice, stream));
-        CUDA_CHECK(cudaMalloc(&d_pos_phase_, phase_bytes));
+        CUDA_CHECK(cudaMallocAsync(&d_pos_phase_, phase_bytes, stream));
         CUDA_CHECK(cudaMemcpyAsync(d_pos_phase_, pos_phase, phase_bytes, cudaMemcpyHostToDevice, stream));
     }
 
     // Upload Kptshift_map [Nkpts_sym * Nkpts_hf]
     int map_size = Nkpts_sym * Nkpts_hf;
     h_Kptshift_map_.assign(Kptshift_map, Kptshift_map + map_size);
-    CUDA_CHECK(cudaMalloc(&d_Kptshift_map_, map_size * sizeof(int)));
+    CUDA_CHECK(cudaMallocAsync(&d_Kptshift_map_, map_size * sizeof(int), stream));
     CUDA_CHECK(cudaMemcpyAsync(d_Kptshift_map_, Kptshift_map, map_size * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     // Workspace: Z2Z uses [Nd * max_ncol] complex
     size_t work_bytes = (size_t)Nd_ * max_ncol * sizeof(cufftDoubleComplex);
-    CUDA_CHECK(cudaMalloc(&d_fft_work_, work_bytes));
+    CUDA_CHECK(cudaMallocAsync(&d_fft_work_, work_bytes, stream));
 
     // Scratch for input copy (Z2Z modifies in-place for phase factors)
-    CUDA_CHECK(cudaMalloc(&d_kpt_scratch_, work_bytes));
+    CUDA_CHECK(cudaMallocAsync(&d_kpt_scratch_, work_bytes, stream));
 
     create_plans_z2z(max_ncol);
 
@@ -272,11 +273,11 @@ void GPUExchangePoissonSolver::upload_stress_constants(const double* pois_const_
     int Nd_per_shift = is_kpt_ ? Nd_ : Ndc_;
     size_t bytes = (size_t)Nd_per_shift * (is_kpt_ ? Nkpts_shift_ : 1) * sizeof(double);
     if (pois_const_stress) {
-        if (!d_pois_const_stress_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress_, bytes));
+        if (!d_pois_const_stress_) CUDA_CHECK(cudaMallocAsync(&d_pois_const_stress_, bytes, stream));
         CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress_, pois_const_stress, bytes, cudaMemcpyHostToDevice, stream));
     }
     if (pois_const_stress2) {
-        if (!d_pois_const_stress2_) CUDA_CHECK(cudaMalloc(&d_pois_const_stress2_, bytes));
+        if (!d_pois_const_stress2_) CUDA_CHECK(cudaMallocAsync(&d_pois_const_stress2_, bytes, stream));
         CUDA_CHECK(cudaMemcpyAsync(d_pois_const_stress2_, pois_const_stress2, bytes, cudaMemcpyHostToDevice, stream));
     }
 }
@@ -314,8 +315,8 @@ void GPUExchangePoissonSolver::solve_batch_impl(double* d_rhs, int ncol, double*
             plans_created_ = false;
         }
         if (ncol > max_ncol_) {
-            if (d_fft_work_) cudaFree(d_fft_work_);
-            CUDA_CHECK(cudaMalloc(&d_fft_work_, (size_t)Ndc_ * ncol * sizeof(cufftDoubleComplex)));
+            if (d_fft_work_) cudaFreeAsync(d_fft_work_, stream);
+            CUDA_CHECK(cudaMallocAsync(&d_fft_work_, (size_t)Ndc_ * ncol * sizeof(cufftDoubleComplex), stream));
         }
         create_plans(ncol);
     }
@@ -376,10 +377,10 @@ void GPUExchangePoissonSolver::solve_batch_kpt(const cuDoubleComplex* d_rhs, int
         }
         size_t work_bytes = (size_t)Nd_ * ncol * sizeof(cufftDoubleComplex);
         if (ncol > max_ncol_) {
-            if (d_fft_work_) cudaFree(d_fft_work_);
-            CUDA_CHECK(cudaMalloc(&d_fft_work_, work_bytes));
-            if (d_kpt_scratch_) cudaFree(d_kpt_scratch_);
-            CUDA_CHECK(cudaMalloc(&d_kpt_scratch_, work_bytes));
+            if (d_fft_work_) cudaFreeAsync(d_fft_work_, stream);
+            CUDA_CHECK(cudaMallocAsync(&d_fft_work_, work_bytes, stream));
+            if (d_kpt_scratch_) cudaFreeAsync(d_kpt_scratch_, stream);
+            CUDA_CHECK(cudaMallocAsync(&d_kpt_scratch_, work_bytes, stream));
         }
         create_plans_z2z(ncol);
     }

@@ -111,7 +111,7 @@ void halo_exchange_gpu(
     dim3 grid(ceildiv(nx, 32), ceildiv(ny, 4), ceildiv(nz, 4));
 
     for (int n = 0; n < ncol; ++n) {
-        CUDA_CHECK(cudaMemset(d_x_ex + n * nd_ex, 0, nd_ex * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(d_x_ex + n * nd_ex, 0, nd_ex * sizeof(double), stream));
 
         halo_copy_interior_kernel<<<grid, block, 0, stream>>>(
             d_x + n * nd, d_x_ex + n * nd_ex,
@@ -250,7 +250,7 @@ void halo_exchange_batched_gpu(
     int nd_ex = nxny_ex * nz_ex;
 
     // Zero all x_ex columns at once
-    CUDA_CHECK(cudaMemset(d_x_ex, 0, (size_t)nd_ex * ncol * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_x_ex, 0, (size_t)nd_ex * ncol * sizeof(double), stream));
 
     // Copy interior: one block per (tile_x, tile_y, k * ncol)
     {

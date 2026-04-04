@@ -145,7 +145,8 @@ void Mixer::cleanup_gpu() {
     if (!gpu_state_raw_) return;
     auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
 
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
     safe_free(gs->d_fkm1);
 
@@ -189,8 +190,8 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
 
     // Ensure fkm1 buffer exists
     if (!gs->d_fkm1) {
-        CUDA_CHECK(cudaMalloc(&gs->d_fkm1, Nd * sizeof(double)));
-        CUDA_CHECK(cudaMemset(gs->d_fkm1, 0, Nd * sizeof(double)));
+        CUDA_CHECK(cudaMallocAsync(&gs->d_fkm1, Nd * sizeof(double), stream));
+        CUDA_CHECK(cudaMemsetAsync(gs->d_fkm1, 0, Nd * sizeof(double), stream));
     }
 
     // Save old f_k -> f_km1
@@ -282,7 +283,7 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
 
     // Kerker preconditioner
     double* d_Pf = sp.alloc<double>(Nd);
-    CUDA_CHECK(cudaMemset(d_Pf, 0, Nd * sizeof(double)));
+    CUDA_CHECK(cudaMemsetAsync(d_Pf, 0, Nd * sizeof(double), stream));
 
     // Set callback pointer
     s_mixer_state_ = gs;

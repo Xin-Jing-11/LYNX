@@ -11,7 +11,10 @@
 - [x] XCFunctional GPU dispatch (LDA/GGA/mGGA)
 - [x] PoissonSolver GPU dispatch (AAR solver)
 - [x] Mixer GPU dispatch (Pulay + Kerker)
-- [x] 117/117 tests pass (CUDA build)
+- [x] 118/118 tests pass (CUDA build)
+- [x] CPU_PINNED memory support in DeviceArray
+- [x] All CUDA calls converted to async (cudaMallocAsync, cudaMemcpyAsync, etc.)
+- [x] NDArray fully removed (files deleted, tests replaced)
 
 ## Remaining (performance + completeness)
 
@@ -41,6 +44,19 @@ for k-point GPU). Need to port setup_bloch_factors() from old GPUSCF.cu.
 
 ### P2: GPU mGGA stress
 Disabled in Stress.cpp (line 71 TODO). Needs standalone GPU stress function.
+
+### P3: Static callback cleanup
+EigenSolver.cu, PoissonSolver.cu, Mixer.cu use file-static pointers for C-style
+callbacks. Replace with std::function or thread-local storage for thread safety.
+
+### P2: Enable libxc GPU support
+libxc 7.0.0 (in external/libxc) has native CUDA support via `ENABLE_CUDA`.
+Currently forced OFF in CMakeLists.txt line 119. Enabling it would:
+- Compile all libxc C sources as CUDA with `__host__ __device__` annotations
+- Allow calling `xc_lda_exc_vxc`, `xc_gga_exc_vxc`, `xc_mgga_exc_vxc` from GPU kernels
+- Eliminate the D2H/H2D fallback for rSCAN/r2SCAN (currently in XCFunctional.cu mgga_libxc_gpu)
+- Potentially replace our hand-written LDA/GGA/SCAN kernels with libxc GPU calls
+Change: `set(ENABLE_CUDA ${USE_CUDA} CACHE BOOL "" FORCE)` in root CMakeLists.txt
 
 ### P3: Static callback cleanup
 EigenSolver.cu, PoissonSolver.cu, Mixer.cu use file-static pointers for C-style

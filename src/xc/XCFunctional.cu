@@ -1438,10 +1438,12 @@ void mgga_libxc_gpu(int xc_x_id, int xc_c_id,
                      const double* d_rho, const double* d_sigma, const double* d_tau,
                      double* d_exc, double* d_vxc, double* d_v2xc, double* d_vtau, int N) {
     // Download from GPU
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     std::vector<double> h_rho(N), h_sigma(N), h_tau(N);
-    CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_sigma.data(), d_sigma, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_tau.data(), d_tau, N * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_rho.data(), d_rho, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_sigma.data(), d_sigma, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_tau.data(), d_tau, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);  // CPU needs this data now
 
     // Apply sigma floor (matches CPU XCFunctional.cpp and SPARC)
     for (int i = 0; i < N; i++) {
@@ -1475,10 +1477,10 @@ void mgga_libxc_gpu(int xc_x_id, int xc_c_id,
         h_vtau[i] = vtau_x[i] + vtau_c[i];
     }
 
-    CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_vxc, h_vxc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v2xc, h_v2xc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_vtau, h_vtau.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_exc, h_exc.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_vxc, h_vxc.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_v2xc, h_v2xc.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_vtau, h_vtau.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
 }
 
 void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
@@ -1492,13 +1494,15 @@ void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
     std::vector<double> h_rho_up(N), h_rho_dn(N);
     std::vector<double> h_sigma_uu(N), h_sigma_dd(N), h_sigma_tot(N);
     std::vector<double> h_tau_up(N), h_tau_dn(N);
-    CUDA_CHECK(cudaMemcpy(h_rho_up.data(), d_rho_up, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_rho_dn.data(), d_rho_dn, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_sigma_uu.data(), d_sigma_uu, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_sigma_dd.data(), d_sigma_dd, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_sigma_tot.data(), d_sigma_tot, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_tau_up.data(), d_tau_up, N * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_tau_dn.data(), d_tau_dn, N * sizeof(double), cudaMemcpyDeviceToHost));
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    CUDA_CHECK(cudaMemcpyAsync(h_rho_up.data(), d_rho_up, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_rho_dn.data(), d_rho_dn, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_sigma_uu.data(), d_sigma_uu, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_sigma_dd.data(), d_sigma_dd, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_sigma_tot.data(), d_sigma_tot, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_tau_up.data(), d_tau_up, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(h_tau_dn.data(), d_tau_dn, N * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    cudaStreamSynchronize(stream);  // CPU needs this data now
 
     // Apply sigma floor (matches CPU XCFunctional.cpp and SPARC)
     for (int i = 0; i < N; i++) {
@@ -1567,14 +1571,14 @@ void mgga_libxc_spin_gpu(int xc_x_id, int xc_c_id,
         h_vtau_dn[i] = vtau_x[2*i+1] + vtau_c[2*i+1];
     }
 
-    CUDA_CHECK(cudaMemcpy(d_exc, h_exc.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_vxc_up, h_vxc_up.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_vxc_dn, h_vxc_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v2xc_c, h_v2xc_c.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v2xc_x_up, h_v2xc_x_up.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_v2xc_x_dn, h_v2xc_x_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_vtau_up, h_vtau_up.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_vtau_dn, h_vtau_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_exc, h_exc.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_vxc_up, h_vxc_up.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_vxc_dn, h_vxc_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_v2xc_c, h_v2xc_c.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_v2xc_x_up, h_v2xc_x_up.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_v2xc_x_dn, h_v2xc_x_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_vtau_up, h_vtau_up.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_vtau_dn, h_vtau_dn.data(), N * sizeof(double), cudaMemcpyHostToDevice, stream));
 }
 
 } // namespace gpu
@@ -1810,7 +1814,8 @@ void XCFunctional::cleanup_gpu() {
     if (!gpu_state_raw_) return;
     auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
 
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
     safe_free(gs->d_rho_core);
 
@@ -2064,7 +2069,7 @@ void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, in
 
         // Accumulate divergence
         double* d_DDrho = d_sigma;  // reuse
-        CUDA_CHECK(cudaMemset(d_DDrho, 0, 3 * Nd_d * sizeof(double)));
+        CUDA_CHECK(cudaMemsetAsync(d_DDrho, 0, 3 * Nd_d * sizeof(double), stream));
 
         for (int dir = 0; dir < 3; dir++) {
             double* d_Drho_dir = (dir == 0) ? d_Drho_x : (dir == 1) ? d_Drho_y : d_Drho_z;

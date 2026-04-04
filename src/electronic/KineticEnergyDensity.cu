@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <cuComplex.h>
 #include "core/gpu_common.cuh"
+#include "core/GPUContext.cuh"
 
 namespace lynx {
 
@@ -103,17 +104,19 @@ void KineticEnergyDensity::setup_gpu(const LynxContext& ctx, int Nspin) {
 
     int tau_size = (Nspin >= 2) ? 2 * gs->Nd : gs->Nd;
 
-    CUDA_CHECK(cudaMalloc(&gs->d_tau,  tau_size * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&gs->d_vtau, tau_size * sizeof(double)));
-    CUDA_CHECK(cudaMemset(gs->d_tau,  0, tau_size * sizeof(double)));
-    CUDA_CHECK(cudaMemset(gs->d_vtau, 0, tau_size * sizeof(double)));
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    CUDA_CHECK(cudaMallocAsync(&gs->d_tau,  tau_size * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&gs->d_vtau, tau_size * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(gs->d_tau,  0, tau_size * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(gs->d_vtau, 0, tau_size * sizeof(double), stream));
 }
 
 void KineticEnergyDensity::cleanup_gpu() {
     if (!gpu_state_raw_) return;
     auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
 
-    auto safe_free = [](auto*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
     safe_free(gs->d_tau);
     safe_free(gs->d_vtau);
