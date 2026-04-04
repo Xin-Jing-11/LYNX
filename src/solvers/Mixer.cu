@@ -86,8 +86,8 @@ struct GPUMixerState {
     double* d_fkm1  = nullptr;  // Nd * ncol — previous residual
 };
 
-// Static instance pointer for Kerker callback trampolines
-static GPUMixerState* s_mixer_state_ = nullptr;
+// Thread-local instance pointer for Kerker callback trampolines
+static thread_local GPUMixerState* s_mixer_state_ = nullptr;
 
 // ============================================================
 // Static Kerker callbacks

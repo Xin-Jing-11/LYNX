@@ -860,9 +860,8 @@ EigenSolver::~EigenSolver() {
 #endif
 }
 
-// File-static trampoline for gpu::eigensolver_solve_gpu callback.
-// Uses the same pattern as GPUSCF.cu's s_instance_ approach.
-static const Hamiltonian* s_eigen_H_ptr_ = nullptr;
+// Thread-local trampoline state for gpu::eigensolver_solve_gpu callback.
+static thread_local const Hamiltonian* s_eigen_H_ptr_ = nullptr;
 
 static void eigen_apply_H_cb(const double* psi, const double* Veff,
                                double* Hpsi, double* /*x_ex*/, int ncol)

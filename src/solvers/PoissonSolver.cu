@@ -67,8 +67,8 @@ struct GPUPoissonState {
     int m = 7;                    // AAR history depth
 };
 
-// Static instance pointer for callback trampolines
-static GPUPoissonState* s_poisson_state_ = nullptr;
+// Thread-local instance pointer for callback trampolines
+static thread_local GPUPoissonState* s_poisson_state_ = nullptr;
 
 // ============================================================
 // Static callbacks for AAR solver
