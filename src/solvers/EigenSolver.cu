@@ -770,13 +770,17 @@ struct GPUEigenState {
     double* d_Ms = nullptr;          // (Nband_global^2) overlap matrix
 
     // Complex (k-point) persistent buffers
-    cuDoubleComplex* d_psi_z = nullptr;   // (Nd, Nband)
+    // For SOC: sized as 2*Nd per band (spinor wavefunctions)
+    cuDoubleComplex* d_psi_z = nullptr;
     cuDoubleComplex* d_Y_z = nullptr;
     cuDoubleComplex* d_Xold_z = nullptr;
     cuDoubleComplex* d_Xnew_z = nullptr;
     cuDoubleComplex* d_HX_z = nullptr;
     cuDoubleComplex* d_Hs_z = nullptr;
     cuDoubleComplex* d_Ms_z = nullptr;
+
+    // SOC-specific
+    double* d_Veff_spinor = nullptr;  // (4*Nd) [V_uu|V_dd|Re(V_ud)|Im(V_ud)]
 
     bool buffers_allocated = false;
 
@@ -799,13 +803,20 @@ struct GPUEigenState {
 
         // Allocate complex buffers if k-point or SOC
         if (is_kpt || is_soc) {
-            CUDA_CHECK(cudaMallocAsync(&d_psi_z, psi_sz * sizeof(cuDoubleComplex), stream));
-            CUDA_CHECK(cudaMallocAsync(&d_Y_z, psi_sz * sizeof(cuDoubleComplex), stream));
-            CUDA_CHECK(cudaMallocAsync(&d_Xold_z, psi_sz * sizeof(cuDoubleComplex), stream));
-            CUDA_CHECK(cudaMallocAsync(&d_Xnew_z, psi_sz * sizeof(cuDoubleComplex), stream));
-            CUDA_CHECK(cudaMallocAsync(&d_HX_z, psi_sz * sizeof(cuDoubleComplex), stream));
+            // SOC spinor: psi is 2*Nd per band (two spin components)
+            size_t psi_sz_z = is_soc ? (size_t)(2 * Nd) * Nband : psi_sz;
+            CUDA_CHECK(cudaMallocAsync(&d_psi_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
+            CUDA_CHECK(cudaMallocAsync(&d_Y_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
+            CUDA_CHECK(cudaMallocAsync(&d_Xold_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
+            CUDA_CHECK(cudaMallocAsync(&d_Xnew_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
+            CUDA_CHECK(cudaMallocAsync(&d_HX_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
             CUDA_CHECK(cudaMallocAsync(&d_Hs_z, sub_sz * sizeof(cuDoubleComplex), stream));
             CUDA_CHECK(cudaMallocAsync(&d_Ms_z, sub_sz * sizeof(cuDoubleComplex), stream));
+        }
+
+        // SOC: Veff_spinor buffer (4 * Nd)
+        if (is_soc) {
+            CUDA_CHECK(cudaMallocAsync(&d_Veff_spinor, 4 * Nd * sizeof(double), stream));
         }
 
         buffers_allocated = true;
@@ -821,7 +832,7 @@ struct GPUEigenState {
         safe_free(d_HX); safe_free(d_Hs); safe_free(d_Ms);
         safe_free(d_psi_z); safe_free(d_Y_z); safe_free(d_Xold_z);
         safe_free(d_Xnew_z); safe_free(d_HX_z); safe_free(d_Hs_z);
-        safe_free(d_Ms_z);
+        safe_free(d_Ms_z); safe_free(d_Veff_spinor);
 
         buffers_allocated = false;
     }
@@ -862,25 +873,34 @@ EigenSolver::~EigenSolver() {
 
 // Thread-local trampoline state for gpu::eigensolver_solve_gpu callback.
 static thread_local const Hamiltonian* s_eigen_H_ptr_ = nullptr;
+static thread_local int s_eigen_Nd_d_ = 0;  // original grid size (for spinor: Nd, not 2*Nd)
 
 static void eigen_apply_H_cb(const double* psi, const double* Veff,
                                double* Hpsi, double* /*x_ex*/, int ncol)
 {
-    // Delegate to Hamiltonian::apply(Device::GPU) which uses its own d_x_ex workspace.
-    // The x_ex parameter from the eigensolver is ignored — the Hamiltonian manages its own halo buffer.
     s_eigen_H_ptr_->apply(psi, Veff, Hpsi, ncol, Device::GPU, 0.0);
 }
 
 static void eigen_apply_H_z_cb(const cuDoubleComplex* psi, const double* Veff,
                                  cuDoubleComplex* Hpsi, cuDoubleComplex* /*x_ex*/, int ncol)
 {
-    // Delegate to Hamiltonian::apply_kpt(Device::GPU).
-    // kpt_cart and cell_lengths are already set in the Hamiltonian's GPU state (kxLx, kyLy, kzLz).
     s_eigen_H_ptr_->apply_kpt(
         reinterpret_cast<const std::complex<double>*>(psi),
         Veff,
         reinterpret_cast<std::complex<double>*>(Hpsi),
         ncol, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
+}
+
+// Spinor H*psi callback: eigensolver passes Nd_spinor=2*Nd_d as the effective dimension,
+// but Hamiltonian::apply_spinor_kpt needs the original Nd_d.
+static void eigen_apply_H_spinor_z_cb(const cuDoubleComplex* psi, const double* Veff_spinor,
+                                        cuDoubleComplex* Hpsi, cuDoubleComplex* /*x_ex*/, int ncol)
+{
+    s_eigen_H_ptr_->apply_spinor_kpt(
+        reinterpret_cast<const std::complex<double>*>(psi),
+        Veff_spinor,
+        reinterpret_cast<std::complex<double>*>(Hpsi),
+        ncol, s_eigen_Nd_d_, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
 }
 
 void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
@@ -989,15 +1009,38 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
         return;
     }
 
-    // GPU spinor path: SOC uses 2*Nd_d rows per band and complex CheFSI.
-    // The spinor Hamiltonian callback is different (needs Veff_spinor), so for now
-    // fall back to CPU. Full spinor GPU path requires a dedicated callback.
-    // TODO: Wire spinor GPU eigensolver with Hamiltonian::apply_spinor_kpt(Device::GPU).
-    static bool warned = false;
-    if (!warned) { fprintf(stderr, "INFO: Spinor eigensolver GPU path not yet wired, using CPU\n"); warned = true; }
-    solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
-                     lambda_cutoff, eigval_min, eigval_max,
-                     kpt_cart, cell_lengths, cheb_degree, ld);
+    // GPU spinor path: SOC uses 2*Nd_d rows per band with complex CheFSI.
+    // Reuse eigensolver_solve_z_gpu with Nd_spinor = 2*Nd_d and spinor callback.
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
+    int Nd_spinor = 2 * Nd_d;
+    size_t psi_bytes = (size_t)Nd_spinor * Nband * sizeof(cuDoubleComplex);
+
+    // Upload spinor psi and Veff_spinor to device
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, psi, psi_bytes, cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff_spinor, Veff_spinor, 4 * Nd_d * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
+
+    // Set up callback trampolines
+    s_eigen_H_ptr_ = gs->H;
+    s_eigen_Nd_d_ = Nd_d;
+
+    gpu::eigensolver_solve_z_gpu(
+        gs->d_psi_z, gs->d_eigvals, gs->d_Veff_spinor,
+        gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
+        nullptr, gs->d_Hs_z, gs->d_Ms_z,
+        Nd_spinor, Nband,
+        lambda_cutoff, eigval_min, eigval_max,
+        cheb_degree, gs->dV,
+        eigen_apply_H_spinor_z_cb);
+
+    // Download eigenvalues and psi back to host
+    CUDA_CHECK(cudaMemcpyAsync(eigvals, gs->d_eigvals, Nband * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(psi, gs->d_psi_z, psi_bytes,
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 // ============================================================
