@@ -16,6 +16,8 @@ void  gpu_memset(void* ptr, int val, size_t bytes);
 void  gpu_memcpy_h2d(void* dst, const void* src, size_t bytes);
 void  gpu_memcpy_d2h(void* dst, const void* src, size_t bytes);
 void  gpu_memcpy_d2d(void* dst, const void* src, size_t bytes);
+void* pinned_alloc(size_t bytes);
+void  pinned_free(void* ptr);
 }  // namespace lynx::detail
 #endif
 
@@ -64,7 +66,8 @@ public:
     /// Where the data lives.
     Device device() const { return dev_; }
     bool on_gpu() const { return dev_ == Device::GPU; }
-    bool on_cpu() const { return dev_ == Device::CPU; }
+    bool on_cpu() const { return dev_ == Device::CPU || dev_ == Device::CPU_PINNED; }
+    bool is_pinned() const { return dev_ == Device::CPU_PINNED; }
 
     /// Element access (CPU only — no bounds checking).
     T& operator()(int i) { return data_[i]; }
@@ -95,17 +98,20 @@ public:
         dst.dev_  = target;
         dst.alloc(byte_size());
 
-        if (dev_ == Device::CPU && target == Device::CPU) {
+        bool src_host = on_cpu();   // CPU or CPU_PINNED
+        bool dst_host = (target == Device::CPU || target == Device::CPU_PINNED);
+
+        if (src_host && dst_host) {
             std::memcpy(dst.data_, data_, byte_size());
         }
 #ifdef USE_CUDA
-        else if (dev_ == Device::CPU && target == Device::GPU) {
+        else if (src_host && !dst_host) {
             detail::gpu_memcpy_h2d(dst.data_, data_, byte_size());
         }
-        else if (dev_ == Device::GPU && target == Device::CPU) {
+        else if (!src_host && dst_host) {
             detail::gpu_memcpy_d2h(dst.data_, data_, byte_size());
         }
-        else if (dev_ == Device::GPU && target == Device::GPU) {
+        else {
             detail::gpu_memcpy_d2d(dst.data_, data_, byte_size());
         }
 #else
@@ -122,17 +128,20 @@ public:
             throw std::invalid_argument("DeviceArray::copy_from: size mismatch");
         if (src.empty() || empty()) return;
 
-        if (src.dev_ == Device::CPU && dev_ == Device::CPU) {
+        bool src_host = src.on_cpu();   // CPU or CPU_PINNED
+        bool dst_host = on_cpu();
+
+        if (src_host && dst_host) {
             std::memcpy(data_, src.data_, byte_size());
         }
 #ifdef USE_CUDA
-        else if (src.dev_ == Device::CPU && dev_ == Device::GPU) {
+        else if (src_host && !dst_host) {
             detail::gpu_memcpy_h2d(data_, src.data_, byte_size());
         }
-        else if (src.dev_ == Device::GPU && dev_ == Device::CPU) {
+        else if (!src_host && dst_host) {
             detail::gpu_memcpy_d2h(data_, src.data_, byte_size());
         }
-        else if (src.dev_ == Device::GPU && dev_ == Device::GPU) {
+        else {
             detail::gpu_memcpy_d2d(data_, src.data_, byte_size());
         }
 #else
@@ -145,7 +154,7 @@ public:
     /// Fill with zeros.
     void zero() {
         if (!data_) return;
-        if (dev_ == Device::CPU) {
+        if (on_cpu()) {
             std::memset(data_, 0, byte_size());
         }
 #ifdef USE_CUDA
@@ -158,8 +167,8 @@ public:
     /// Fill with value (CPU only).
     void fill(T val) {
         if (!data_) return;
-        if (dev_ != Device::CPU)
-            throw std::runtime_error("DeviceArray::fill: CPU only");
+        if (!on_cpu())
+            throw std::runtime_error("DeviceArray::fill: CPU/CPU_PINNED only");
         for (int i = 0; i < size_; ++i)
             data_[i] = val;
     }
@@ -225,12 +234,15 @@ private:
             data_ = static_cast<T*>(ptr);
         }
 #ifdef USE_CUDA
-        else {
+        else if (dev_ == Device::CPU_PINNED) {
+            data_ = static_cast<T*>(detail::pinned_alloc(bytes));
+        }
+        else if (dev_ == Device::GPU) {
             data_ = static_cast<T*>(detail::gpu_alloc(bytes));
         }
 #else
         else {
-            throw std::runtime_error("DeviceArray: GPU allocation requires CUDA build");
+            throw std::runtime_error("DeviceArray: GPU/pinned allocation requires CUDA build");
         }
 #endif
     }
@@ -245,7 +257,10 @@ private:
 #endif
         }
 #ifdef USE_CUDA
-        else {
+        else if (dev_ == Device::CPU_PINNED) {
+            detail::pinned_free(data_);
+        }
+        else if (dev_ == Device::GPU) {
             detail::gpu_free(data_);
         }
 #endif

@@ -3,6 +3,6 @@
 namespace lynx {
 
 /// Identifies where data resides.
-enum class Device { CPU, GPU };
+enum class Device { CPU, CPU_PINNED, GPU };
 
 }  // namespace lynx

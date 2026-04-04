@@ -147,3 +147,31 @@ TEST(DeviceArray, CopyFrom) {
     for (int i = 0; i < 100; ++i)
         EXPECT_DOUBLE_EQ(b(i), static_cast<double>(i * 2));
 }
+
+#ifdef USE_CUDA
+TEST(DeviceArray, PinnedMemory) {
+    DeviceArray<double> arr(100, Device::CPU_PINNED);
+    EXPECT_TRUE(arr.on_cpu());
+    EXPECT_TRUE(arr.is_pinned());
+    EXPECT_FALSE(arr.on_gpu());
+
+    // Can read/write like normal CPU memory
+    arr(0) = 42.0;
+    EXPECT_DOUBLE_EQ(arr(0), 42.0);
+
+    // Transfer to GPU
+    DeviceArray<double> gpu = arr.to(Device::GPU);
+    EXPECT_TRUE(gpu.on_gpu());
+
+    // Transfer back to pinned
+    DeviceArray<double> back = gpu.to(Device::CPU_PINNED);
+    EXPECT_TRUE(back.is_pinned());
+    EXPECT_DOUBLE_EQ(back(0), 42.0);
+
+    // Transfer back to regular CPU
+    DeviceArray<double> cpu = gpu.to(Device::CPU);
+    EXPECT_TRUE(cpu.on_cpu());
+    EXPECT_FALSE(cpu.is_pinned());
+    EXPECT_DOUBLE_EQ(cpu(0), 42.0);
+}
+#endif
