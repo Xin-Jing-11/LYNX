@@ -188,17 +188,15 @@ double SCF::run(Wavefunction& wfn,
             tau_.setup_gpu(*ctx_, Nspin_global_);
         }
 
-        // Upload initial wavefunctions to device (they stay there for entire SCF loop).
-        // psi was randomized in initialize_scf() on host; upload once now.
+        // Upload initial wavefunctions to device.
+        // For single-spin gamma: psi stays resident for entire SCF loop (upload once).
+        // For multi-spin/kpt: psi is uploaded before each solve_resident call,
+        // so we just upload the first spin/kpt here for the first CheFSI pass.
         if (!is_soc_) {
-            for (int s = 0; s < state.Nspin_local; ++s) {
-                for (int k = 0; k < state.Nkpts; ++k) {
-                    if (is_kpt_) {
-                        eigsolver.upload_psi_z_to_device(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
-                    } else {
-                        eigsolver.upload_psi_to_device(wfn.psi(s, k).data(), Nd_d, Nband_loc);
-                    }
-                }
+            if (is_kpt_) {
+                eigsolver.upload_psi_z_to_device(wfn.psi_kpt(0, 0).data(), Nd_d, Nband_loc);
+            } else {
+                eigsolver.upload_psi_to_device(wfn.psi(0, 0).data(), Nd_d, Nband_loc);
             }
         }
 
@@ -333,13 +331,16 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
 #ifdef USE_CUDA
                         if (dev_ == Device::GPU) {
                             hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
+                            if (Nspin_local > 1 || Nkpts > 1) {
+                                // Multi-kpt/spin: upload this spin/kpt's psi_z (shared device buffer).
+                                eigsolver.upload_psi_z_to_device(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
+                            }
                             // GPU-resident: psi_z stays on device, only upload Veff, download eigvals
                             eigsolver.solve_kpt_resident(eig, Veff_s, Nd_d, Nband_loc,
                                                           state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                                           params_.cheb_degree);
-                            // For multi-kpt/spin: download psi after each solve so density
-                            // can read all kpts from host. Single-spin single-kpt stays fully resident.
                             if (Nspin_local > 1 || Nkpts > 1) {
+                                // Multi-kpt/spin: download psi so density and next kpt can proceed.
                                 eigsolver.download_psi_z(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
                             }
                         } else
@@ -355,13 +356,17 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                     } else {
 #ifdef USE_CUDA
                         if (dev_ == Device::GPU) {
+                            if (Nspin_local > 1) {
+                                // Multi-spin: upload this spin's psi before solving (shared device buffer).
+                                eigsolver.upload_psi_to_device(wfn.psi(s, k).data(), Nd_d, Nband_loc);
+                            }
                             // GPU-resident: psi stays on device, only upload Veff, download eigvals.
                             eigsolver.solve_resident(eig, Veff_s, Nd_d, Nband_loc,
                                                       state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                                       params_.cheb_degree);
-                            // For multi-spin: download psi after each spin so density computation
-                            // can read all spins from host. Single-spin gamma stays fully resident.
                             if (Nspin_local > 1) {
+                                // Multi-spin: download psi after each spin so density and next
+                                // iteration can read all spins from host.
                                 eigsolver.download_psi(wfn.psi(s, k).data(), Nd_d, Nband_loc);
                             }
                         } else
