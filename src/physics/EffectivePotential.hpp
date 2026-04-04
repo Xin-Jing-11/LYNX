@@ -123,6 +123,21 @@ public:
                         XCType xc_type, const double* rho_b,
                         const double* rho_core);
     void cleanup_gpu();
+
+    // GPU-resident device pointer accessors
+    double* gpu_Veff();
+    const double* gpu_Veff() const;
+    double* gpu_phi();
+    double* gpu_exc();
+    double* gpu_Vxc();
+    double* gpu_rho();
+    double* gpu_rho_total();
+
+    // Upload density from host to device buffers (for initial Veff computation).
+    void upload_density(const ElectronDensity& density);
+
+    // Download potential arrays from device to host VeffArrays (for Energy::compute_all).
+    void download_to_host(VeffArrays& arrays);
 #endif
 
 private:
