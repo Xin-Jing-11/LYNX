@@ -7,14 +7,13 @@
 #include "core/gpu_common.cuh"
 #include "core/GPUContext.cuh"
 #include "solvers/Mixer.hpp"
-#include "solvers/LinearSolver.cuh"
 #include "parallel/HaloExchange.cuh"
 #include "operators/Laplacian.cuh"
 
 namespace lynx {
 
 // ============================================================
-// Kernels duplicated from GPUSCF.cu (file-static)
+// GPU kernels (file-static)
 // ============================================================
 
 namespace {
@@ -56,6 +55,109 @@ __global__ void mixer_jacobi_scale_kernel(
     if (i < N) f[i] = scale * r[i];
 }
 
+// AAR kernels for Kerker inner solve
+
+// r[i] = b[i] - Ax[i]
+__global__ void aar_residual_kernel(
+    const double* __restrict__ b,
+    const double* __restrict__ Ax,
+    double* __restrict__ r, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) r[i] = b[i] - Ax[i];
+}
+
+// x[i] = x_old[i] + omega * f[i]
+__global__ void aar_richardson_kernel(
+    const double* __restrict__ x_old,
+    const double* __restrict__ f,
+    double* __restrict__ x,
+    double omega, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) x[i] = x_old[i] + omega * f[i];
+}
+
+// X(:,col) = x - x_old, F(:,col) = f - f_old
+__global__ void aar_store_history_kernel(
+    const double* __restrict__ x,
+    const double* __restrict__ x_old,
+    const double* __restrict__ f,
+    const double* __restrict__ f_old,
+    double* __restrict__ X_hist,
+    double* __restrict__ F_hist,
+    int col, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        X_hist[col * N + i] = x[i] - x_old[i];
+        F_hist[col * N + i] = f[i] - f_old[i];
+    }
+}
+
+// Anderson extrapolation
+__global__ void aar_anderson_kernel(
+    const double* __restrict__ x_old,
+    const double* __restrict__ f,
+    const double* __restrict__ X_hist,
+    const double* __restrict__ F_hist,
+    const double* __restrict__ gamma,
+    double* __restrict__ x,
+    double beta, int cols, int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double val = x_old[i] + beta * f[i];
+        for (int j = 0; j < cols; ++j)
+            val -= gamma[j] * (X_hist[j * N + i] + beta * F_hist[j * N + i]);
+        x[i] = val;
+    }
+}
+
+__global__ void norm2_kernel(
+    const double* __restrict__ r,
+    double* __restrict__ d_norm2, int N)
+{
+    extern __shared__ double sdata[];
+    double sum = 0.0;
+    for (int idx = threadIdx.x; idx < N; idx += blockDim.x)
+        sum += r[idx] * r[idx];
+    sdata[threadIdx.x] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) *d_norm2 = sdata[0];
+}
+
+__global__ void fused_gram_kernel(
+    const double* __restrict__ F_hist,
+    const double* __restrict__ f,
+    double* __restrict__ d_out,
+    const int* __restrict__ d_pair_i,
+    const int* __restrict__ d_pair_j,
+    int N, int cols, int n_jobs)
+{
+    int job = blockIdx.x;
+    if (job >= n_jobs) return;
+    int ci = d_pair_i[job];
+    int cj = d_pair_j[job];
+    const double* a = F_hist + ci * N;
+    const double* b = (cj >= 0) ? (F_hist + cj * N) : f;
+    extern __shared__ double sdata[];
+    double sum = 0.0;
+    for (int idx = threadIdx.x; idx < N; idx += blockDim.x)
+        sum += a[idx] * b[idx];
+    sdata[threadIdx.x] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) d_out[job] = sdata[0];
+}
+
 } // anonymous namespace
 
 // ============================================================
@@ -80,50 +182,182 @@ struct GPUMixerState {
     double kerker_m_inv = 0.0;
     double precond_tol = 1e-3;
 
-    // NOTE: Pulay history buffers (R, F, fk, xkm1) are NOT owned here —
-    // they come from GPUContext::buf at call time in mix().
-    // Only d_fkm1 is owned (previous residual, persistent across iterations).
-    double* d_fkm1  = nullptr;  // Nd * ncol — previous residual
+    // Persistent buffer for previous residual
+    double* d_fkm1  = nullptr;
 };
 
-// Thread-local instance pointer for Kerker callback trampolines
-static thread_local GPUMixerState* s_mixer_state_ = nullptr;
-
 // ============================================================
-// Static Kerker callbacks
+// Kerker inner AAR solve (no callbacks, direct kernel calls)
+// Solves (-Lap + kTF^2)*Pf = Lf
 // ============================================================
-
-static void mixer_kerker_op_cb(const double* d_x, double* d_Ax) {
-    auto* s = s_mixer_state_;
+static void kerker_aar_solve_gpu(
+    GPUMixerState* gs,
+    const double* d_Lf,   // RHS
+    double* d_Pf,          // solution (in/out)
+    int Nd_kerker,
+    cudaStream_t stream)
+{
     auto& ctx = gpu::GPUContext::instance();
-    cudaStream_t stream = ctx.compute_stream;
+    auto& sp = ctx.scratch_pool;
+    size_t sp_cp = sp.checkpoint();
 
-    gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
-        s->nx, s->ny, s->nz, s->FDn, 1, true, true, true, stream);
-    int nx_ex = s->nx + 2 * s->FDn, ny_ex = s->ny + 2 * s->FDn;
-    constexpr double kTF2 = 1.0;
-    if (s->is_orth) {
-        gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
-            s->nx, s->ny, s->nz, s->FDn, nx_ex, ny_ex,
-            -1.0, 0.0, kTF2, s->kerker_diag, 1, stream);
-    } else {
-        gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
-            s->nx, s->ny, s->nz, s->FDn, nx_ex, ny_ex,
-            -1.0, 0.0, kTF2, s->kerker_diag,
-            s->has_mixed_deriv, s->has_mixed_deriv, s->has_mixed_deriv, 1, stream);
-    }
-}
+    double* d_kr    = sp.alloc<double>(Nd_kerker);
+    double* d_kf    = sp.alloc<double>(Nd_kerker);
+    double* d_kAx   = sp.alloc<double>(Nd_kerker);
+    double* d_kX    = sp.alloc<double>(Nd_kerker * 7);
+    double* d_kF    = sp.alloc<double>(Nd_kerker * 7);
+    double* d_kxold = sp.alloc<double>(Nd_kerker);
+    double* d_kfold = sp.alloc<double>(Nd_kerker);
 
-static void mixer_kerker_precond_cb(const double* d_r, double* d_f) {
-    auto* s = s_mixer_state_;
-    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
-    mixer_jacobi_scale_kernel<<<gpu::ceildiv(s->Nd, bs), bs, 0, stream>>>(
-        d_r, d_f, s->kerker_m_inv, s->Nd);
+    int grid_sz = gpu::ceildiv(Nd_kerker, bs);
+    int m = 7, p = 6;
+    double omega = 0.6, beta_aar = 0.6;
+    double tol = gs->precond_tol;
+    int max_iter = 1000;
+
+    // x_old = x (Pf)
+    CUDA_CHECK(cudaMemcpyAsync(d_kxold, d_Pf, Nd_kerker * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+
+    // ||b||
+    double* d_norm2 = sp.alloc<double>(1);
+    norm2_kernel<<<1, 256, 256 * sizeof(double), stream>>>(d_Lf, d_norm2, Nd_kerker);
+    double b_norm2;
+    CUDA_CHECK(cudaMemcpyAsync(&b_norm2, d_norm2, sizeof(double), cudaMemcpyDeviceToHost, stream));
+    double abs_tol = tol * std::sqrt(b_norm2);
+
+    // Kerker operator: (-Lap + kTF^2)*x
+    auto apply_kerker_op = [&](const double* d_x, double* d_Ax) {
+        gpu::halo_exchange_gpu(d_x, ctx.buf.aar_x_ex,
+            gs->nx, gs->ny, gs->nz, gs->FDn, 1, true, true, true, stream);
+        int nx_ex = gs->nx + 2 * gs->FDn, ny_ex = gs->ny + 2 * gs->FDn;
+        constexpr double kTF2 = 1.0;
+        if (gs->is_orth) {
+            gpu::laplacian_orth_v7_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex,
+                -1.0, 0.0, kTF2, gs->kerker_diag, 1, stream);
+        } else {
+            gpu::laplacian_nonorth_gpu(ctx.buf.aar_x_ex, nullptr, d_Ax,
+                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex,
+                -1.0, 0.0, kTF2, gs->kerker_diag,
+                gs->has_mixed_deriv, gs->has_mixed_deriv, gs->has_mixed_deriv, 1, stream);
+        }
+    };
+
+    // Initial residual
+    apply_kerker_op(d_Pf, d_kAx);
+    aar_residual_kernel<<<grid_sz, bs, 0, stream>>>(d_Lf, d_kAx, d_kr, Nd_kerker);
+
+    double r_2norm = abs_tol + 1.0;
+    int iter_count = 0;
+
+    // Host buffers for Gram solve
+    int max_jobs = m * (m + 1) / 2 + m;
+    std::vector<double> h_FTF(m * m);
+    std::vector<double> h_gamma(m);
+    std::vector<int> h_pair_i(max_jobs), h_pair_j(max_jobs);
+    std::vector<double> h_gram_out(max_jobs);
+
+    while (r_2norm > abs_tol && iter_count < max_iter) {
+        // Precondition: f = M^{-1} * r
+        mixer_jacobi_scale_kernel<<<grid_sz, bs, 0, stream>>>(d_kr, d_kf, gs->kerker_m_inv, Nd_kerker);
+
+        // Store history
+        if (iter_count > 0) {
+            int i_hist = (iter_count - 1) % m;
+            aar_store_history_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_Pf, d_kxold, d_kf, d_kfold, d_kX, d_kF, i_hist, Nd_kerker);
+        }
+
+        CUDA_CHECK(cudaMemcpyAsync(d_kxold, d_Pf, Nd_kerker * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_kfold, d_kf, Nd_kerker * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+
+        if ((iter_count + 1) % p == 0 && iter_count > 0) {
+            int cols = std::min(iter_count, m);
+
+            // Fused Gram kernel
+            int* d_pi = reinterpret_cast<int*>(d_kAx);
+            int* d_pj = d_pi + max_jobs;
+            double* d_go = reinterpret_cast<double*>(d_pj + max_jobs);
+
+            int n_jobs = 0;
+            for (int ii = 0; ii < cols; ++ii)
+                for (int jj = 0; jj <= ii; ++jj) {
+                    h_pair_i[n_jobs] = ii; h_pair_j[n_jobs] = jj; n_jobs++;
+                }
+            int ftf_pairs = n_jobs;
+            for (int ii = 0; ii < cols; ++ii) {
+                h_pair_i[n_jobs] = ii; h_pair_j[n_jobs] = -1; n_jobs++;
+            }
+
+            CUDA_CHECK(cudaMemcpyAsync(d_pi, h_pair_i.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaMemcpyAsync(d_pj, h_pair_j.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream));
+            int gram_bs = std::min(256, Nd_kerker);
+            fused_gram_kernel<<<n_jobs, gram_bs, gram_bs * sizeof(double), stream>>>(
+                d_kF, d_kf, d_go, d_pi, d_pj, Nd_kerker, cols, n_jobs);
+            CUDA_CHECK(cudaMemcpyAsync(h_gram_out.data(), d_go, n_jobs * sizeof(double), cudaMemcpyDeviceToHost, stream));
+
+            int k = 0;
+            for (int ii = 0; ii < cols; ++ii)
+                for (int jj = 0; jj <= ii; ++jj) {
+                    h_FTF[ii * cols + jj] = h_gram_out[k];
+                    h_FTF[jj * cols + ii] = h_gram_out[k];
+                    k++;
+                }
+            for (int ii = 0; ii < cols; ++ii)
+                h_gamma[ii] = h_gram_out[ftf_pairs + ii];
+
+            // Gaussian elimination
+            {
+                std::vector<double> A(h_FTF.begin(), h_FTF.begin() + cols * cols);
+                for (int kk = 0; kk < cols; ++kk) {
+                    int pivot = kk;
+                    for (int ii = kk + 1; ii < cols; ++ii)
+                        if (std::abs(A[ii * cols + kk]) > std::abs(A[pivot * cols + kk])) pivot = ii;
+                    if (pivot != kk) {
+                        for (int j = 0; j < cols; ++j) std::swap(A[kk * cols + j], A[pivot * cols + j]);
+                        std::swap(h_gamma[kk], h_gamma[pivot]);
+                    }
+                    double d = A[kk * cols + kk];
+                    if (std::abs(d) < 1e-14) continue;
+                    for (int ii = kk + 1; ii < cols; ++ii) {
+                        double factor = A[ii * cols + kk] / d;
+                        for (int j = kk + 1; j < cols; ++j) A[ii * cols + j] -= factor * A[kk * cols + j];
+                        h_gamma[ii] -= factor * h_gamma[kk];
+                    }
+                }
+                for (int kk = cols - 1; kk >= 0; --kk) {
+                    if (std::abs(A[kk * cols + kk]) < 1e-14) continue;
+                    for (int j = kk + 1; j < cols; ++j) h_gamma[kk] -= A[kk * cols + j] * h_gamma[j];
+                    h_gamma[kk] /= A[kk * cols + kk];
+                }
+            }
+
+            double* d_gamma = d_kAx;
+            CUDA_CHECK(cudaMemcpyAsync(d_gamma, h_gamma.data(), cols * sizeof(double), cudaMemcpyHostToDevice, stream));
+            aar_anderson_kernel<<<grid_sz, bs, 0, stream>>>(
+                d_kxold, d_kf, d_kX, d_kF, d_gamma, d_Pf, beta_aar, cols, Nd_kerker);
+
+            // Recompute residual + convergence check
+            apply_kerker_op(d_Pf, d_kAx);
+            aar_residual_kernel<<<grid_sz, bs, 0, stream>>>(d_Lf, d_kAx, d_kr, Nd_kerker);
+            norm2_kernel<<<1, 256, 256 * sizeof(double), stream>>>(d_kr, d_norm2, Nd_kerker);
+            double r_norm2;
+            CUDA_CHECK(cudaMemcpyAsync(&r_norm2, d_norm2, sizeof(double), cudaMemcpyDeviceToHost, stream));
+            r_2norm = std::sqrt(r_norm2);
+        } else {
+            aar_richardson_kernel<<<grid_sz, bs, 0, stream>>>(d_kxold, d_kf, d_Pf, omega, Nd_kerker);
+            apply_kerker_op(d_Pf, d_kAx);
+            aar_residual_kernel<<<grid_sz, bs, 0, stream>>>(d_Lf, d_kAx, d_kr, Nd_kerker);
+        }
+        iter_count++;
+    }
+
+    sp.restore(sp_cp);
 }
 
 // ============================================================
-// Stubs
+// Setup / Cleanup
 // ============================================================
 
 void Mixer::setup_gpu(int Nd_d, int ncol, int m_depth, double beta_mix) {
@@ -136,9 +370,6 @@ void Mixer::setup_gpu(int Nd_d, int ncol, int m_depth, double beta_mix) {
     gs->beta    = beta_mix;
     gs->mix_iter = 0;
     gs->Nd      = Nd_d;
-
-    // Pulay history buffers (R, F, fk, xkm1) come from GPUContext::buf.
-    // Only d_fkm1 is allocated lazily on first use in mix().
 }
 
 void Mixer::cleanup_gpu() {
@@ -159,17 +390,10 @@ Mixer::~Mixer() {
 }
 
 // ============================================================
-// Device-dispatching mix()
+// GPU Pulay mixing — dispatched from mix() via mix_gpu()
 // ============================================================
 
-void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device dev) {
-    if (dev == Device::CPU || !gpu_state_raw_) {
-        // Fall back to CPU if GPU state not initialized
-        mix(x_k_inout, g_k, Nd_d, ncol);
-        return;
-    }
-
-    // GPU path — mirrors GPUSCF::gpu_pulay_mix()
+void Mixer::mix_gpu(double* x_k_inout, const double* g_k, int Nd_d, int ncol) {
     auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
@@ -177,8 +401,8 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
     int Nd = Nd_d * ncol;
     int m_depth = gs->m_depth;
     double beta_mix = gs->beta;
-    int Nd_kerker = Nd_d;  // Kerker on first Nd_d, simple mix on rest
-    double beta_mag = beta_mix;  // same for magnetization by default
+    int Nd_kerker = Nd_d;
+    double beta_mag = beta_mix;
 
     int bs = 256;
     int grid_sz = gpu::ceildiv(Nd, bs);
@@ -219,7 +443,7 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
     if (gs->mix_iter > 0) {
         int cols = std::min(gs->mix_iter, m_depth);
 
-        // Build F^T*F and F^T*f_k
+        // Build F^T*F and F^T*f_k via cuBLAS
         std::vector<double> h_FtF(cols * cols);
         std::vector<double> h_Ftf(cols);
 
@@ -234,7 +458,7 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
             }
         }
 
-        // Solve Gamma on CPU (tiny matrix)
+        // Solve Gamma on CPU
         std::vector<double> Gamma(cols, 0.0);
         {
             std::vector<double> A(h_FtF);
@@ -285,9 +509,6 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
     double* d_Pf = sp.alloc<double>(Nd);
     CUDA_CHECK(cudaMemsetAsync(d_Pf, 0, Nd * sizeof(double), stream));
 
-    // Set callback pointer
-    s_mixer_state_ = gs;
-
     // Apply Kerker to first Nd_kerker elements
     {
         double* d_f_col = d_f_wavg;
@@ -312,22 +533,8 @@ void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device
             }
         }
 
-        // Step 2: Solve (-Lap + kTF^2)*Pf = Lf via AAR
-        {
-            double* d_kr    = sp.alloc<double>(Nd_kerker);
-            double* d_kf    = sp.alloc<double>(Nd_kerker);
-            double* d_kAx   = sp.alloc<double>(Nd_kerker);
-            double* d_kX    = sp.alloc<double>(Nd_kerker * 7);
-            double* d_kF    = sp.alloc<double>(Nd_kerker * 7);
-            double* d_kxold = sp.alloc<double>(Nd_kerker);
-            double* d_kfold = sp.alloc<double>(Nd_kerker);
-
-            gpu::aar_gpu(
-                mixer_kerker_op_cb, mixer_kerker_precond_cb,
-                d_Lf, d_Pf_col, Nd_kerker,
-                0.6, 0.6, 7, 6, gs->precond_tol, 1000,
-                d_kr, d_kf, d_kAx, d_kX, d_kF, d_kxold, d_kfold, stream);
-        }
+        // Step 2: Solve (-Lap + kTF^2)*Pf = Lf via AAR (no callbacks)
+        kerker_aar_solve_gpu(gs, d_Lf, d_Pf_col, Nd_kerker, stream);
 
         // Step 3: Pf *= -beta_mix
         {

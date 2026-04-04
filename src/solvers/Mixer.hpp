@@ -12,6 +12,8 @@ namespace lynx {
 
 // Anderson/Pulay mixing with pluggable preconditioner.
 // Matches reference LYNX Mixing_periodic_pulay exactly.
+//
+// Dispatch: dev_ is set at setup. mix() dispatches internally.
 class Mixer {
 public:
     Mixer() = default;
@@ -28,25 +30,22 @@ public:
                double mixing_param,
                Preconditioner* preconditioner = nullptr);
 
+    /// Set device for dispatch. Default is CPU.
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
     // Set density constraint: after mixing, clamp negative densities and
     // renormalize to Nelectron.  Only used when mixing_var == Density.
-    // Nd_global: total grid points (for MPI-global renormalization)
-    // dV: volume element per grid point
     void set_density_constraint(int Nelectron, int Nd_global, double dV);
 
     // Set potential mean-shift mode: remove per-spin mean before mixing,
     // restore after.  Only used when mixing_var == Potential.
-    // Nd_global: total grid points (for mean computation)
     void set_potential_mean_shift(int Nd_global);
 
     // Mix density: x_k is the current input, g_k is the output from SCF.
     // After mixing, x_k is updated in-place with the new mixed density.
     // ncol: number of density columns (1 for non-spin, 3 for collinear spin [total,up,down])
-    // Reference: Mixing_periodic_pulay
     void mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol = 1);
-
-    // ── Device-dispatching overload ─────────────────────────────
-    void mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device dev);
 
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUMixerState (defined in .cu)
@@ -59,12 +58,12 @@ public:
     void reset();
 
     // Access saved Veff mean (per spin) for potential mixing.
-    // Only valid after mix() when potential mean-shift is enabled.
     const std::vector<double>& veff_mean() const { return veff_mean_; }
 
 private:
     int Nd_d_ = 0;
     int Nd_ = 0;           // global grid size (for renormalization / mean)
+    Device dev_ = Device::CPU;
     MixingVariable var_ = MixingVariable::Density;
     MixingPrecond precond_type_ = MixingPrecond::None;
     int m_ = 7;            // history depth
@@ -92,18 +91,14 @@ private:
     bool potential_mean_shift_ = false;
     std::vector<double> veff_mean_;  // per-spin mean values
 
-    // Apply density clamping + renormalization in-place.
-    // x points to ncol columns of Nd_d_ each.
-    // For ncol==1: clamp total density, renormalize.
-    // For ncol==2: unpack [total,mag] -> [up,dn], clamp, repack, renormalize.
-    // For ncol==4: clamp col 0, renormalize col 0 (SOC magnetization untouched).
     void apply_density_constraint(double* x, int ncol);
-
-    // Remove per-column mean from x (ncol columns), save means in veff_mean_.
     void remove_mean(double* x, int ncol);
-
-    // Restore per-column mean to x (ncol columns) from veff_mean_.
     void restore_mean(double* x, int ncol);
+
+    // --- GPU dispatch: Pulay mixing loop on device ---
+#ifdef USE_CUDA
+    void mix_gpu(double* d_x_k_inout, const double* d_g_k, int Nd_d, int ncol);
+#endif
 };
 
 } // namespace lynx

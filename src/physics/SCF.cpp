@@ -597,7 +597,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
 
     if (state.use_potential_mixing) {
         // Mixer handles mean-shift internally via set_potential_mean_shift
-        mixer.mix(state.Veff_mixed.data(), state.Veff_out.data(), Nd_d, Nspin, dev_);
+        mixer.mix(state.Veff_mixed.data(), state.Veff_out.data(), Nd_d, Nspin);
 
         // Copy mixed potential to arrays_.Veff for Hamiltonian
         std::memcpy(arrays_.Veff.data(), state.Veff_mixed.data(), Nd_d * Nspin * sizeof(double));
@@ -615,7 +615,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         std::memcpy(dens_out.data() + 3*Nd_d, rho_new.mag_z().data(), Nd_d * sizeof(double));
 
         // Mixer handles clamping+renormalization of column 0 (density constraint)
-        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4, dev_);
+        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4);
 
         // Unpack back into density structure
         std::memcpy(density_.rho_total().data(), dens_in.data(), Nd_d * sizeof(double));
@@ -625,7 +625,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         std::memcpy(density_.mag_z().data(), dens_in.data() + 3*Nd_d, Nd_d * sizeof(double));
     } else if (Nspin == 1) {
         // Mixer handles clamping+renormalization (density constraint)
-        mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d, 1, dev_);
+        mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d, 1);
         std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
     } else {
         // Spin-polarized: mix packed array [total | magnetization] (2*Nd_d)
@@ -646,7 +646,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         }
 
         // Mixer handles clamping+renormalization (density constraint for ncol==2)
-        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2, dev_);
+        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
 
         // Unpack [total | magnetization] back to [up | down]
         double* rho_tot = density_.rho_total().data();
