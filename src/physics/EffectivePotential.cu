@@ -182,6 +182,7 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
     // Setup PoissonSolver for GPU dispatch
     gs->poisson.setup(ctx.laplacian(), ctx.stencil(), ctx.domain(), ctx.grid(), ctx.halo());
     gs->poisson.setup_gpu(ctx);
+    gs->poisson.set_device(Device::GPU);
 }
 
 void EffectivePotential::cleanup_gpu() {
@@ -282,7 +283,7 @@ void EffectivePotential::compute(const ElectronDensity& density,
     }
 
     // 4. Solve Poisson equation on GPU (handles mean-subtraction internally)
-    gs->poisson.solve(gs->d_rhs, gs->d_phi, poisson_tol, Device::GPU);
+    gs->poisson.solve(gs->d_rhs, gs->d_phi, poisson_tol);
 
     // 5. Veff = Vxc + phi (per spin channel)
     for (int s = 0; s < Nspin; ++s) {
