@@ -122,6 +122,19 @@ public:
 
     // Upload Veff to device buffer (from EffectivePotential host arrays).
     void upload_Veff(const double* h_Veff, int Nd);
+
+    // GPU-resident solve: psi is already on device, only upload Veff and
+    // download eigvals. psi stays on device after the call.
+    void solve_resident(double* h_eigvals, const double* h_Veff,
+                        int Nd_d, int Nband,
+                        double lambda_cutoff, double eigval_min, double eigval_max,
+                        int cheb_degree);
+
+    // GPU-resident solve for k-point (complex): psi_z already on device.
+    void solve_kpt_resident(double* h_eigvals, const double* h_Veff,
+                            int Nd_d, int Nband,
+                            double lambda_cutoff, double eigval_min, double eigval_max,
+                            int cheb_degree);
 #endif
 
     double lambda_cutoff() const { return lambda_cutoff_; }

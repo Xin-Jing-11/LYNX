@@ -1002,6 +1002,65 @@ void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* 
 }
 
 // ============================================================
+// GPU-resident solve: psi stays on device, only Veff uploaded, eigvals downloaded
+// ============================================================
+void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
+                                  int Nd_d, int Nband,
+                                  double lambda_cutoff, double eigval_min, double eigval_max,
+                                  int cheb_degree) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    // Upload Veff only (psi stays resident on device)
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
+
+    s_eigen_H_ptr_ = gs->H;
+
+    gpu::eigensolver_solve_gpu(
+        gs->d_psi, gs->d_eigvals, gs->d_Veff,
+        gs->d_Y, gs->d_Xold, gs->d_Xnew, gs->d_HX,
+        nullptr, gs->d_Hs, gs->d_Ms,
+        Nd_d, Nband,
+        lambda_cutoff, eigval_min, eigval_max,
+        cheb_degree, gs->dV,
+        eigen_apply_H_cb);
+
+    // Download only eigenvalues (tiny: Nband doubles)
+    CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void EigenSolver::solve_kpt_resident(double* h_eigvals, const double* h_Veff,
+                                      int Nd_d, int Nband,
+                                      double lambda_cutoff, double eigval_min, double eigval_max,
+                                      int cheb_degree) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    // Upload Veff only (psi_z stays resident on device)
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
+
+    s_eigen_H_ptr_ = gs->H;
+
+    gpu::eigensolver_solve_z_gpu(
+        gs->d_psi_z, gs->d_eigvals, gs->d_Veff,
+        gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
+        nullptr, gs->d_Hs_z, gs->d_Ms_z,
+        Nd_d, Nband,
+        lambda_cutoff, eigval_min, eigval_max,
+        cheb_degree, gs->dV,
+        eigen_apply_H_z_cb);
+
+    // Download only eigenvalues (tiny: Nband doubles)
+    CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+// ============================================================
 // GPU-resident data accessors
 // ============================================================
 
