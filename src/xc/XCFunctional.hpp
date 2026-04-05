@@ -50,7 +50,7 @@ public:
                        double* vtau = nullptr) const;
 
     // ── Device-dispatching overloads ─────────────────────────────
-    // Forward to CPU methods (Device::CPU) or GPU kernels (Device::GPU).
+    // Forward to _cpu() or _gpu() based on Device parameter.
 
     void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
                   Device dev,
@@ -61,6 +61,18 @@ public:
                        Device dev,
                        double* Dxcdgrho = nullptr,
                        const double* tau = nullptr, double* vtau = nullptr) const;
+
+    // CPU sub-step names (aliases for host-pointer evaluate methods)
+    void evaluate_cpu(const double* rho, double* Vxc, double* exc, int Nd_d,
+                      double* Dxcdgrho = nullptr,
+                      const double* tau = nullptr, double* vtau = nullptr) const {
+        evaluate(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+    }
+    void evaluate_spin_cpu(const double* rho, double* Vxc, double* exc, int Nd_d,
+                           double* Dxcdgrho = nullptr,
+                           const double* tau = nullptr, double* vtau = nullptr) const {
+        evaluate_spin(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+    }
 
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUXCState (defined in .cu)
@@ -73,6 +85,16 @@ public:
 
     // Set tau_valid flag on GPU state (for mGGA: true after first tau computation).
     void set_gpu_tau_valid(bool valid);
+#endif
+
+#ifdef USE_CUDA
+    // GPU sub-step methods: full GGA pipeline on device (defined in .cu)
+    void evaluate_gpu(const double* d_rho, double* d_Vxc, double* d_exc, int Nd_d,
+                      double* d_Dxcdgrho = nullptr,
+                      const double* d_tau = nullptr, double* d_vtau = nullptr) const;
+    void evaluate_spin_gpu(const double* d_rho, double* d_Vxc, double* d_exc, int Nd_d,
+                           double* d_Dxcdgrho = nullptr,
+                           const double* d_tau = nullptr, double* d_vtau = nullptr) const;
 #endif
 
     // Set exchange scaling factor (1.0 = full exchange, 0.75 = PBE0 during Fock loop)

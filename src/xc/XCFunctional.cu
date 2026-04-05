@@ -1852,16 +1852,26 @@ void XCFunctional::set_gpu_tau_valid(bool valid) {
 // Device-dispatching evaluate() — non-spin
 // ============================================================
 
+// ============================================================
+// Device-dispatching evaluate() — dispatches to _cpu() or _gpu()
+// ============================================================
 void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
                              Device dev,
                              double* Dxcdgrho,
                              const double* tau, double* vtau) const {
     if (dev == Device::CPU) {
-        evaluate(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+        evaluate_cpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
         return;
     }
+    evaluate_gpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+}
 
-    // GPU path — mirrors GPUSCF::gpu_xc_evaluate()
+// ============================================================
+// GPU evaluate — full GGA pipeline on device
+// ============================================================
+void XCFunctional::evaluate_gpu(const double* rho, double* Vxc, double* exc, int Nd_d,
+                                 double* Dxcdgrho,
+                                 const double* tau, double* vtau) const {
     auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
@@ -1973,18 +1983,25 @@ void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_
 }
 
 // ============================================================
-// Device-dispatching evaluate_spin() — spin-polarized
+// Device-dispatching evaluate_spin() — dispatches to _cpu() or _gpu()
 // ============================================================
-
 void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
                                   Device dev,
                                   double* Dxcdgrho,
                                   const double* tau, double* vtau) const {
     if (dev == Device::CPU) {
-        evaluate_spin(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+        evaluate_spin_cpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
         return;
     }
+    evaluate_spin_gpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
+}
 
+// ============================================================
+// GPU evaluate_spin — full GGA pipeline on device (spin-polarized)
+// ============================================================
+void XCFunctional::evaluate_spin_gpu(const double* rho, double* Vxc, double* exc, int Nd_d,
+                                      double* Dxcdgrho,
+                                      const double* tau, double* vtau) const {
     // GPU path — mirrors GPUSCF::gpu_xc_evaluate_spin()
     auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
     auto& ctx = gpu::GPUContext::instance();
