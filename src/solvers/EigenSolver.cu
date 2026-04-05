@@ -771,8 +771,92 @@ EigenSolver::~EigenSolver() {
 }
 
 // ============================================================
-// GPU-resident solve: psi stays on device, only Veff uploaded, eigvals downloaded.
-// Calls GPU sub-steps directly with H_->apply() — no callbacks.
+// GPU sub-step class methods — thin wrappers around gpu:: helpers
+// These access GPUEigenState device pointers and delegate to the
+// gpu:: free functions. Algorithm logic lives in .cpp.
+// ============================================================
+
+// --- Real (gamma-point) GPU sub-steps ---
+
+void EigenSolver::chebyshev_filter_gpu(int Nd_d, int Nband,
+                                        double lambda_cutoff, double eigval_min, double eigval_max,
+                                        int cheb_degree) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::chebyshev_filter_gpu(gs->d_psi, gs->d_Y, gs->d_Xold, gs->d_Xnew, gs->d_HX,
+                               gs->d_Veff, Nd_d, Nband,
+                               lambda_cutoff, eigval_min, eigval_max,
+                               cheb_degree, gs->H, stream);
+}
+
+void EigenSolver::orthogonalize_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::orthogonalize_gpu(gs->d_Y, gs->d_Ms, Nd_d, Nband, gs->dV);
+}
+
+void EigenSolver::project_and_diag_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::project_and_diag_gpu(gs->d_Y, gs->d_HX, gs->d_Hs, gs->d_eigvals,
+                               gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
+}
+
+void EigenSolver::subspace_rotation_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::rotate_orbitals_gpu(gs->d_Y, gs->d_Hs, gs->d_psi, Nd_d, Nband);
+    // Copy Y back to psi
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi, gs->d_Y, (size_t)Nd_d * Nband * sizeof(double),
+                               cudaMemcpyDeviceToDevice, stream));
+}
+
+// --- Complex (k-point) GPU sub-steps ---
+
+void EigenSolver::chebyshev_filter_kpt_gpu(int Nd_d, int Nband,
+                                            double lambda_cutoff, double eigval_min, double eigval_max,
+                                            int cheb_degree) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::chebyshev_filter_z_gpu(gs->d_psi_z, gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
+                                 gs->d_Veff, Nd_d, Nband,
+                                 lambda_cutoff, eigval_min, eigval_max,
+                                 cheb_degree, gs->H, stream);
+}
+
+void EigenSolver::orthogonalize_kpt_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::orthogonalize_z_gpu(gs->d_Y_z, gs->d_Ms_z, Nd_d, Nband, gs->dV);
+}
+
+void EigenSolver::project_and_diag_kpt_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::project_and_diag_z_gpu(gs->d_Y_z, gs->d_HX_z, gs->d_Hs_z, gs->d_eigvals,
+                                 gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
+}
+
+void EigenSolver::subspace_rotation_kpt_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::rotate_orbitals_z_gpu(gs->d_Y_z, gs->d_Hs_z, gs->d_psi_z, Nd_d, Nband);
+    // Copy Y_z back to psi_z
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, gs->d_Y_z, (size_t)Nd_d * Nband * sizeof(cuDoubleComplex),
+                               cudaMemcpyDeviceToDevice, stream));
+}
+
+// --- GPU workspace pointer accessors ---
+
+double* EigenSolver::gpu_Y() {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    return gs ? gs->d_Y : nullptr;
+}
+
+double* EigenSolver::gpu_Hs() {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    return gs ? gs->d_Hs : nullptr;
+}
+
+// ============================================================
+// GPU-resident solve: algorithm lives in .cpp (solve_resident),
+// called through _gpu() sub-step methods.
 // ============================================================
 void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
                                   int Nd_d, int Nband,
@@ -785,25 +869,11 @@ void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 
-    // Step 1: Chebyshev filter (H->apply called directly, no callback)
-    gpu::chebyshev_filter_gpu(gs->d_psi, gs->d_Y, gs->d_Xold, gs->d_Xnew, gs->d_HX,
-                               gs->d_Veff, Nd_d, Nband,
-                               lambda_cutoff, eigval_min, eigval_max,
-                               cheb_degree, gs->H, stream);
-
-    // Step 2: Orthogonalize (Cholesky QR)
-    gpu::orthogonalize_gpu(gs->d_Y, gs->d_Ms, Nd_d, Nband, gs->dV);
-
-    // Step 3+4: Project Hamiltonian + diagonalize
-    gpu::project_and_diag_gpu(gs->d_Y, gs->d_HX, gs->d_Hs, gs->d_eigvals,
-                               gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
-
-    // Step 5: Rotate orbitals
-    gpu::rotate_orbitals_gpu(gs->d_Y, gs->d_Hs, gs->d_psi, Nd_d, Nband);
-
-    // Copy result back to psi
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi, gs->d_Y, (size_t)Nd_d * Nband * sizeof(double),
-                               cudaMemcpyDeviceToDevice, stream));
+    // CheFSI sub-steps via _gpu() class methods
+    chebyshev_filter_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_gpu(Nd_d, Nband);
+    project_and_diag_gpu(Nd_d, Nband);
+    subspace_rotation_gpu(Nd_d, Nband);
 
     // Download only eigenvalues (tiny: Nband doubles)
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
@@ -822,25 +892,11 @@ void EigenSolver::solve_kpt_resident(double* h_eigvals, const double* h_Veff,
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 
-    // Step 1: Chebyshev filter (H->apply_kpt called directly, no callback)
-    gpu::chebyshev_filter_z_gpu(gs->d_psi_z, gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
-                                 gs->d_Veff, Nd_d, Nband,
-                                 lambda_cutoff, eigval_min, eigval_max,
-                                 cheb_degree, gs->H, stream);
-
-    // Step 2: Orthogonalize (Cholesky QR)
-    gpu::orthogonalize_z_gpu(gs->d_Y_z, gs->d_Ms_z, Nd_d, Nband, gs->dV);
-
-    // Step 3+4: Project Hamiltonian + diagonalize
-    gpu::project_and_diag_z_gpu(gs->d_Y_z, gs->d_HX_z, gs->d_Hs_z, gs->d_eigvals,
-                                 gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
-
-    // Step 5: Rotate orbitals
-    gpu::rotate_orbitals_z_gpu(gs->d_Y_z, gs->d_Hs_z, gs->d_psi_z, Nd_d, Nband);
-
-    // Copy result back to psi
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, gs->d_Y_z, (size_t)Nd_d * Nband * sizeof(cuDoubleComplex),
-                               cudaMemcpyDeviceToDevice, stream));
+    // CheFSI sub-steps via _gpu() class methods
+    chebyshev_filter_kpt_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_kpt_gpu(Nd_d, Nband);
+    project_and_diag_kpt_gpu(Nd_d, Nband);
+    subspace_rotation_kpt_gpu(Nd_d, Nband);
 
     // Download only eigenvalues (tiny: Nband doubles)
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
