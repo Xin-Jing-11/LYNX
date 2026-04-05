@@ -133,15 +133,25 @@ public:
     double* gpu_rho();
     double* gpu_rho_total();
 
-    // Upload density from host to device buffers (for initial Veff computation).
+    // Upload density from host to device buffers.
     void upload_density(const ElectronDensity& density);
 
-    // Download potential arrays from device to host VeffArrays (for Energy::compute_all).
+    // Download potential arrays from device to host VeffArrays.
     void download_to_host(VeffArrays& arrays);
 
     // Set device tau/vtau pointers for mGGA GPU pipeline.
-    // Called from SCF after KineticEnergyDensity::compute() to wire device tau → XC.
     void set_device_tau(double* d_tau, double* d_vtau);
+
+    // GPU kernel wrappers (defined in .cu)
+    void poisson_rhs_gpu(const double* d_rho_total, const double* d_pseudocharge,
+                          double* d_rhs, int Nd);
+    void combine_veff_gpu(const double* d_Vxc, const double* d_phi,
+                           double* d_Veff, int Nd, int Nspin);
+    void combine_veff_spinor_gpu(const double* d_Vxc_up, const double* d_Vxc_dn,
+                                  const double* d_phi,
+                                  const double* d_mag_x, const double* d_mag_y,
+                                  const double* d_mag_z,
+                                  double* d_Veff_spinor, int Nd);
 #endif
 
 private:
