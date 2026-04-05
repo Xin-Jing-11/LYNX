@@ -74,6 +74,9 @@ private:
 
     // --- GPU kernel dispatch targets (defined in PoissonSolver.cu) ---
 #ifdef USE_CUDA
+    // GPU solve path (defined in PoissonSolver.cu)
+    int solve_gpu(const double* rhs, double* phi, double tol) const;
+
     void apply_laplacian_gpu(const double* d_x, double* d_Ax) const;
     void apply_preconditioner_gpu(const double* d_r, double* d_f, int N) const;
 

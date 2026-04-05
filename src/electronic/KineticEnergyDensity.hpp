@@ -81,6 +81,10 @@ public:
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
+    // GPU compute path (defined in .cu)
+    void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
+                     const std::vector<double>& kpt_weights);
+
     // Device pointer accessors (for GPU-resident mGGA pipeline)
     double* d_tau();
     double* d_vtau();

@@ -73,6 +73,12 @@ public:
                              const void* d_psi_z,           // device psi (kpt, cuDoubleComplex*, may be null)
                              const double* d_occ);          // device occupations
 
+    // GPU compute paths (defined in .cu)
+    void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
+                     const std::vector<double>& kpt_weights);
+    void compute_spinor_gpu(const LynxContext& ctx, const Wavefunction& wfn,
+                            const std::vector<double>& kpt_weights);
+
     // GPU kernel wrappers for per-band density accumulation (defined in .cu)
     void accumulate_band_gpu(const double* d_psi, const double* d_occ,
                              double* d_rho, int Nd, int Nband, double weight);
