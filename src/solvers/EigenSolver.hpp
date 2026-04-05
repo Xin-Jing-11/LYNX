@@ -69,25 +69,6 @@ public:
                                     double& eigval_min, double& eigval_max,
                                     double tol_lanczos = 1e-2, int max_iter = 1000);
 
-    // --- Device-dispatching interfaces (CPU delegates to existing, GPU uses gpu:: kernels) ---
-
-    void solve(double* psi, double* eigvals, const double* Veff,
-               int Nd_d, int Nband,
-               double lambda_cutoff, double eigval_min, double eigval_max,
-               int cheb_degree, int ld, Device dev);
-
-    void solve_kpt(Complex* psi, double* eigvals, const double* Veff,
-                   int Nd_d, int Nband,
-                   double lambda_cutoff, double eigval_min, double eigval_max,
-                   const Vec3& kpt_cart, const Vec3& cell_lengths,
-                   int cheb_degree, int ld, Device dev);
-
-    void solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
-                          int Nd_d, int Nband,
-                          double lambda_cutoff, double eigval_min, double eigval_max,
-                          const Vec3& kpt_cart, const Vec3& cell_lengths,
-                          int cheb_degree, int ld, Device dev);
-
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUEigenState (defined in .cu)
 

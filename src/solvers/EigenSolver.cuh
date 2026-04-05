@@ -5,29 +5,52 @@
 #include <cuComplex.h>
 
 namespace lynx {
+
+class Hamiltonian;  // forward declaration
+
 namespace gpu {
 
-// Real eigensolver: Chebyshev-filtered subspace iteration
-void eigensolver_solve_gpu(
-    double* d_psi, double* d_eigvals, const double* d_Veff,
-    double* d_Y, double* d_Xold, double* d_Xnew,
-    double* d_HX, double* d_x_ex,
-    double* d_Hs, double* d_Ms,
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int cheb_degree, double dV,
-    void (*apply_H)(const double*, const double*, double*, double*, int));
+// --- Real (gamma-point) GPU sub-steps ---
 
-// Complex eigensolver: Chebyshev-filtered subspace iteration (k-point)
-void eigensolver_solve_z_gpu(
-    cuDoubleComplex* d_psi_z, double* d_eigvals, const double* d_Veff,
-    cuDoubleComplex* d_Y_z, cuDoubleComplex* d_Xold_z, cuDoubleComplex* d_Xnew_z,
-    cuDoubleComplex* d_HX_z, cuDoubleComplex* d_x_ex_z,
-    cuDoubleComplex* d_Hs_z, cuDoubleComplex* d_Ms_z,
+// Chebyshev filter: H->apply() called directly (no callback)
+void chebyshev_filter_gpu(
+    const double* d_X, double* d_Y, double* d_Xold, double* d_Xnew,
+    double* d_HX, const double* d_Veff,
     int Nd, int Ns,
     double lambda_cutoff, double eigval_min, double eigval_max,
-    int cheb_degree, double dV,
-    void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int));
+    int degree, const Hamiltonian* H, cudaStream_t stream);
+
+// Orthogonalize via Cholesky QR
+void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV);
+
+// Project Hamiltonian + diagonalize (dsyevd)
+void project_and_diag_gpu(
+    const double* d_X, double* d_HX, double* d_Hs, double* d_eigvals,
+    const double* d_Veff, int Nd, int N, double dV, const Hamiltonian* H);
+
+// Rotate orbitals: X = X * Q
+void rotate_orbitals_gpu(double* d_X, const double* d_Q, double* d_temp, int Nd, int N);
+
+// --- Complex (k-point) GPU sub-steps ---
+
+void chebyshev_filter_z_gpu(
+    const cuDoubleComplex* d_X, cuDoubleComplex* d_Y,
+    cuDoubleComplex* d_Xold, cuDoubleComplex* d_Xnew,
+    cuDoubleComplex* d_HX, const double* d_Veff,
+    int Nd, int Ns,
+    double lambda_cutoff, double eigval_min, double eigval_max,
+    int degree, const Hamiltonian* H, cudaStream_t stream);
+
+void orthogonalize_z_gpu(cuDoubleComplex* d_X, cuDoubleComplex* d_S,
+                          int Nd, int N, double dV);
+
+void project_and_diag_z_gpu(
+    const cuDoubleComplex* d_X, cuDoubleComplex* d_HX,
+    cuDoubleComplex* d_Hs, double* d_eigvals,
+    const double* d_Veff, int Nd, int N, double dV, const Hamiltonian* H);
+
+void rotate_orbitals_z_gpu(cuDoubleComplex* d_X, const cuDoubleComplex* d_Q,
+                            cuDoubleComplex* d_temp, int Nd, int N);
 
 // Compute electron density from complex wavefunctions
 void compute_density_z_gpu(const cuDoubleComplex* d_psi, const double* d_occ,

@@ -82,15 +82,6 @@ void upload_stencil_coefficients(
     const double* D2xy, const double* D2xz, const double* D2yz,
     int FDn);
 
-void eigensolver_solve_gpu(
-    double* d_psi, double* d_eigvals, const double* d_Veff,
-    double* d_Y, double* d_Xold, double* d_Xnew,
-    double* d_HX, double* d_x_ex,
-    double* d_Hs, double* d_Ms,
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int cheb_degree, double dV,
-    void (*apply_H)(const double*, const double*, double*, double*, int));
 
 void nonlocal_projector_apply_gpu(
     const double* d_psi, double* d_Hpsi,
@@ -1128,6 +1119,17 @@ int main(int argc, char** argv) {
     EigenSolver eigsolver;
     eigsolver.setup(ctx, hamiltonian);
 
+    // Setup Hamiltonian and EigenSolver for GPU dispatch
+    hamiltonian.setup_gpu(ctx, &vnl, crystal, nloc_influence, Nband);
+    eigsolver.setup_gpu(ctx, Nband, Nband, false, false);
+
+    // Upload initial psi to EigenSolver's device buffer
+    {
+        std::vector<double> h_psi_init(Nd * Nband);
+        CUDA_CHECK(cudaMemcpy(h_psi_init.data(), d_psi, Nd * Nband * sizeof(double), cudaMemcpyDeviceToHost));
+        eigsolver.upload_psi_to_device(h_psi_init.data(), Nd, Nband);
+    }
+
     double eigval_min, eigval_max;
     {
         std::vector<double> h_Veff(Nd);
@@ -1165,22 +1167,18 @@ int main(int argc, char** argv) {
         int nchefsi = (scf_iter == 0) ? rho_trigger : 1;
 
         // Step 1: GPU Eigensolver (nchefsi passes of CheFSI)
-        for (int pass = 0; pass < nchefsi; pass++) {
-            lynx::gpu::eigensolver_solve_gpu(
-                d_psi, d_eigvals, d_Veff,
-                d_Y, d_Xold, d_Xnew,
-                d_Hpsi, d_x_ex,
-                d_Hs, d_Ms,
-                Nd, Nband,
-                lambda_cutoff, eigval_min, eigval_max,
-                cheb_degree, dV,
-                gpu_hamiltonian_apply);
+        // Uses EigenSolver with solve_resident (H->apply called directly, no callbacks)
+        {
+            std::vector<double> h_Veff_copy(Nd);
+            CUDA_CHECK(cudaMemcpy(h_Veff_copy.data(), d_Veff, Nd * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int pass = 0; pass < nchefsi; pass++) {
+                eigsolver.solve_resident(h_eigvals.data(), h_Veff_copy.data(), Nd, Nband,
+                                          lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+            }
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Download eigenvalues for occupation computation (tiny: 29 doubles)
-        CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals, Nband * sizeof(double),
-                               cudaMemcpyDeviceToHost));
+        // Copy psi from EigenSolver's device buffer to the test's d_psi
+        CUDA_CHECK(cudaMemcpy(d_psi, eigsolver.gpu_psi(), (size_t)Nd * Nband * sizeof(double),
+                               cudaMemcpyDeviceToDevice));
 
         // Update spectral bounds
         if (scf_iter > 0) eigval_min = h_eigvals[0];

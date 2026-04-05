@@ -1056,40 +1056,4 @@ void EigenSolver::lanczos_bounds_spinor_kpt(const double* Veff_spinor, int Nd_d,
                                    tol_lanczos, max_iter);
 }
 
-// ============================================================
-// Device-dispatching methods (non-CUDA build: always CPU)
-// ============================================================
-#ifndef USE_CUDA
-void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
-                         int Nd_d, int Nband,
-                         double lambda_cutoff, double eigval_min, double eigval_max,
-                         int cheb_degree, int ld, Device /*dev*/)
-{
-    solve(psi, eigvals, Veff, Nd_d, Nband,
-          lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld);
-}
-
-void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
-                              int Nd_d, int Nband,
-                              double lambda_cutoff, double eigval_min, double eigval_max,
-                              const Vec3& kpt_cart, const Vec3& cell_lengths,
-                              int cheb_degree, int ld, Device /*dev*/)
-{
-    solve_kpt(psi, eigvals, Veff, Nd_d, Nband,
-              lambda_cutoff, eigval_min, eigval_max,
-              kpt_cart, cell_lengths, cheb_degree, ld);
-}
-
-void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
-                                     int Nd_d, int Nband,
-                                     double lambda_cutoff, double eigval_min, double eigval_max,
-                                     const Vec3& kpt_cart, const Vec3& cell_lengths,
-                                     int cheb_degree, int ld, Device /*dev*/)
-{
-    solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
-                     lambda_cutoff, eigval_min, eigval_max,
-                     kpt_cart, cell_lengths, cheb_degree, ld);
-}
-#endif // !USE_CUDA
-
 } // namespace lynx

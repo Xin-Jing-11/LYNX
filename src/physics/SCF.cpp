@@ -329,7 +329,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                                             state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
                                             kpt, cell_lengths,
                                             params_.cheb_degree,
-                                            wfn.psi_kpt(0, k).ld(), dev_);
+                                            wfn.psi_kpt(0, k).ld());
             }
         } else {
             for (int s = 0; s < Nspin_local; ++s) {
@@ -372,7 +372,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                                                 state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                                 kpt, cell_lengths,
                                                 params_.cheb_degree,
-                                                wfn.psi_kpt(s, k).ld(), dev_);
+                                                wfn.psi_kpt(s, k).ld());
                         }
                     } else {
 #ifdef USE_CUDA
@@ -397,7 +397,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                             eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
                                             state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                             params_.cheb_degree,
-                                            wfn.psi(s, k).ld(), dev_);
+                                            wfn.psi(s, k).ld());
                         }
                     }
                 }
