@@ -498,8 +498,9 @@ void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho
         for (int s = 0; s < Nspin; ++s)
             std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
 
+        veff_builder_.set_device(dev_);
         veff_builder_.compute(density_, rho_b, rho_core_, xc_type_, 0.0, params_.poisson_tol, arrays_,
-                              dev_, tau_.valid() ? tau_.data() : nullptr, tau_.valid());
+                              tau_.valid() ? tau_.data() : nullptr, tau_.valid());
         state.Veff_out = DeviceArray<double>(Nd_d * Nspin);
         std::memcpy(state.Veff_out.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
 
@@ -665,11 +666,12 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
 
     // For density mixing: recompute Veff from mixed density
     if (!state.use_potential_mixing) {
+        veff_builder_.set_device(dev_);
         if (is_soc_) {
-            veff_builder_.compute_spinor(density_, rho_b, rho_core, xc_type_, params_.poisson_tol, arrays_, dev_);
+            veff_builder_.compute_spinor(density_, rho_b, rho_core, xc_type_, params_.poisson_tol, arrays_);
         } else {
             veff_builder_.compute(density_, rho_b, rho_core, xc_type_, 0.0, params_.poisson_tol, arrays_,
-                                  dev_, tau_.valid() ? tau_.data() : nullptr, tau_.valid());
+                                  tau_.valid() ? tau_.data() : nullptr, tau_.valid());
         }
     }
 

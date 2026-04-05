@@ -259,29 +259,17 @@ void EffectivePotential::combine_veff_spinor_gpu(
 // Device-dispatching compute() — GPU path
 // Algorithm uses _gpu() kernel wrappers + internal GPU operators.
 // ============================================================
-void EffectivePotential::compute(const ElectronDensity& density,
-                                  const double* rho_b,
-                                  const double* rho_core,
-                                  XCType xc_type,
-                                  double exx_frac_scale,
-                                  double poisson_tol,
-                                  VeffArrays& arrays,
-                                  Device dev,
-                                  const double* tau,
-                                  bool tau_valid)
+void EffectivePotential::compute_gpu(const ElectronDensity& density,
+                                      const double* rho_b,
+                                      const double* rho_core,
+                                      XCType xc_type,
+                                      double exx_frac_scale,
+                                      double poisson_tol,
+                                      VeffArrays& arrays,
+                                      const double* tau,
+                                      bool tau_valid)
 {
-    if (dev == Device::CPU) {
-        compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
-                poisson_tol, arrays, tau, tau_valid);
-        return;
-    }
-
     auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
-    if (!gs || !gs->buffers_allocated) {
-        compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
-                poisson_tol, arrays, tau, tau_valid);
-        return;
-    }
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int Nd = gs->Nd;
@@ -333,24 +321,20 @@ void EffectivePotential::compute(const ElectronDensity& density,
 }
 
 // ============================================================
-// Device-dispatching compute_spinor() — GPU path
+// GPU compute_spinor — not yet implemented, falls back to CPU
 // ============================================================
-void EffectivePotential::compute_spinor(const ElectronDensity& density,
-                                         const double* rho_b,
-                                         const double* rho_core,
-                                         XCType xc_type,
-                                         double poisson_tol,
-                                         VeffArrays& arrays,
-                                         Device dev)
+void EffectivePotential::compute_spinor_gpu(const ElectronDensity& density,
+                                             const double* rho_b,
+                                             const double* rho_core,
+                                             XCType xc_type,
+                                             double poisson_tol,
+                                             VeffArrays& arrays)
 {
-    if (dev == Device::CPU) {
-        compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
-        return;
-    }
-
     // SOC GPU path: not yet implemented (requires noncollinear density on device)
     // Fall back to CPU for correctness
+    dev_ = Device::CPU;
     compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
+    dev_ = Device::GPU;
 }
 
 // ============================================================

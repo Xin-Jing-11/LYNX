@@ -70,13 +70,12 @@ public:
     /// Setup using LynxContext for all infrastructure.
     void setup(const LynxContext& ctx, const Hamiltonian& hamiltonian);
 
+    // Set device for dispatch (CPU or GPU).
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
     // Compute Veff for standard (scalar) case.
-    // density: electron density (with spin-resolved components)
-    // rho_b: pseudocharge density (may be null)
-    // rho_core: NLCC core density (may be null)
-    // xc_type: XC functional type
-    // exx_frac_scale: if > 0, scale exchange by (1 - exx_frac_scale)
-    // arrays: work arrays (modified in place)
+    // Dispatches to CPU or GPU path based on dev_ member.
     void compute(const ElectronDensity& density,
                  const double* rho_b,
                  const double* rho_core,
@@ -87,34 +86,14 @@ public:
                  const double* tau = nullptr,
                  bool tau_valid = false);
 
-    // Compute spinor Veff from noncollinear density (rho, mx, my, mz).
+    // Compute spinor Veff from noncollinear density.
+    // Dispatches to CPU or GPU path based on dev_ member.
     void compute_spinor(const ElectronDensity& density,
                         const double* rho_b,
                         const double* rho_core,
                         XCType xc_type,
                         double poisson_tol,
                         VeffArrays& arrays);
-
-    // --- Device-dispatching interfaces ---
-
-    void compute(const ElectronDensity& density,
-                 const double* rho_b,
-                 const double* rho_core,
-                 XCType xc_type,
-                 double exx_frac_scale,
-                 double poisson_tol,
-                 VeffArrays& arrays,
-                 Device dev,
-                 const double* tau = nullptr,
-                 bool tau_valid = false);
-
-    void compute_spinor(const ElectronDensity& density,
-                        const double* rho_b,
-                        const double* rho_core,
-                        XCType xc_type,
-                        double poisson_tol,
-                        VeffArrays& arrays,
-                        Device dev);
 
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUVeffState (defined in .cu)
@@ -142,6 +121,15 @@ public:
     // Set device tau/vtau pointers for mGGA GPU pipeline.
     void set_device_tau(double* d_tau, double* d_vtau);
 
+    // GPU compute paths (defined in .cu)
+    void compute_gpu(const ElectronDensity& density, const double* rho_b,
+                     const double* rho_core, XCType xc_type,
+                     double exx_frac_scale, double poisson_tol,
+                     VeffArrays& arrays, const double* tau, bool tau_valid);
+    void compute_spinor_gpu(const ElectronDensity& density, const double* rho_b,
+                            const double* rho_core, XCType xc_type,
+                            double poisson_tol, VeffArrays& arrays);
+
     // GPU kernel wrappers (defined in .cu)
     void poisson_rhs_gpu(const double* d_rho_total, const double* d_pseudocharge,
                           double* d_rhs, int Nd);
@@ -155,6 +143,7 @@ public:
 #endif
 
 private:
+    Device dev_ = Device::CPU;
     const Domain* domain_ = nullptr;
     const FDGrid* grid_ = nullptr;
     const FDStencil* stencil_ = nullptr;
