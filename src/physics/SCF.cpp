@@ -458,9 +458,11 @@ void SCF::compute_new_density(const Wavefunction& wfn, const SCFState& state,
 
     if (is_soc_) {
         rho_new.allocate_noncollinear(Nd_d);
-        rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights, dev_);
+        rho_new.set_device(dev_);
+        rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights);
     } else {
         rho_new.allocate(Nd_d, Nspin);
+        rho_new.set_device(dev_);
 #ifdef USE_CUDA
         if (dev_ == Device::GPU && eigsolver) {
             bool single_spin_gamma = (Nspin_local_ == 1 && !is_kpt_);
@@ -471,12 +473,12 @@ void SCF::compute_new_density(const Wavefunction& wfn, const SCFState& state,
             } else {
                 // Multi-spin/kpt: psi was downloaded to host after each solve_resident.
                 // Use normal GPU compute path (uploads psi per spin/kpt).
-                rho_new.compute(*ctx_, wfn, state.kpt_weights, dev_);
+                rho_new.compute(*ctx_, wfn, state.kpt_weights);
             }
         } else
 #endif
         {
-            rho_new.compute(*ctx_, wfn, state.kpt_weights, dev_);
+            rho_new.compute(*ctx_, wfn, state.kpt_weights);
         }
     }
 }

@@ -44,22 +44,20 @@ public:
 
     void allocate(int Nd_d, int Nspin);
 
-    // Compute density from wavefunctions and occupations (with LynxContext — preferred).
+    // Set device for dispatch (CPU or GPU).
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
+    // Compute density from wavefunctions and occupations.
+    // Dispatches to CPU or GPU path based on dev_ member.
     void compute(const LynxContext& ctx,
                  const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights);
 
-    // Device-dispatching compute: CPU delegates to existing method, GPU uses gpu:: kernels.
-    void compute(const LynxContext& ctx,
-                 const Wavefunction& wfn,
-                 const std::vector<double>& kpt_weights,
-                 Device dev);
-
-    // Device-dispatching spinor compute.
+    // Compute spinor density. Dispatches based on dev_ member.
     void compute_spinor(const LynxContext& ctx,
                         const Wavefunction& wfn,
-                        const std::vector<double>& kpt_weights,
-                        Device dev);
+                        const std::vector<double>& kpt_weights);
 
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUDensityState (defined in .cu)
@@ -131,11 +129,6 @@ public:
     // Allocate for noncollinear (spinor) — 1 spin channel + vector magnetization
     void allocate_noncollinear(int Nd_d);
 
-    // Compute density from spinor wavefunctions (SOC/noncollinear, with LynxContext).
-    void compute_spinor(const LynxContext& ctx,
-                        const Wavefunction& wfn,
-                        const std::vector<double>& kpt_weights);
-
     // Compute density from spinor wavefunctions (SOC/noncollinear, explicit params).
     void compute_spinor(const Wavefunction& wfn,
                         const std::vector<double>& kpt_weights,
@@ -146,6 +139,7 @@ public:
                         int band_start = 0);
 
 private:
+    Device dev_ = Device::CPU;
     int Nd_d_ = 0;
     int Nspin_ = 0;
 
