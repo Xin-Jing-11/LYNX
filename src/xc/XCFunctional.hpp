@@ -25,7 +25,12 @@ public:
                const Gradient* gradient = nullptr,
                const HaloExchange* halo = nullptr);
 
+    // Set device for dispatch (CPU or GPU). Must be called before evaluate().
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
     // Evaluate XC energy density and potential (non-spin-polarized).
+    // Dispatches to evaluate_cpu() or evaluate_gpu() based on dev_ member.
     // rho: (Nd_d,) electron density
     // Vxc: (Nd_d,) output XC potential
     // exc: (Nd_d,) output XC energy density (per particle)
@@ -37,42 +42,20 @@ public:
                   const double* tau = nullptr,
                   double* vtau = nullptr) const;
 
-    // Evaluate for spin-polarized (collinear)
-    // rho: [Nd_d*3] layout: rho[0..Nd_d-1] = total, rho[Nd_d..2*Nd_d-1] = up,
-    //       rho[2*Nd_d..3*Nd_d-1] = down
-    // Vxc: [Nd_d*2] layout: Vxc[0..Nd_d-1] = up, Vxc[Nd_d..2*Nd_d-1] = down
-    // Dxcdgrho: [Nd_d*3] layout: [v2c | v2x_up | v2x_down]
-    // tau: [Nd_d*3] layout: [total | up | down] (for mGGA)
-    // vtau: [Nd_d*2] layout: [up | down] (for mGGA)
+    // Evaluate for spin-polarized (collinear).
+    // Dispatches to evaluate_spin_cpu() or evaluate_spin_gpu() based on dev_ member.
     void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
                        double* Dxcdgrho = nullptr,
                        const double* tau = nullptr,
                        double* vtau = nullptr) const;
 
-    // ── Device-dispatching overloads ─────────────────────────────
-    // Forward to _cpu() or _gpu() based on Device parameter.
-
-    void evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
-                  Device dev,
-                  double* Dxcdgrho = nullptr,
-                  const double* tau = nullptr, double* vtau = nullptr) const;
-
-    void evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
-                       Device dev,
-                       double* Dxcdgrho = nullptr,
-                       const double* tau = nullptr, double* vtau = nullptr) const;
-
-    // CPU sub-step names (aliases for host-pointer evaluate methods)
+    // CPU implementations
     void evaluate_cpu(const double* rho, double* Vxc, double* exc, int Nd_d,
                       double* Dxcdgrho = nullptr,
-                      const double* tau = nullptr, double* vtau = nullptr) const {
-        evaluate(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
-    }
+                      const double* tau = nullptr, double* vtau = nullptr) const;
     void evaluate_spin_cpu(const double* rho, double* Vxc, double* exc, int Nd_d,
                            double* Dxcdgrho = nullptr,
-                           const double* tau = nullptr, double* vtau = nullptr) const {
-        evaluate_spin(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
-    }
+                           const double* tau = nullptr, double* vtau = nullptr) const;
 
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUXCState (defined in .cu)
@@ -110,6 +93,7 @@ public:
     }
 
 private:
+    Device dev_ = Device::CPU;
     XCType type_ = XCType::GGA_PBE;
     const Domain* domain_ = nullptr;
     const FDGrid* grid_ = nullptr;

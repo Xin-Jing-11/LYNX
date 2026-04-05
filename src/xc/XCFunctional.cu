@@ -1849,24 +1849,6 @@ void XCFunctional::set_gpu_tau_valid(bool valid) {
 }
 
 // ============================================================
-// Device-dispatching evaluate() — non-spin
-// ============================================================
-
-// ============================================================
-// Device-dispatching evaluate() — dispatches to _cpu() or _gpu()
-// ============================================================
-void XCFunctional::evaluate(const double* rho, double* Vxc, double* exc, int Nd_d,
-                             Device dev,
-                             double* Dxcdgrho,
-                             const double* tau, double* vtau) const {
-    if (dev == Device::CPU) {
-        evaluate_cpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
-        return;
-    }
-    evaluate_gpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
-}
-
-// ============================================================
 // GPU evaluate — full GGA pipeline on device
 // ============================================================
 void XCFunctional::evaluate_gpu(const double* rho, double* Vxc, double* exc, int Nd_d,
@@ -1980,20 +1962,6 @@ void XCFunctional::evaluate_gpu(const double* rho, double* Vxc, double* exc, int
         }
         gpu::lda_pw_gpu(d_rho_xc, exc, Vxc, Nd_d, stream);
     }
-}
-
-// ============================================================
-// Device-dispatching evaluate_spin() — dispatches to _cpu() or _gpu()
-// ============================================================
-void XCFunctional::evaluate_spin(const double* rho, double* Vxc, double* exc, int Nd_d,
-                                  Device dev,
-                                  double* Dxcdgrho,
-                                  const double* tau, double* vtau) const {
-    if (dev == Device::CPU) {
-        evaluate_spin_cpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
-        return;
-    }
-    evaluate_spin_gpu(rho, Vxc, exc, Nd_d, Dxcdgrho, tau, vtau);
 }
 
 // ============================================================

@@ -296,15 +296,16 @@ void EffectivePotential::compute(const ElectronDensity& density,
     // 1. Upload density
     upload_density(density);
 
-    // 2. XC evaluation (dispatches internally to GPU)
+    // 2. XC evaluation (dev_ is GPU, dispatches internally)
     double* d_tau_ptr = (tau_valid && gs->d_tau) ? gs->d_tau : nullptr;
     double* d_vtau_ptr = (tau_valid && gs->d_vtau) ? gs->d_vtau : nullptr;
+    gs->xc.set_device(Device::GPU);
     if (Nspin == 2)
         gs->xc.evaluate_spin(gs->d_rho, gs->d_Vxc, gs->d_exc, Nd,
-                              Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
+                              nullptr, d_tau_ptr, d_vtau_ptr);
     else
         gs->xc.evaluate(gs->d_rho_total, gs->d_Vxc, gs->d_exc, Nd,
-                         Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
+                         nullptr, d_tau_ptr, d_vtau_ptr);
 
     // 3. Poisson RHS via kernel wrapper
     poisson_rhs_gpu(gs->d_rho_total, rho_b ? gs->d_pseudocharge : nullptr, gs->d_rhs, Nd);
