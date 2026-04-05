@@ -266,38 +266,24 @@ double SCF::run(Wavefunction& wfn,
                    Eself, Ec, state.kpt_weights, state);
     }
 
-    // ===== 4. GPU state persists for post-SCF forces/stress =====
-    // psi stays on device — forces/stress will read device psi directly.
-    // Caller must call cleanup_gpu() AFTER forces/stress are done.
+    // ===== 4. GPU force+stress + cleanup =====
 #ifdef USE_CUDA
-    if (dev_ == Device::GPU && rank_world == 0)
-        std::printf("GPU-resident SCF complete: psi stays on device for forces/stress\n");
+    if (dev_ == Device::GPU) {
+        // Compute nonlocal force + kinetic/nonlocal stress on GPU while psi is resident.
+        // Only scalar results (force array, stress tensor) come to host. Psi stays on device.
+        // SOC excluded: spinor eigensolver falls back to CPU, psi stays on host.
+        if (!is_soc_) {
+            compute_gpu_force_stress(wfn);
+        }
+        // Free all GPU state — psi never touched the host.
+        cleanup_gpu();
+    }
 #endif
 
     return energy_.Etotal;
 }
 
 #ifdef USE_CUDA
-void SCF::download_psi(Wavefunction& wfn) {
-    if (dev_ != Device::GPU) return;
-    int Nd_d = domain_->Nd_d();
-    int Nband_loc = Nband_loc_;
-    int Nkpts = Nkpts_;
-
-    if (!is_soc_) {
-        for (int s = 0; s < Nspin_local_; ++s) {
-            for (int k = 0; k < Nkpts; ++k) {
-                eigsolver_.set_active_psi(s, k);
-                if (is_kpt_) {
-                    eigsolver_.download_psi_z(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
-                } else {
-                    eigsolver_.download_psi(wfn.psi(s, k).data(), Nd_d, Nband_loc);
-                }
-            }
-        }
-    }
-}
-
 void SCF::cleanup_gpu() {
     if (dev_ != Device::GPU) return;
     hamiltonian_->cleanup_gpu();
@@ -307,6 +293,73 @@ void SCF::cleanup_gpu() {
     if (is_mgga_type(xc_type_)) {
         tau_.cleanup_gpu();
     }
+}
+
+void SCF::compute_gpu_force_stress(const Wavefunction& wfn) {
+    if (dev_ != Device::GPU) return;
+
+    int Nband_loc = Nband_loc_;
+    int Nkpts = Nkpts_;
+    int n_atom = crystal_->n_atom_total();
+
+    double occfac = (Nspin_global_ == 1) ? 2.0 : 1.0;
+
+    gpu_fs_.f_nloc.assign(3 * n_atom, 0.0);
+    gpu_fs_.stress_k = {};
+    gpu_fs_.stress_nl = {};
+    gpu_fs_.energy_nl = 0.0;
+
+    std::vector<double> kpt_weights = kpoints_->normalized_weights();
+
+    for (int s = 0; s < Nspin_local_; ++s) {
+        for (int k = 0; k < Nkpts; ++k) {
+            double wk = kpt_weights[kpt_start_ + k];
+            const double* h_occ = wfn.occupations(s, k).data();
+
+            // Per-(spin,kpt) result buffers
+            std::vector<double> h_f_tmp(3 * n_atom, 0.0);
+            std::array<double, 6> h_sk_tmp = {}, h_snl_tmp = {};
+            double h_enl_tmp = 0.0;
+
+            if (is_kpt_) {
+                // Set Bloch phases for this k-point
+                int k_glob = kpt_start_ + k;
+                Vec3 kpt = kpoints_->kpts_cart()[k_glob];
+                Vec3 cell_lengths = grid_->lattice().lengths();
+                hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
+
+                double spn_fac_wk = occfac * 2.0 * wk;
+
+                // Hamiltonian method handles occ upload to device internally
+                hamiltonian_->compute_force_stress_kpt_gpu(
+                    eigsolver_.device_psi_z(s, k), h_occ, Nband_loc,
+                    spn_fac_wk,
+                    h_f_tmp.data(), h_sk_tmp.data(), h_snl_tmp.data(), &h_enl_tmp);
+            } else {
+                // Gamma-point: Hamiltonian method handles occ upload internally
+                hamiltonian_->compute_force_stress_gpu(
+                    eigsolver_.device_psi_real(s, k), h_occ, Nband_loc,
+                    occfac,
+                    h_f_tmp.data(), h_sk_tmp.data(), h_snl_tmp.data(), &h_enl_tmp);
+            }
+
+            // Accumulate across (spin, kpt)
+            for (int i = 0; i < 3 * n_atom; ++i)
+                gpu_fs_.f_nloc[i] += h_f_tmp[i];
+            for (int i = 0; i < 6; ++i) {
+                gpu_fs_.stress_k[i] += h_sk_tmp[i];
+                gpu_fs_.stress_nl[i] += h_snl_tmp[i];
+            }
+            gpu_fs_.energy_nl += h_enl_tmp;
+        }
+    }
+
+    gpu_fs_.computed = true;
+
+    int rank_world = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
+    if (rank_world == 0)
+        std::printf("GPU force+stress computed: psi stayed on device\n");
 }
 #endif
 

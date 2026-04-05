@@ -153,6 +153,24 @@ public:
                          int ncol, double c) const;
     void apply_nonlocal_gpu(const double* psi, double* y, int ncol) const;
     void apply_mgga_gpu(const double* psi, double* y, int ncol) const;
+
+    // GPU force+stress: compute nonlocal forces, kinetic+nonlocal stress on device.
+    // psi stays on GPU — only scalar results (force array, stress 6-vectors) are downloaded.
+    // Results for a single (spin, kpt) are written to the output arrays.
+    //
+    // Host-occ overloads: upload h_occ internally, avoiding CUDA calls in .cpp files.
+
+    // For real gamma-point psi (host occ):
+    void compute_force_stress_gpu(
+        const double* d_psi, const double* h_occ, int Nband,
+        double occfac,
+        double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl) const;
+
+    // For complex k-point psi (host occ):
+    void compute_force_stress_kpt_gpu(
+        const void* d_psi_z, const double* h_occ, int Nband,
+        double spn_fac_wk,
+        double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl) const;
 #endif
 
 private:

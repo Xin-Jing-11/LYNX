@@ -74,6 +74,14 @@ void Stress::compute(
     const double* gpu_mgga_ptr = nullptr;
     const double* gpu_dot_ptr = nullptr;
 
+#ifdef USE_CUDA
+    // Inject GPU kinetic+nonlocal stress (psi never left GPU)
+    if (scf.has_gpu_force_stress()) {
+        set_gpu_kinetic_nonlocal_stress(scf.gpu_force_stress().stress_k,
+                                         scf.gpu_force_stress().stress_nl);
+    }
+#endif
+
     compute_impl(ctx, wfn, atoms.crystal,
                  atoms.influence, atoms.nloc_influence, vnl,
                  scf.phi(), scf.density().rho_total().data(),
@@ -162,7 +170,11 @@ std::array<double, 6> Stress::compute_impl(
     compute_electrostatic(crystal, influence, phi, rho, Vloc, b, b_ref, Esc);
 
     // 3. Nonlocal + kinetic stress
-    compute_nonlocal_kinetic(ctx, wfn, crystal, nloc_influence, vnl, kpt_weights);
+    if (!gpu_kn_set_) {
+        // CPU path: compute from host psi
+        compute_nonlocal_kinetic(ctx, wfn, crystal, nloc_influence, vnl, kpt_weights);
+    }
+    // else: GPU kinetic+nonlocal stress already injected via set_gpu_kinetic_nonlocal_stress
 
     // 4. mGGA psi stress term: σ_ij += -occfac · Σ_n g_n · ∫ vtau · ∇_i ψ · ∇_j ψ dV
     if (gpu_mgga_psi_stress && is_mgga_type(xc_type)) {

@@ -51,6 +51,14 @@ public:
     const std::array<double, 6>& nonlocal_stress() const { return stress_nl_; }
     const std::array<double, 6>& total_stress() const { return stress_total_; }
     const std::array<double, 6>& soc_stress() const { return stress_soc_; }
+
+    /// Set kinetic and nonlocal stress from GPU computation (bypasses CPU compute_nonlocal_kinetic).
+    void set_gpu_kinetic_nonlocal_stress(const std::array<double, 6>& sk,
+                                          const std::array<double, 6>& snl) {
+        stress_k_ = sk;
+        stress_nl_ = snl;
+        gpu_kn_set_ = true;
+    }
     double soc_energy() const { return energy_soc_; }
     void set_cell_measure(double cm) { cell_measure_ = cm; }
 
@@ -83,6 +91,7 @@ public:
 
 private:
     const LynxContext* ctx_ = nullptr;
+    bool gpu_kn_set_ = false;  // true if GPU kinetic+nonlocal stress were injected
 
     std::array<double, 6> stress_k_ = {};
     std::array<double, 6> stress_xc_ = {};

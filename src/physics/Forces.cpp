@@ -27,6 +27,13 @@ void Forces::compute(
     const AtomSetup& atoms,
     const NonlocalProjector& vnl) {
 
+#ifdef USE_CUDA
+    // Inject GPU nonlocal forces if computed on device (psi never left GPU)
+    if (scf.has_gpu_force_stress()) {
+        set_gpu_nloc_forces(scf.gpu_force_stress().f_nloc);
+    }
+#endif
+
     compute_impl(ctx, wfn, atoms.crystal,
                  atoms.influence, atoms.nloc_influence, vnl,
                  scf.phi(), scf.density().rho_total().data(),
@@ -73,7 +80,11 @@ std::vector<double> Forces::compute_impl(
     compute_local(crystal, influence, phi, Vloc, b, b_ref);
 
     // Nonlocal force from KB projectors
-    compute_nonlocal(wfn, crystal, nloc_influence, vnl, kpt_weights);
+    if (!gpu_nloc_set_) {
+        // CPU path: compute nonlocal force from host psi
+        compute_nonlocal(wfn, crystal, nloc_influence, vnl, kpt_weights);
+    }
+    // else: GPU nonlocal forces already injected via set_gpu_nloc_forces
 
     // SOC nonlocal force from spin-orbit coupling projectors
     if (vnl.has_soc() && wfn.Nspinor() == 2) {

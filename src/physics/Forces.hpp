@@ -45,6 +45,12 @@ public:
     const std::vector<double>& xc_forces() const { return f_xc_; }
     const std::vector<double>& total_forces() const { return f_total_; }
 
+    /// Set nonlocal forces from GPU computation (bypasses CPU compute_nonlocal).
+    void set_gpu_nloc_forces(const std::vector<double>& f_nloc) {
+        f_nloc_ = f_nloc;
+        gpu_nloc_set_ = true;
+    }
+
     // SOC nonlocal force from spin-orbit coupling projectors (public: used by GPUSCF)
     void compute_nonlocal_soc(
         const LynxContext& ctx,
@@ -76,6 +82,7 @@ public:
 
 private:
     const LynxContext* ctx_ = nullptr;
+    bool gpu_nloc_set_ = false;  // true if GPU nonlocal forces were injected
 
     std::vector<double> f_local_;
     std::vector<double> f_nloc_;

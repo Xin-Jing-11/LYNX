@@ -240,26 +240,16 @@ static DFTResult run_single_point(const std::string& json_file) {
     atoms.Nelectron = Nelectron;
     atoms.Natom = Natom;
 
-#ifdef USE_CUDA
-    // Download converged psi from device → host for CPU force/stress computation.
-    // This is the ONLY psi D2H transfer — psi stayed GPU-resident during SCF.
-    scf.download_psi(wfn);
-#endif
-
-    // Forces
+    // Forces (GPU builds: nonlocal forces already computed on device by SCF)
     Forces forces;
     forces.compute(ctx, config, wfn, scf, atoms, vnl);
     result.forces = forces.total_forces();
 
-    // Stress
+    // Stress (GPU builds: kinetic+nonlocal stress already computed on device by SCF)
     Stress stress_calc;
     stress_calc.compute(ctx, config, wfn, scf, atoms, vnl);
     result.stress = stress_calc.total_stress();
     result.pressure = stress_calc.pressure();
-
-#ifdef USE_CUDA
-    scf.cleanup_gpu();
-#endif
 
     return result;
 }
