@@ -5,8 +5,7 @@
 #include "electronic/Wavefunction.hpp"
 #include "core/DeviceTag.hpp"
 
-// GPU function declarations from existing .cuh headers
-#include "solvers/LinearSolver.cuh"   // gpu::compute_density_gpu
+// GPU function declaration for complex density accumulation
 #include "solvers/EigenSolver.cuh"    // gpu::compute_density_z_gpu
 
 #include <cuda_runtime.h>
@@ -15,6 +14,27 @@
 #include "core/GPUContext.cuh"
 
 namespace lynx {
+
+// ============================================================
+// Density accumulation kernel (real, gamma-point)
+// rho[i] += weight * occ[n] * |psi[i + n*Nd]|^2
+// ============================================================
+__global__ static void compute_density_kernel(
+    const double* __restrict__ psi,
+    const double* __restrict__ occ,
+    double* __restrict__ rho,
+    int Nd, int Ns, double weight)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < Nd) {
+        double sum = 0.0;
+        for (int n = 0; n < Ns; ++n) {
+            double val = psi[idx + n * Nd];
+            sum += occ[n] * val * val;
+        }
+        rho[idx] += weight * sum;
+    }
+}
 
 // ============================================================
 // GPUDensityState — stub for future device-resident rho arrays
@@ -49,8 +69,22 @@ ElectronDensity::~ElectronDensity() {
 void ElectronDensity::accumulate_band_gpu(const double* d_psi, const double* d_occ,
                                            double* d_rho, int Nd, int Nband, double weight) {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    gpu::compute_density_gpu(d_psi, d_occ, d_rho, Nd, Nband, weight, stream);
+    int bs = 256;
+    int grid = gpu::ceildiv(Nd, bs);
+    compute_density_kernel<<<grid, bs, 0, stream>>>(d_psi, d_occ, d_rho, Nd, Nband, weight);
 }
+
+// gpu:: namespace wrapper — retained for test compatibility
+namespace gpu {
+void compute_density_gpu(
+    const double* d_psi, const double* d_occ, double* d_rho,
+    int Nd, int Ns, double weight, cudaStream_t stream)
+{
+    int bs = 256;
+    int grid = ceildiv(Nd, bs);
+    compute_density_kernel<<<grid, bs, 0, stream>>>(d_psi, d_occ, d_rho, Nd, Ns, weight);
+}
+} // namespace gpu
 
 void ElectronDensity::accumulate_band_kpt_gpu(const void* d_psi_z, const double* d_occ,
                                                double* d_rho, int Nd, int Nband, double weight) {

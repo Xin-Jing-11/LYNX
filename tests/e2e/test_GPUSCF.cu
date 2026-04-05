@@ -112,16 +112,6 @@ void gradient_gpu(
 void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
                   double* d_exc, double* d_vxc, double* d_v2xc, int N, cudaStream_t stream = 0);
 
-int aar_gpu(
-    void (*op_gpu)(const double* d_x, double* d_Ax),
-    void (*precond_gpu)(const double* d_r, double* d_f),
-    const double* d_b, double* d_x, int N,
-    double omega, double beta, int m, int p,
-    double tol, int max_iter,
-    double* d_r, double* d_f, double* d_Ax,
-    double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
-
 void compute_force_stress_gpu(
     const double* d_psi, const double* d_occ,
     const double* d_Chi_flat, const int* d_gpos_flat,
@@ -624,6 +614,115 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
 }
 
 // ============================================================
+// Local AAR solver (self-contained copy for this test, replaces deleted gpu::aar_gpu)
+// ============================================================
+__global__ static void aar_residual_k(const double* b, const double* Ax, double* r, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) r[i] = b[i] - Ax[i];
+}
+__global__ static void aar_richardson_k(const double* x_old, const double* f, double* x, double omega, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) x[i] = x_old[i] + omega * f[i];
+}
+__global__ static void aar_store_history_k(const double* x, const double* x_old, const double* f, const double* f_old,
+                                            double* X_h, double* F_h, int col, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) { X_h[col*N+i] = x[i]-x_old[i]; F_h[col*N+i] = f[i]-f_old[i]; }
+}
+__global__ static void aar_anderson_k(const double* x_old, const double* f, const double* X_h, const double* F_h,
+                                       const double* gamma, double* x, double beta, int cols, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double val = x_old[i] + beta * f[i];
+        for (int j = 0; j < cols; ++j)
+            val -= gamma[j] * (X_h[j*N+i] + beta * F_h[j*N+i]);
+        x[i] = val;
+    }
+}
+__global__ static void aar_fused_gram_k(const double* F_h, const double* f, double* d_out,
+                                         const int* d_pi, const int* d_pj, int N, int cols, int n_jobs) {
+    int job = blockIdx.x; if (job >= n_jobs) return;
+    const double* a = F_h + d_pi[job]*N;
+    const double* b_ptr = (d_pj[job]>=0) ? (F_h + d_pj[job]*N) : f;
+    extern __shared__ double sdata[];
+    double sum = 0.0;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) sum += a[i]*b_ptr[i];
+    sdata[threadIdx.x] = sum; __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x+s]; __syncthreads(); }
+    if (threadIdx.x == 0) d_out[job] = sdata[0];
+}
+__global__ static void aar_norm2_k(const double* r, double* d_n2, int N) {
+    extern __shared__ double sdata[];
+    double sum = 0.0;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) sum += r[i]*r[i];
+    sdata[threadIdx.x] = sum; __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x+s]; __syncthreads(); }
+    if (threadIdx.x == 0) *d_n2 = sdata[0];
+}
+
+static int local_aar_gpu(
+    void (*op_gpu)(const double*, double*), void (*precond_gpu)(const double*, double*),
+    const double* d_b, double* d_x, int N,
+    double omega, double beta, int m, int p, double tol, int max_iter,
+    double* d_r, double* d_f, double* d_Ax, double* d_X_hist, double* d_F_hist,
+    double* d_x_old, double* d_f_old, cudaStream_t stream = 0)
+{
+    int bs=256, grid=lynx::gpu::ceildiv(N,bs);
+    int max_jobs = m*(m+1)/2+m;
+    int* d_pi = reinterpret_cast<int*>(d_Ax);
+    int* d_pj = d_pi + max_jobs;
+    double* d_go = reinterpret_cast<double*>(d_pj + max_jobs);
+    double* d_n2 = d_go + max_jobs;
+    aar_norm2_k<<<1,256,256*sizeof(double),stream>>>(d_b, d_n2, N);
+    double b_norm2; cudaMemcpyAsync(&b_norm2, d_n2, sizeof(double), cudaMemcpyDeviceToHost, stream);
+    double abs_tol = tol * std::sqrt(b_norm2);
+    cudaMemcpyAsync(d_x_old, d_x, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+    op_gpu(d_x, d_Ax);
+    aar_residual_k<<<grid,bs,0,stream>>>(d_b, d_Ax, d_r, N);
+    double r_2norm = abs_tol+1.0; int iter=0;
+    std::vector<double> h_FTF(m*m), h_gamma(m); std::vector<int> h_pi(max_jobs), h_pj(max_jobs); std::vector<double> h_go(max_jobs);
+    while (r_2norm > abs_tol && iter < max_iter) {
+        if (precond_gpu) precond_gpu(d_r, d_f);
+        else cudaMemcpyAsync(d_f, d_r, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        if (iter > 0) { int ih=(iter-1)%m; aar_store_history_k<<<grid,bs,0,stream>>>(d_x,d_x_old,d_f,d_f_old,d_X_hist,d_F_hist,ih,N); }
+        cudaMemcpyAsync(d_x_old, d_x, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(d_f_old, d_f, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        if ((iter+1)%p==0 && iter>0) {
+            int cols=std::min(iter,m); int nj=0;
+            for(int ii=0;ii<cols;ii++) for(int jj=0;jj<=ii;jj++) { h_pi[nj]=ii; h_pj[nj]=jj; nj++; }
+            int ftf_pairs=nj;
+            for(int ii=0;ii<cols;ii++) { h_pi[nj]=ii; h_pj[nj]=-1; nj++; }
+            cudaMemcpyAsync(d_pi,h_pi.data(),nj*sizeof(int),cudaMemcpyHostToDevice,stream);
+            cudaMemcpyAsync(d_pj,h_pj.data(),nj*sizeof(int),cudaMemcpyHostToDevice,stream);
+            int gbs=std::min(256,N);
+            aar_fused_gram_k<<<nj,gbs,gbs*sizeof(double),stream>>>(d_F_hist,d_f,d_go,d_pi,d_pj,N,cols,nj);
+            cudaMemcpyAsync(h_go.data(),d_go,nj*sizeof(double),cudaMemcpyDeviceToHost,stream);
+            int kk=0;
+            for(int ii=0;ii<cols;ii++) for(int jj=0;jj<=ii;jj++) { h_FTF[ii*cols+jj]=h_go[kk]; h_FTF[jj*cols+ii]=h_go[kk]; kk++; }
+            for(int ii=0;ii<cols;ii++) h_gamma[ii]=h_go[ftf_pairs+ii];
+            { std::vector<double> A(h_FTF.begin(),h_FTF.begin()+cols*cols);
+              for(int k2=0;k2<cols;k2++) { int piv=k2; for(int ii=k2+1;ii<cols;ii++) if(std::abs(A[ii*cols+k2])>std::abs(A[piv*cols+k2])) piv=ii;
+                if(piv!=k2){for(int j=0;j<cols;j++) std::swap(A[k2*cols+j],A[piv*cols+j]); std::swap(h_gamma[k2],h_gamma[piv]);}
+                double d2=A[k2*cols+k2]; if(std::abs(d2)<1e-14) continue;
+                for(int ii=k2+1;ii<cols;ii++){double fac=A[ii*cols+k2]/d2; for(int j=k2+1;j<cols;j++) A[ii*cols+j]-=fac*A[k2*cols+j]; h_gamma[ii]-=fac*h_gamma[k2];} }
+              for(int k2=cols-1;k2>=0;k2--){if(std::abs(A[k2*cols+k2])<1e-14)continue; for(int j=k2+1;j<cols;j++) h_gamma[k2]-=A[k2*cols+j]*h_gamma[j]; h_gamma[k2]/=A[k2*cols+k2];} }
+            double* d_gam=d_Ax;
+            cudaMemcpyAsync(d_gam,h_gamma.data(),cols*sizeof(double),cudaMemcpyHostToDevice,stream);
+            aar_anderson_k<<<grid,bs,0,stream>>>(d_x_old,d_f,d_X_hist,d_F_hist,d_gam,d_x,beta,cols,N);
+            op_gpu(d_x,d_Ax);
+            aar_residual_k<<<grid,bs,0,stream>>>(d_b,d_Ax,d_r,N);
+            { aar_norm2_k<<<1,256,256*sizeof(double),stream>>>(d_r,d_n2,N); double rn2; cudaMemcpyAsync(&rn2,d_n2,sizeof(double),cudaMemcpyDeviceToHost,stream); r_2norm=std::sqrt(rn2); }
+        } else {
+            aar_richardson_k<<<grid,bs,0,stream>>>(d_x_old,d_f,d_x,omega,N);
+            op_gpu(d_x,d_Ax);
+            aar_residual_k<<<grid,bs,0,stream>>>(d_b,d_Ax,d_r,N);
+        }
+        iter++;
+    }
+    return iter;
+}
+
+// ============================================================
 // GPU Poisson solver
 // ============================================================
 static int gpu_poisson_solve(double* d_rho, double* d_phi,
@@ -650,7 +749,7 @@ static int gpu_poisson_solve(double* d_rho, double* d_phi,
     // Set halo workspace for operator callbacks
     g_aar_x_ex = ctx.buf.aar_x_ex;
 
-    int iters = lynx::gpu::aar_gpu(
+    int iters = local_aar_gpu(
         poisson_op_gpu, poisson_precond_gpu,
         d_rhs, d_phi, Nd,
         0.6, 0.6, 7, 6, tol, 3000,
@@ -791,7 +890,7 @@ static void gpu_pulay_mix(double* d_x, const double* d_g,
         double* d_kxold = sp.alloc<double>(Nd);
         double* d_kfold = sp.alloc<double>(Nd);
 
-        lynx::gpu::aar_gpu(
+        local_aar_gpu(
             kerker_op_gpu, kerker_precond_gpu,
             d_Lf, d_Pf, Nd,
             0.6, 0.6, 7, 6, g_precond_tol, 1000,

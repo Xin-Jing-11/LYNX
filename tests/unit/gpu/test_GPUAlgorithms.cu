@@ -26,18 +26,6 @@ void rotate_orbitals_gpu(double* d_X, const double* d_Q, double* d_temp, int Nd,
 void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho, int Nd, int Ns, double weight, cudaStream_t stream = 0);
 void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
 void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
-
-int aar_gpu(
-    void (*op_gpu)(const double* d_x, double* d_Ax),
-    void (*precond_gpu)(const double* d_r, double* d_f),
-    const double* d_b,
-    double* d_x,
-    int N,
-    double omega, double beta, int m, int p,
-    double tol, int max_iter,
-    double* d_r, double* d_f, double* d_Ax,
-    double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
 }} // namespace
 
 // CPU reference BLAS
@@ -344,74 +332,6 @@ void test_xc_lda() {
 // Test 6: GPU AAR Solver (solve -Lap*x = b)
 // ============================================================
 
-// Global GPU workspace for AAR test operator
-static double* g_d_Ax_tmp = nullptr;
-static double* g_d_x_ex_tmp = nullptr;
-static int g_aar_N = 0;
-
-// Simple test operator: A*x = diagonal * x (just to test AAR framework)
-__global__ void diag_op_kernel(const double* x, double* Ax, double diag, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) Ax[idx] = diag * x[idx];
-}
-
-static void test_op_gpu(const double* d_x, double* d_Ax) {
-    int bs = 256;
-    diag_op_kernel<<<ceildiv(g_aar_N, bs), bs>>>(d_x, d_Ax, 4.0, g_aar_N);
-}
-
-void test_aar_solver() {
-    printf("=== Test: GPU AAR Solver ===\n");
-
-    int N = 1000;
-    g_aar_N = N;
-    int m = 7, p = 6;
-    double omega = 0.2, beta = 0.2, tol = 1e-10;
-    int max_iter = 500;
-
-    // Solve 4*x = b, solution: x = b/4
-    std::vector<double> h_b(N);
-    for (int i = 0; i < N; i++) h_b[i] = 4.0 * (1.0 + sin(0.01 * i));
-
-    // GPU buffers
-    double *d_b, *d_x, *d_r, *d_f, *d_Ax, *d_X_hist, *d_F_hist, *d_x_old, *d_f_old;
-    CUDA_CHECK(cudaMalloc(&d_b, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_x, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_r, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_f, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Ax, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_X_hist, N * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_F_hist, N * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_x_old, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_f_old, N * sizeof(double)));
-
-    CUDA_CHECK(cudaMemcpy(d_b, h_b.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(d_x, 0, N * sizeof(double)));  // initial guess = 0
-
-    int iters = aar_gpu(test_op_gpu, nullptr, d_b, d_x, N,
-                         omega, beta, m, p, tol, max_iter,
-                         d_r, d_f, d_Ax, d_X_hist, d_F_hist,
-                         d_x_old, d_f_old);
-
-    std::vector<double> h_x(N);
-    CUDA_CHECK(cudaMemcpy(h_x.data(), d_x, N * sizeof(double), cudaMemcpyDeviceToHost));
-
-    double max_err = 0;
-    for (int i = 0; i < N; i++) {
-        double expected = h_b[i] / 4.0;
-        max_err = std::max(max_err, std::abs(h_x[i] - expected));
-    }
-
-    printf("  N=%d: %d iterations, max_err=%.2e %s\n",
-           N, iters, max_err, max_err < 1e-8 ? "OK" : "FAIL");
-    assert(max_err < 1e-8);
-
-    cudaFree(d_b); cudaFree(d_x); cudaFree(d_r); cudaFree(d_f);
-    cudaFree(d_Ax); cudaFree(d_X_hist); cudaFree(d_F_hist);
-    cudaFree(d_x_old); cudaFree(d_f_old);
-    printf("  PASSED\n\n");
-}
-
 // ============================================================
 // Performance benchmark: GPU subspace ops
 // ============================================================
@@ -497,7 +417,7 @@ int main() {
     test_rotate_orbitals();
     test_density();
     test_xc_lda();
-    test_aar_solver();
+    // test_aar_solver removed: standalone gpu::aar_gpu deleted (AAR loop now in Mixer/PoissonSolver .cpp)
     bench_subspace_ops();
 
     printf("All tests PASSED.\n");

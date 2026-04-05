@@ -81,7 +81,6 @@ if(USE_CUDA)
         electronic/ElectronDensity.cu
         electronic/KineticEnergyDensity.cu
         solvers/EigenSolver.cu
-        solvers/LinearSolver.cu
         solvers/PoissonSolver.cu
         solvers/Mixer.cu
         xc/XCFunctional.cu
