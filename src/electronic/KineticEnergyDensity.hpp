@@ -49,12 +49,17 @@ public:
     // For Nspin==2: tau has 3*Nd_d elements [up | down | total].
     void allocate(int Nd_d, int Nspin);
 
-    // Compute tau from wavefunctions and occupations (with LynxContext — preferred).
+    // Set device for dispatch (CPU or GPU).
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
+    // Compute tau from wavefunctions and occupations.
+    // Dispatches to CPU or GPU path based on dev_ member.
     void compute(const LynxContext& ctx,
                  const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights);
 
-    // Compute tau from wavefunctions and occupations (explicit params).
+    // Compute tau from wavefunctions and occupations (explicit params — CPU only).
     void compute(const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights,
                  const FDGrid& grid,
@@ -69,12 +74,6 @@ public:
                  int kpt_start,
                  int band_start,
                  int Nspin_global);
-
-    // Device-dispatching compute: CPU delegates to existing, GPU uses gpu:: kernels.
-    void compute(const LynxContext& ctx,
-                 const Wavefunction& wfn,
-                 const std::vector<double>& kpt_weights,
-                 Device dev);
 
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUTauState (defined in .cu)
@@ -101,6 +100,7 @@ public:
     void set_valid(bool v) { valid_ = v; }
 
 private:
+    Device dev_ = Device::CPU;
     DeviceArray<double> tau_;
     bool valid_ = false;
 };

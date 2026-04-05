@@ -165,18 +165,19 @@ void KineticEnergyDensity::compute(const Wavefunction& wfn,
     valid_ = true;
 }
 
-void KineticEnergyDensity::compute(const LynxContext& ctx,
-                                    const Wavefunction& wfn,
-                                    const std::vector<double>& kpt_weights) {
-    compute(wfn, kpt_weights,
-            ctx.grid(), ctx.domain(), ctx.halo(), ctx.gradient(),
-            &ctx.kpoints(), ctx.scf_bandcomm(), ctx.kpt_bridge(),
-            &ctx.spin_bridge(), ctx.spin_start(), ctx.kpt_start(),
-            ctx.band_start(), ctx.Nspin());
+// CPU compute helper
+static void compute_cpu_impl(KineticEnergyDensity& self, const LynxContext& ctx,
+                              const Wavefunction& wfn,
+                              const std::vector<double>& kpt_weights) {
+    self.compute(wfn, kpt_weights,
+                 ctx.grid(), ctx.domain(), ctx.halo(), ctx.gradient(),
+                 &ctx.kpoints(), ctx.scf_bandcomm(), ctx.kpt_bridge(),
+                 &ctx.spin_bridge(), ctx.spin_start(), ctx.kpt_start(),
+                 ctx.band_start(), ctx.Nspin());
 }
 
 // ============================================================
-// Device-dispatching compute()
+// Dispatching compute — checks dev_ member
 // ============================================================
 #ifdef USE_CUDA
 
@@ -187,16 +188,15 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
 
 void KineticEnergyDensity::compute(const LynxContext& ctx,
                                     const Wavefunction& wfn,
-                                    const std::vector<double>& kpt_weights,
-                                    Device dev)
+                                    const std::vector<double>& kpt_weights)
 {
-    if (dev == Device::CPU) {
-        compute(ctx, wfn, kpt_weights);
+    if (dev_ == Device::CPU) {
+        compute_cpu_impl(*this, ctx, wfn, kpt_weights);
         return;
     }
 
     if (!gpu_state_raw_) {
-        compute(ctx, wfn, kpt_weights);
+        compute_cpu_impl(*this, ctx, wfn, kpt_weights);
         return;
     }
 
@@ -230,7 +230,7 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
 
             if (is_kpt) {
                 // Complex k-point: fall back to CPU (complex halo+gradient not wired for tau)
-                compute(ctx, wfn, kpt_weights);
+                compute_cpu_impl(*this, ctx, wfn, kpt_weights);
                 return;
             }
 
@@ -315,10 +315,9 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
 
 void KineticEnergyDensity::compute(const LynxContext& ctx,
                                     const Wavefunction& wfn,
-                                    const std::vector<double>& kpt_weights,
-                                    Device /*dev*/)
+                                    const std::vector<double>& kpt_weights)
 {
-    compute(ctx, wfn, kpt_weights);
+    compute_cpu_impl(*this, ctx, wfn, kpt_weights);
 }
 
 #endif // USE_CUDA
