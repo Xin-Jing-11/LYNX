@@ -658,7 +658,7 @@ struct GPUEigenState {
 
     // Persistent device buffers (allocated once in setup_gpu, freed in cleanup_gpu).
     // These stay resident across all SCF iterations — no per-call alloc/free.
-    double* d_psi = nullptr;         // (Nd, Nband) real wavefunctions
+    double* d_psi = nullptr;         // Active (Nd, Nband) real wfn (points into d_psi_sk)
     double* d_Veff = nullptr;        // (Nd) effective potential
     double* d_eigvals = nullptr;     // (Nband_global) eigenvalues
     double* d_Y = nullptr;           // (Nd, Nband) CheFSI workspace
@@ -670,7 +670,7 @@ struct GPUEigenState {
 
     // Complex (k-point) persistent buffers
     // For SOC: sized as 2*Nd per band (spinor wavefunctions)
-    cuDoubleComplex* d_psi_z = nullptr;
+    cuDoubleComplex* d_psi_z = nullptr;  // Active complex wfn (points into d_psi_z_sk)
     cuDoubleComplex* d_Y_z = nullptr;
     cuDoubleComplex* d_Xold_z = nullptr;
     cuDoubleComplex* d_Xnew_z = nullptr;
@@ -683,13 +683,22 @@ struct GPUEigenState {
 
     bool buffers_allocated = false;
 
+    // Per-(spin,kpt) psi storage: each (spin,kpt) has its own device psi buffer.
+    // d_psi / d_psi_z are aliases into these arrays for the active (spin,kpt).
+    std::vector<double*> d_psi_sk;              // [Nspin_local * Nkpts] real gamma
+    std::vector<cuDoubleComplex*> d_psi_z_sk;   // [Nspin_local * Nkpts] complex kpt
+    int psi_Nspin_local = 0;
+    int psi_Nkpts = 0;
+
     void allocate_buffers() {
         if (buffers_allocated) return;
         cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
         size_t psi_sz = (size_t)Nd * Nband;
         size_t sub_sz = (size_t)Nband_global * Nband_global;
 
-        // Always allocate real buffers
+        // Allocate ONE default psi buffer (for single-spin gamma case or before
+        // allocate_psi_buffers is called). Per-(spin,kpt) buffers are allocated
+        // separately via allocate_psi_buffers().
         CUDA_CHECK(cudaMallocAsync(&d_psi, psi_sz * sizeof(double), stream));
         CUDA_CHECK(cudaMallocAsync(&d_Veff, Nd * sizeof(double), stream));
         CUDA_CHECK(cudaMallocAsync(&d_eigvals, Nband_global * sizeof(double), stream));
@@ -700,9 +709,8 @@ struct GPUEigenState {
         CUDA_CHECK(cudaMallocAsync(&d_Hs, sub_sz * sizeof(double), stream));
         CUDA_CHECK(cudaMallocAsync(&d_Ms, sub_sz * sizeof(double), stream));
 
-        // Allocate complex buffers if k-point or SOC
+        // Allocate complex workspace if k-point or SOC
         if (is_kpt || is_soc) {
-            // SOC spinor: psi is 2*Nd per band (two spin components)
             size_t psi_sz_z = is_soc ? (size_t)(2 * Nd) * Nband : psi_sz;
             CUDA_CHECK(cudaMallocAsync(&d_psi_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
             CUDA_CHECK(cudaMallocAsync(&d_Y_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
@@ -713,7 +721,6 @@ struct GPUEigenState {
             CUDA_CHECK(cudaMallocAsync(&d_Ms_z, sub_sz * sizeof(cuDoubleComplex), stream));
         }
 
-        // SOC: Veff_spinor buffer (4 * Nd)
         if (is_soc) {
             CUDA_CHECK(cudaMallocAsync(&d_Veff_spinor, 4 * Nd * sizeof(double), stream));
         }
@@ -726,6 +733,21 @@ struct GPUEigenState {
         cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
         auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
+        // Free per-(spin,kpt) psi buffers (if allocated)
+        if (!d_psi_sk.empty()) {
+            for (auto*& p : d_psi_sk) safe_free(p);
+            d_psi_sk.clear();
+            d_psi = nullptr;  // Was alias into d_psi_sk — don't double-free
+        }
+        if (!d_psi_z_sk.empty()) {
+            for (auto*& p : d_psi_z_sk) safe_free(p);
+            d_psi_z_sk.clear();
+            d_psi_z = nullptr;  // Was alias into d_psi_z_sk — don't double-free
+        }
+        psi_Nspin_local = 0;
+        psi_Nkpts = 0;
+
+        // Free default single psi buffer (only if not aliased into per-sk arrays)
         safe_free(d_psi); safe_free(d_Veff); safe_free(d_eigvals);
         safe_free(d_Y); safe_free(d_Xold); safe_free(d_Xnew);
         safe_free(d_HX); safe_free(d_Hs); safe_free(d_Ms);
@@ -971,6 +993,87 @@ void EigenSolver::upload_Veff(const double* h_Veff, int Nd) {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
+}
+
+// ============================================================
+// Per-(spin,kpt) device psi buffer management
+// ============================================================
+
+void EigenSolver::allocate_psi_buffers(int Nspin_local, int Nkpts) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    int nsk = Nspin_local * Nkpts;
+    gs->psi_Nspin_local = Nspin_local;
+    gs->psi_Nkpts = Nkpts;
+    size_t psi_sz = (size_t)gs->Nd * gs->Nband;
+
+    if (gs->is_kpt || gs->is_soc) {
+        // Complex k-point buffers
+        size_t psi_sz_z = gs->is_soc ? (size_t)(2 * gs->Nd) * gs->Nband : psi_sz;
+
+        // Free the default single buffer (it was allocated in allocate_buffers)
+        if (gs->d_psi_z) { cudaFreeAsync(gs->d_psi_z, stream); gs->d_psi_z = nullptr; }
+
+        gs->d_psi_z_sk.resize(nsk, nullptr);
+        for (int i = 0; i < nsk; ++i) {
+            CUDA_CHECK(cudaMallocAsync(&gs->d_psi_z_sk[i],
+                                       psi_sz_z * sizeof(cuDoubleComplex), stream));
+        }
+        // Active pointer = first buffer
+        gs->d_psi_z = gs->d_psi_z_sk[0];
+    } else {
+        // Real gamma-point buffers
+        // Free the default single buffer
+        if (gs->d_psi) { cudaFreeAsync(gs->d_psi, stream); gs->d_psi = nullptr; }
+
+        gs->d_psi_sk.resize(nsk, nullptr);
+        for (int i = 0; i < nsk; ++i) {
+            CUDA_CHECK(cudaMallocAsync(&gs->d_psi_sk[i],
+                                       psi_sz * sizeof(double), stream));
+        }
+        // Active pointer = first buffer
+        gs->d_psi = gs->d_psi_sk[0];
+    }
+}
+
+void EigenSolver::set_active_psi(int spin, int kpt) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    int idx = spin * gs->psi_Nkpts + kpt;
+
+    if (gs->is_kpt || gs->is_soc) {
+        gs->d_psi_z = gs->d_psi_z_sk[idx];
+    } else {
+        gs->d_psi = gs->d_psi_sk[idx];
+    }
+}
+
+double* EigenSolver::device_psi_real(int spin, int kpt) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_sk.empty()) return gs->d_psi;  // fallback: single buffer
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_sk[idx];
+}
+
+const double* EigenSolver::device_psi_real(int spin, int kpt) const {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_sk.empty()) return gs->d_psi;
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_sk[idx];
+}
+
+void* EigenSolver::device_psi_z(int spin, int kpt) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_z_sk.empty()) return gs->d_psi_z;
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_z_sk[idx];
+}
+
+const void* EigenSolver::device_psi_z(int spin, int kpt) const {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_z_sk.empty()) return gs->d_psi_z;
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_z_sk[idx];
 }
 
 } // namespace lynx

@@ -85,6 +85,14 @@ public:
     void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                      const std::vector<double>& kpt_weights);
 
+    // GPU compute from per-(spin,kpt) device-resident psi — no psi H2D transfers
+    void compute_gpu_from_device(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const std::vector<double>& kpt_weights,
+        const std::vector<const double*>& d_psi_real_ptrs,
+        const std::vector<const void*>& d_psi_z_ptrs);
+
     // Device pointer accessors (for GPU-resident mGGA pipeline)
     double* d_tau();
     double* d_vtau();

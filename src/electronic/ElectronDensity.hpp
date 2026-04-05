@@ -73,6 +73,15 @@ public:
                              const void* d_psi_z,           // device psi (kpt, cuDoubleComplex*, may be null)
                              const double* d_occ);          // device occupations
 
+    // Compute density from per-(spin,kpt) device-resident psi pointers.
+    // No psi host→device transfers — all psi already on GPU.
+    void compute_from_device_ptrs(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const std::vector<double>& kpt_weights,
+        const std::vector<const double*>& d_psi_real_ptrs,  // [s * Nkpts + k] for gamma
+        const std::vector<const void*>& d_psi_z_ptrs);      // [s * Nkpts + k] for kpt
+
     // GPU compute paths (defined in .cu)
     void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                      const std::vector<double>& kpt_weights);

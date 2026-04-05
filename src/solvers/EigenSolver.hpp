@@ -123,6 +123,18 @@ public:
     // GPU workspace pointer accessors (for use in .cpp algorithm)
     double* gpu_Y();
     double* gpu_Hs();
+
+    // Per-(spin,kpt) device psi buffer management.
+    // Allocates one psi buffer per (spin,kpt) so all wavefunctions stay
+    // GPU-resident simultaneously — no upload/download between solves.
+    void allocate_psi_buffers(int Nspin_local, int Nkpts);
+    void set_active_psi(int spin, int kpt);
+
+    // Device psi pointer for a specific (spin, kpt)
+    double* device_psi_real(int spin, int kpt);
+    const double* device_psi_real(int spin, int kpt) const;
+    void* device_psi_z(int spin, int kpt);
+    const void* device_psi_z(int spin, int kpt) const;
 #endif
 
     double lambda_cutoff() const { return lambda_cutoff_; }
