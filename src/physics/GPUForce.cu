@@ -269,52 +269,40 @@ __global__ void nonlocal_stress_reduce_kernel(
 }
 
 // ============================================================
-// Host function: compute_force_stress_gpu
+// Host function: compute_nonlocal_force_gpu (real gamma-point, force only)
 // ============================================================
-void compute_force_stress_gpu(
+void compute_nonlocal_force_gpu(
     const double* d_psi,       // (Nd, Nband) wavefunctions on device
     const double* d_occ,       // (Nband) occupations on device
-    // Nonlocal data (all on device, from GPUNonlocalData)
     const double* d_Chi_flat,
     const int*    d_gpos_flat,
     const int*    d_gpos_offsets,
     const int*    d_chi_offsets,
     const int*    d_ndc_arr,
     const int*    d_nproj_arr,
-    const int*    d_IP_displ,     // per influence atom
+    const int*    d_IP_displ,
     const double* d_Gamma,
     int n_influence,
     int total_nproj,
     int max_ndc,
     int max_nproj,
     int n_phys_atoms,
-    // Physical atom IP_displ (host, will upload)
-    const int* h_IP_displ_phys,   // [n_phys_atoms+1]
-    // Atom position data for nonlocal stress (host)
-    const double* h_atom_pos,     // [n_influence * 3]
-    // Grid parameters
+    const int* h_IP_displ_phys,
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
-    double dV, double dx, double dy, double dz,
-    int xs, int ys, int zs,
-    double occfac,
-    // Output (host)
-    double* h_f_nloc,       // [3 * n_phys_atoms]
-    double* h_stress_k,     // [6] kinetic stress (Voigt: xx,xy,xz,yy,yz,zz)
-    double* h_stress_nl,    // [6] nonlocal stress (Voigt)
+    double dV, double occfac,
+    double* h_f_nloc,
     double* h_energy_nl,
-    cudaStream_t stream)    // scalar
+    cudaStream_t stream)
 {
     auto& ctx = GPUContext::instance();
+
+    double spn_fac = occfac * 2.0;
+    double wk = 1.0;  // gamma-point
 
     int nx_ex = nx + 2 * FDn;
     int ny_ex = ny + 2 * FDn;
 
-    double spn_fac = occfac * 2.0;  // matches CPU: spn_fac = occfac * 2.0
-    double wk = 1.0;                // gamma-point
-
-    // ----------------------------------------------------------------
-    // Allocate memory for large gradient arrays (cudaMalloc — scratch pool too small)
-    // ----------------------------------------------------------------
+    // Allocate gradient arrays
     size_t grad_size = (size_t)Nd * Nband;
     size_t grad_bytes = grad_size * sizeof(double);
 
@@ -335,79 +323,32 @@ void compute_force_stress_gpu(
     double* d_force = ctx.scratch_pool.alloc<double>(3 * n_phys_atoms);
     CUDA_CHECK(cudaMemsetAsync(d_force, 0, 3 * n_phys_atoms * sizeof(double), stream));
 
-    // Kinetic stress: 6 Voigt components on device
-    double* d_sk = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemsetAsync(d_sk, 0, 6 * sizeof(double), stream));
-
-    // Nonlocal stress: 6 Voigt components on device
-    double* d_snl = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemsetAsync(d_snl, 0, 6 * sizeof(double), stream));
-
     // Nonlocal energy: single scalar
     double* d_enl = ctx.scratch_pool.alloc<double>(1);
     CUDA_CHECK(cudaMemsetAsync(d_enl, 0, sizeof(double), stream));
 
     // Upload physical atom IP_displ
-    double* d_atom_pos = nullptr;
     int* d_IP_displ_phys = nullptr;
     if (total_nproj > 0) {
         d_IP_displ_phys = ctx.scratch_pool.alloc<int>(n_phys_atoms + 1);
         CUDA_CHECK(cudaMemcpyAsync(d_IP_displ_phys, h_IP_displ_phys,
                               (n_phys_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
-
-        // Upload atom positions for stress weighted gather
-        if (n_influence > 0 && h_atom_pos) {
-            d_atom_pos = ctx.scratch_pool.alloc<double>(n_influence * 3);
-            CUDA_CHECK(cudaMemcpyAsync(d_atom_pos, h_atom_pos,
-                                  n_influence * 3 * sizeof(double), cudaMemcpyHostToDevice, stream));
-        }
     }
 
-    // Use ctx.buf.x_ex for halo exchange workspace (already sized for Nband columns)
+    // Halo exchange workspace
     double* d_x_ex = ctx.buf.x_ex;
 
-    // ----------------------------------------------------------------
-    // Step 1: Halo exchange all bands (once)
-    // ----------------------------------------------------------------
+    // Step 1: Halo exchange
     halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true, stream);
 
-    // ----------------------------------------------------------------
-    // Step 2: Compute 3 gradient directions (batched V2 — single launch per direction)
-    // ----------------------------------------------------------------
+    // Step 2: Gradients
     gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband, stream);
     gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
     gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
 
-    // ----------------------------------------------------------------
-    // Step 3: Kinetic stress (6 Voigt pairs)
-    // ----------------------------------------------------------------
-    {
-        // Voigt ordering: xx(0), xy(1), xz(2), yy(3), yz(4), zz(5)
-        const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
-        int voigt_a[6] = {0, 0, 0, 1, 1, 2};
-        int voigt_b[6] = {0, 1, 2, 1, 2, 2};
-
-        int bs = 256;
-        size_t smem = bs * sizeof(double);
-        double neg_occfac_dV = -occfac * dV;
-
-        for (int v = 0; v < 6; ++v) {
-            kinetic_stress_kernel<<<Nband, bs, smem, stream>>>(
-                d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
-                d_occ, d_sk + v, Nd, Nband, neg_occfac_dV);
-            CUDA_CHECK(cudaGetLastError());
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Step 4: Compute alpha = dV * Chi^T * psi (all bands)
-    // Tiled kernel: fixed shared memory ≈ 2 KB, independent of system size
-    // ----------------------------------------------------------------
+    // Step 3: Alpha = dV * Chi^T * psi, then energy and force
     if (total_nproj > 0 && n_influence > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_alpha, 0, (size_t)total_nproj * Nband * sizeof(double), stream));
-
-        int block_size = 256;
-        size_t smem_tiled = (NL_TILE_FS + block_size / 32) * sizeof(double);
 
         nonlocal_gather_chitpsi_gpu(
             d_psi, d_Chi_flat, d_gpos_flat,
@@ -415,20 +356,13 @@ void compute_force_stress_gpu(
             d_alpha, Nd, Nband, Nband, 0, dV, n_influence,
             max_ndc, max_nproj, stream);
 
-        // ----------------------------------------------------------------
-        // Step 5: Nonlocal energy (uses alpha before Gamma scaling)
-        // energy_nl = wk * sum_n(g_n * sum(Gamma * alpha^2))
-        // Note: alpha here has NOT been Gamma-scaled yet (raw dV*Chi^T*psi)
-        // ----------------------------------------------------------------
+        // Nonlocal energy
         nonlocal_energy_kernel<<<1, 1, 0, stream>>>(
             d_alpha, d_occ, d_Gamma, d_IP_displ_phys,
             n_phys_atoms, Nband, total_nproj, d_enl);
         CUDA_CHECK(cudaGetLastError());
 
-        // ----------------------------------------------------------------
-        // Step 6: Nonlocal force (3 dims)
-        // For each dim: beta = dV * Chi^T * Dpsi_dim, then reduce
-        // ----------------------------------------------------------------
+        // Nonlocal force (3 dims)
         {
             const double* d_Dpsi_arr[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
             int bs_force = 256;
@@ -448,11 +382,162 @@ void compute_force_stress_gpu(
                 CUDA_CHECK(cudaGetLastError());
             }
         }
+    }
 
-        // ----------------------------------------------------------------
-        // Step 7: Nonlocal stress (6 Voigt pairs)
-        // Tiled weighted kernel: fixed shared memory ≈ 2 KB
-        // ----------------------------------------------------------------
+    // Download results
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    if (total_nproj > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(h_f_nloc, d_force,
+                              3 * n_phys_atoms * sizeof(double), cudaMemcpyDeviceToHost, stream));
+
+        double h_enl_raw;
+        CUDA_CHECK(cudaMemcpyAsync(&h_enl_raw, d_enl, sizeof(double), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        *h_energy_nl = h_enl_raw * occfac * wk;
+    } else {
+        std::memset(h_f_nloc, 0, 3 * n_phys_atoms * sizeof(double));
+        *h_energy_nl = 0.0;
+    }
+
+    // Free gradient arrays
+    cudaFreeAsync(d_Dpsi_x, stream);
+    cudaFreeAsync(d_Dpsi_y, stream);
+    cudaFreeAsync(d_Dpsi_z, stream);
+
+    ctx.scratch_pool.restore(scratch_cp);
+}
+
+// ============================================================
+// Host function: compute_kinetic_nonlocal_stress_gpu (real gamma-point, stress only)
+// ============================================================
+void compute_kinetic_nonlocal_stress_gpu(
+    const double* d_psi,
+    const double* d_occ,
+    const double* d_Chi_flat,
+    const int*    d_gpos_flat,
+    const int*    d_gpos_offsets,
+    const int*    d_chi_offsets,
+    const int*    d_ndc_arr,
+    const int*    d_nproj_arr,
+    const int*    d_IP_displ,
+    const double* d_Gamma,
+    int n_influence,
+    int total_nproj,
+    int max_ndc,
+    int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys,
+    const double* h_atom_pos,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double dx, double dy, double dz,
+    int xs, int ys, int zs,
+    double occfac,
+    double* h_stress_k,
+    double* h_stress_nl,
+    cudaStream_t stream)
+{
+    auto& ctx = GPUContext::instance();
+
+    double spn_fac = occfac * 2.0;
+    double wk = 1.0;  // gamma-point
+
+    int nx_ex = nx + 2 * FDn;
+    int ny_ex = ny + 2 * FDn;
+
+    // Allocate gradient arrays
+    size_t grad_size = (size_t)Nd * Nband;
+    size_t grad_bytes = grad_size * sizeof(double);
+
+    double* d_Dpsi_x = nullptr;
+    double* d_Dpsi_y = nullptr;
+    double* d_Dpsi_z = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_x, grad_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_y, grad_bytes, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z, grad_bytes, stream));
+
+    // Small buffers from scratch pool
+    size_t scratch_cp = ctx.scratch_pool.checkpoint();
+
+    double* d_alpha = ctx.scratch_pool.alloc<double>((size_t)total_nproj * Nband);
+    double* d_beta  = ctx.scratch_pool.alloc<double>((size_t)total_nproj * Nband);
+
+    // Kinetic stress: 6 Voigt components on device
+    double* d_sk = ctx.scratch_pool.alloc<double>(6);
+    CUDA_CHECK(cudaMemsetAsync(d_sk, 0, 6 * sizeof(double), stream));
+
+    // Nonlocal stress: 6 Voigt components on device
+    double* d_snl = ctx.scratch_pool.alloc<double>(6);
+    CUDA_CHECK(cudaMemsetAsync(d_snl, 0, 6 * sizeof(double), stream));
+
+    // Nonlocal energy (needed for diagonal subtraction)
+    double* d_enl = ctx.scratch_pool.alloc<double>(1);
+    CUDA_CHECK(cudaMemsetAsync(d_enl, 0, sizeof(double), stream));
+
+    // Upload physical atom IP_displ and atom positions
+    double* d_atom_pos = nullptr;
+    int* d_IP_displ_phys = nullptr;
+    if (total_nproj > 0) {
+        d_IP_displ_phys = ctx.scratch_pool.alloc<int>(n_phys_atoms + 1);
+        CUDA_CHECK(cudaMemcpyAsync(d_IP_displ_phys, h_IP_displ_phys,
+                              (n_phys_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+
+        if (n_influence > 0 && h_atom_pos) {
+            d_atom_pos = ctx.scratch_pool.alloc<double>(n_influence * 3);
+            CUDA_CHECK(cudaMemcpyAsync(d_atom_pos, h_atom_pos,
+                                  n_influence * 3 * sizeof(double), cudaMemcpyHostToDevice, stream));
+        }
+    }
+
+    // Halo exchange workspace
+    double* d_x_ex = ctx.buf.x_ex;
+
+    // Step 1: Halo exchange
+    halo_exchange_batched_nomemset_gpu(d_psi, d_x_ex, nx, ny, nz, FDn, Nband, true, true, true, stream);
+
+    // Step 2: Gradients
+    gradient_v3_gpu(d_x_ex, d_Dpsi_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
+    gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
+
+    // Step 3: Kinetic stress (6 Voigt pairs)
+    {
+        const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
+        int voigt_a[6] = {0, 0, 0, 1, 1, 2};
+        int voigt_b[6] = {0, 1, 2, 1, 2, 2};
+
+        int bs = 256;
+        size_t smem = bs * sizeof(double);
+        double neg_occfac_dV = -occfac * dV;
+
+        for (int v = 0; v < 6; ++v) {
+            kinetic_stress_kernel<<<Nband, bs, smem, stream>>>(
+                d_Dpsi[voigt_a[v]], d_Dpsi[voigt_b[v]],
+                d_occ, d_sk + v, Nd, Nband, neg_occfac_dV);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
+    // Step 4: Nonlocal stress (alpha + weighted beta + energy for diagonal subtraction)
+    if (total_nproj > 0 && n_influence > 0) {
+        CUDA_CHECK(cudaMemsetAsync(d_alpha, 0, (size_t)total_nproj * Nband * sizeof(double), stream));
+
+        int block_size = 256;
+        size_t smem_tiled = (NL_TILE_FS + block_size / 32) * sizeof(double);
+
+        nonlocal_gather_chitpsi_gpu(
+            d_psi, d_Chi_flat, d_gpos_flat,
+            d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+            d_alpha, Nd, Nband, Nband, 0, dV, n_influence,
+            max_ndc, max_nproj, stream);
+
+        // Nonlocal energy (needed for diagonal subtraction)
+        nonlocal_energy_kernel<<<1, 1, 0, stream>>>(
+            d_alpha, d_occ, d_Gamma, d_IP_displ_phys,
+            n_phys_atoms, Nband, total_nproj, d_enl);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Nonlocal stress (6 Voigt pairs)
         if (d_atom_pos) {
             const double* d_Dpsi_arr[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
 
@@ -482,31 +567,21 @@ void compute_force_stress_gpu(
         }
     }
 
-    // ----------------------------------------------------------------
-    // Download results to host
-    // ----------------------------------------------------------------
+    // Download results
     CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    // Force
-    if (total_nproj > 0) {
-        CUDA_CHECK(cudaMemcpyAsync(h_f_nloc, d_force,
-                              3 * n_phys_atoms * sizeof(double), cudaMemcpyDeviceToHost, stream));
-    } else {
-        std::memset(h_f_nloc, 0, 3 * n_phys_atoms * sizeof(double));
-    }
 
     // Kinetic stress
     CUDA_CHECK(cudaMemcpyAsync(h_stress_k, d_sk, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
-    // Nonlocal stress & energy
+    // Nonlocal stress
     if (total_nproj > 0) {
         double h_snl_raw[6];
         CUDA_CHECK(cudaMemcpyAsync(h_snl_raw, d_snl, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
         double h_enl_raw;
         CUDA_CHECK(cudaMemcpyAsync(&h_enl_raw, d_enl, sizeof(double), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
 
-        // Scale: snl *= spn_fac, energy_nl *= occfac * wk
         double energy_nl = h_enl_raw * occfac * wk;
 
         for (int i = 0; i < 6; ++i) h_snl_raw[i] *= spn_fac;
@@ -518,11 +593,8 @@ void compute_force_stress_gpu(
         h_stress_nl[3] = h_snl_raw[3] - energy_nl;
         h_stress_nl[4] = h_snl_raw[4];
         h_stress_nl[5] = h_snl_raw[5] - energy_nl;
-
-        *h_energy_nl = energy_nl;
     } else {
         std::memset(h_stress_nl, 0, 6 * sizeof(double));
-        *h_energy_nl = 0.0;
     }
 
     // Free gradient arrays
@@ -530,7 +602,6 @@ void compute_force_stress_gpu(
     cudaFreeAsync(d_Dpsi_y, stream);
     cudaFreeAsync(d_Dpsi_z, stream);
 
-    // Restore scratch pool
     ctx.scratch_pool.restore(scratch_cp);
 }
 
@@ -1233,9 +1304,9 @@ __global__ void nonlocal_stress_reduce_z_kernel(
 }
 
 // ============================================================
-// Host function: compute_force_stress_kpt_gpu (complex k-point)
+// Host function: compute_nonlocal_force_kpt_gpu (complex k-point, force only)
 // ============================================================
-void compute_force_stress_kpt_gpu(
+void compute_nonlocal_force_kpt_gpu(
     const cuDoubleComplex* d_psi_z,
     const double* d_occ,
     const double* d_Chi_flat,
@@ -1253,15 +1324,11 @@ void compute_force_stress_kpt_gpu(
     int max_nproj,
     int n_phys_atoms,
     const int* h_IP_displ_phys,
-    const double* h_atom_pos,
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
-    double dV, double dx, double dy, double dz,
-    int xs, int ys, int zs,
+    double dV,
     double kxLx, double kyLy, double kzLz,
     double spn_fac_wk,
     double* h_f_nloc,
-    double* h_stress_k,
-    double* h_stress_nl,
     double* h_energy_nl,
     cudaStream_t stream)
 {
@@ -1272,24 +1339,7 @@ void compute_force_stress_kpt_gpu(
     int nz_ex = nz + 2 * FDn;
     int Nd_ex = nx_ex * ny_ex * nz_ex;
 
-    // wk is embedded in spn_fac_wk = occfac * 2.0 * wk
-    // For stress, we need separate occfac and wk. Extract from spn_fac_wk:
-    // spn_fac = occfac * 2.0, so spn_fac_wk = spn_fac * wk
-    // We don't need to decompose: force uses spn_fac_wk directly,
-    // stress reduces use wk=1.0 and we apply spn_fac_wk/2.0 for the stress scaling.
-    // Actually let's keep it simple: the caller passes spn_fac_wk.
-    // For kinetic stress, the real version uses -occfac * dV.
-    // Since spn_fac_wk = occfac * 2.0 * wk, occfac*wk = spn_fac_wk / 2.0.
-    // So neg_occfac_wk_dV = -(spn_fac_wk / 2.0) * dV.
-    double neg_occfac_wk_dV = -(spn_fac_wk / 2.0) * dV;
-    // For nonlocal stress reduce, the real version uses wk=1.0 and multiplies snl *= spn_fac.
-    // For k-point, we want snl contributions pre-scaled by spn_fac_wk/2.0 (=occfac*wk)
-    // The reduce kernel uses wk argument:
-    double wk_for_snl = 1.0;  // We'll scale by spn_fac after download
-
-    // ----------------------------------------------------------------
     // Allocate complex gradient arrays
-    // ----------------------------------------------------------------
     size_t grad_size = (size_t)Nd * Nband;
     size_t grad_bytes_z = grad_size * sizeof(cuDoubleComplex);
 
@@ -1320,68 +1370,28 @@ void compute_force_stress_kpt_gpu(
     double* d_force = ctx.scratch_pool.alloc<double>(3 * n_phys_atoms);
     CUDA_CHECK(cudaMemsetAsync(d_force, 0, 3 * n_phys_atoms * sizeof(double), stream));
 
-    // Kinetic stress: 6 Voigt components on device
-    double* d_sk = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemsetAsync(d_sk, 0, 6 * sizeof(double), stream));
-
-    // Nonlocal stress: 6 Voigt components on device
-    double* d_snl = ctx.scratch_pool.alloc<double>(6);
-    CUDA_CHECK(cudaMemsetAsync(d_snl, 0, 6 * sizeof(double), stream));
-
     // Nonlocal energy: single scalar
     double* d_enl = ctx.scratch_pool.alloc<double>(1);
     CUDA_CHECK(cudaMemsetAsync(d_enl, 0, sizeof(double), stream));
 
-    // Upload physical atom IP_displ and atom positions
-    double* d_atom_pos = nullptr;
+    // Upload physical atom IP_displ
     int* d_IP_displ_phys = nullptr;
     if (total_nproj > 0) {
         d_IP_displ_phys = ctx.scratch_pool.alloc<int>(n_phys_atoms + 1);
         CUDA_CHECK(cudaMemcpyAsync(d_IP_displ_phys, h_IP_displ_phys,
                               (n_phys_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
-
-        if (n_influence > 0 && h_atom_pos) {
-            d_atom_pos = ctx.scratch_pool.alloc<double>(n_influence * 3);
-            CUDA_CHECK(cudaMemcpyAsync(d_atom_pos, h_atom_pos,
-                                  n_influence * 3 * sizeof(double), cudaMemcpyHostToDevice, stream));
-        }
     }
 
-    // ----------------------------------------------------------------
     // Step 1: Complex halo exchange
-    // ----------------------------------------------------------------
     halo_exchange_z_gpu(d_psi_z, d_x_ex_z, nx, ny, nz, FDn, Nband,
                         true, true, true, kxLx, kyLy, kzLz, stream);
 
-    // ----------------------------------------------------------------
     // Step 2: Complex gradient in 3 directions
-    // ----------------------------------------------------------------
     gradient_z_gpu(d_x_ex_z, d_Dpsi_z_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband, stream);
     gradient_z_gpu(d_x_ex_z, d_Dpsi_z_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
     gradient_z_gpu(d_x_ex_z, d_Dpsi_z_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
 
-    // ----------------------------------------------------------------
-    // Step 3: Kinetic stress (6 Voigt pairs)
-    // ----------------------------------------------------------------
-    {
-        const cuDoubleComplex* d_Dpsi_z_arr[3] = { d_Dpsi_z_x, d_Dpsi_z_y, d_Dpsi_z_z };
-        int voigt_a[6] = {0, 0, 0, 1, 1, 2};
-        int voigt_b[6] = {0, 1, 2, 1, 2, 2};
-
-        int bs = 256;
-        size_t smem = bs * sizeof(double);
-
-        for (int v = 0; v < 6; ++v) {
-            kinetic_stress_z_kernel<<<Nband, bs, smem, stream>>>(
-                d_Dpsi_z_arr[voigt_a[v]], d_Dpsi_z_arr[voigt_b[v]],
-                d_occ, d_sk + v, Nd, Nband, neg_occfac_wk_dV);
-            CUDA_CHECK(cudaGetLastError());
-        }
-    }
-
-    // ----------------------------------------------------------------
-    // Step 4: Compute alpha_z = dV * bloch * Chi^T * psi_z
-    // ----------------------------------------------------------------
+    // Step 3: Alpha + energy + force
     if (total_nproj > 0 && n_influence > 0) {
         CUDA_CHECK(cudaMemsetAsync(d_alpha_z, 0, alpha_elems * sizeof(cuDoubleComplex), stream));
 
@@ -1396,17 +1406,13 @@ void compute_force_stress_kpt_gpu(
             d_bloch_fac, d_alpha_z, Nd, Nband, Nband, 0, dV, n_influence);
         CUDA_CHECK(cudaGetLastError());
 
-        // ----------------------------------------------------------------
-        // Step 5: Nonlocal energy
-        // ----------------------------------------------------------------
+        // Nonlocal energy
         nonlocal_energy_z_kernel<<<1, 1, 0, stream>>>(
             d_alpha_z, d_occ, d_Gamma, d_IP_displ_phys,
             n_phys_atoms, Nband, total_nproj, d_enl);
         CUDA_CHECK(cudaGetLastError());
 
-        // ----------------------------------------------------------------
-        // Step 6: Nonlocal force (3 dims)
-        // ----------------------------------------------------------------
+        // Nonlocal force (3 dims)
         {
             const cuDoubleComplex* d_Dpsi_z_arr[3] = { d_Dpsi_z_x, d_Dpsi_z_y, d_Dpsi_z_z };
             int bs_force = 256;
@@ -1427,10 +1433,179 @@ void compute_force_stress_kpt_gpu(
                 CUDA_CHECK(cudaGetLastError());
             }
         }
+    }
 
-        // ----------------------------------------------------------------
-        // Step 7: Nonlocal stress (6 Voigt pairs)
-        // ----------------------------------------------------------------
+    // Download results
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    if (total_nproj > 0) {
+        CUDA_CHECK(cudaMemcpyAsync(h_f_nloc, d_force,
+                              3 * n_phys_atoms * sizeof(double), cudaMemcpyDeviceToHost, stream));
+
+        double h_enl_raw;
+        CUDA_CHECK(cudaMemcpyAsync(&h_enl_raw, d_enl, sizeof(double), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        *h_energy_nl = h_enl_raw * (spn_fac_wk / 2.0);
+    } else {
+        std::memset(h_f_nloc, 0, 3 * n_phys_atoms * sizeof(double));
+        *h_energy_nl = 0.0;
+    }
+
+    // Free arrays
+    cudaFreeAsync(d_Dpsi_z_x, stream);
+    cudaFreeAsync(d_Dpsi_z_y, stream);
+    cudaFreeAsync(d_Dpsi_z_z, stream);
+    cudaFreeAsync(d_x_ex_z, stream);
+    if (d_alpha_z) cudaFreeAsync(d_alpha_z, stream);
+    if (d_beta_z) cudaFreeAsync(d_beta_z, stream);
+
+    ctx.scratch_pool.restore(scratch_cp);
+}
+
+// ============================================================
+// Host function: compute_kinetic_nonlocal_stress_kpt_gpu (complex k-point, stress only)
+// ============================================================
+void compute_kinetic_nonlocal_stress_kpt_gpu(
+    const cuDoubleComplex* d_psi_z,
+    const double* d_occ,
+    const double* d_Chi_flat,
+    const int*    d_gpos_flat,
+    const int*    d_gpos_offsets,
+    const int*    d_chi_offsets,
+    const int*    d_ndc_arr,
+    const int*    d_nproj_arr,
+    const int*    d_IP_displ,
+    const double* d_Gamma,
+    const double* d_bloch_fac,
+    int n_influence,
+    int total_nproj,
+    int max_ndc,
+    int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys,
+    const double* h_atom_pos,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double dx, double dy, double dz,
+    int xs, int ys, int zs,
+    double kxLx, double kyLy, double kzLz,
+    double spn_fac_wk,
+    double* h_stress_k,
+    double* h_stress_nl,
+    cudaStream_t stream)
+{
+    auto& ctx = GPUContext::instance();
+
+    int nx_ex = nx + 2 * FDn;
+    int ny_ex = ny + 2 * FDn;
+    int nz_ex = nz + 2 * FDn;
+    int Nd_ex = nx_ex * ny_ex * nz_ex;
+
+    // Scaling factors (same logic as old combined function)
+    double neg_occfac_wk_dV = -(spn_fac_wk / 2.0) * dV;
+    double wk_for_snl = 1.0;  // Scale by spn_fac_wk after download
+
+    // Allocate complex gradient arrays
+    size_t grad_size = (size_t)Nd * Nband;
+    size_t grad_bytes_z = grad_size * sizeof(cuDoubleComplex);
+
+    cuDoubleComplex* d_Dpsi_z_x = nullptr;
+    cuDoubleComplex* d_Dpsi_z_y = nullptr;
+    cuDoubleComplex* d_Dpsi_z_z = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z_x, grad_bytes_z, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z_y, grad_bytes_z, stream));
+    CUDA_CHECK(cudaMallocAsync(&d_Dpsi_z_z, grad_bytes_z, stream));
+
+    // Halo exchange workspace
+    size_t ex_bytes = (size_t)Nd_ex * Nband * sizeof(cuDoubleComplex);
+    cuDoubleComplex* d_x_ex_z = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_x_ex_z, ex_bytes, stream));
+
+    // Small buffers from scratch pool
+    size_t scratch_cp = ctx.scratch_pool.checkpoint();
+
+    size_t alpha_elems = (size_t)total_nproj * Nband;
+    cuDoubleComplex* d_alpha_z = nullptr;
+    cuDoubleComplex* d_beta_z = nullptr;
+    if (total_nproj > 0) {
+        CUDA_CHECK(cudaMallocAsync(&d_alpha_z, alpha_elems * sizeof(cuDoubleComplex), stream));
+        CUDA_CHECK(cudaMallocAsync(&d_beta_z, alpha_elems * sizeof(cuDoubleComplex), stream));
+    }
+
+    // Kinetic stress: 6 Voigt components on device
+    double* d_sk = ctx.scratch_pool.alloc<double>(6);
+    CUDA_CHECK(cudaMemsetAsync(d_sk, 0, 6 * sizeof(double), stream));
+
+    // Nonlocal stress: 6 Voigt components on device
+    double* d_snl = ctx.scratch_pool.alloc<double>(6);
+    CUDA_CHECK(cudaMemsetAsync(d_snl, 0, 6 * sizeof(double), stream));
+
+    // Nonlocal energy (needed for diagonal subtraction)
+    double* d_enl = ctx.scratch_pool.alloc<double>(1);
+    CUDA_CHECK(cudaMemsetAsync(d_enl, 0, sizeof(double), stream));
+
+    // Upload physical atom IP_displ and atom positions
+    double* d_atom_pos = nullptr;
+    int* d_IP_displ_phys = nullptr;
+    if (total_nproj > 0) {
+        d_IP_displ_phys = ctx.scratch_pool.alloc<int>(n_phys_atoms + 1);
+        CUDA_CHECK(cudaMemcpyAsync(d_IP_displ_phys, h_IP_displ_phys,
+                              (n_phys_atoms + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
+
+        if (n_influence > 0 && h_atom_pos) {
+            d_atom_pos = ctx.scratch_pool.alloc<double>(n_influence * 3);
+            CUDA_CHECK(cudaMemcpyAsync(d_atom_pos, h_atom_pos,
+                                  n_influence * 3 * sizeof(double), cudaMemcpyHostToDevice, stream));
+        }
+    }
+
+    // Step 1: Complex halo exchange
+    halo_exchange_z_gpu(d_psi_z, d_x_ex_z, nx, ny, nz, FDn, Nband,
+                        true, true, true, kxLx, kyLy, kzLz, stream);
+
+    // Step 2: Complex gradient in 3 directions
+    gradient_z_gpu(d_x_ex_z, d_Dpsi_z_x, nx, ny, nz, FDn, nx_ex, ny_ex, 0, Nband, stream);
+    gradient_z_gpu(d_x_ex_z, d_Dpsi_z_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
+    gradient_z_gpu(d_x_ex_z, d_Dpsi_z_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
+
+    // Step 3: Kinetic stress (6 Voigt pairs)
+    {
+        const cuDoubleComplex* d_Dpsi_z_arr[3] = { d_Dpsi_z_x, d_Dpsi_z_y, d_Dpsi_z_z };
+        int voigt_a[6] = {0, 0, 0, 1, 1, 2};
+        int voigt_b[6] = {0, 1, 2, 1, 2, 2};
+
+        int bs = 256;
+        size_t smem = bs * sizeof(double);
+
+        for (int v = 0; v < 6; ++v) {
+            kinetic_stress_z_kernel<<<Nband, bs, smem, stream>>>(
+                d_Dpsi_z_arr[voigt_a[v]], d_Dpsi_z_arr[voigt_b[v]],
+                d_occ, d_sk + v, Nd, Nband, neg_occfac_wk_dV);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
+    // Step 4: Nonlocal stress (alpha + energy for diagonal subtraction + weighted beta)
+    if (total_nproj > 0 && n_influence > 0) {
+        CUDA_CHECK(cudaMemsetAsync(d_alpha_z, 0, alpha_elems * sizeof(cuDoubleComplex), stream));
+
+        int block_size = 256;
+        int nwarps = block_size / 32;
+        size_t smem_gather = NL_TILE_Z_FS * sizeof(cuDoubleComplex) + 2 * nwarps * sizeof(double);
+
+        dim3 grid_gather(n_influence, Nband);
+        gather_chitpsi_z_fs_kernel<<<grid_gather, block_size, smem_gather, stream>>>(
+            d_psi_z, d_Chi_flat, d_gpos_flat,
+            d_gpos_offsets, d_chi_offsets, d_ndc_arr, d_nproj_arr, d_IP_displ,
+            d_bloch_fac, d_alpha_z, Nd, Nband, Nband, 0, dV, n_influence);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Nonlocal energy (needed for diagonal subtraction)
+        nonlocal_energy_z_kernel<<<1, 1, 0, stream>>>(
+            d_alpha_z, d_occ, d_Gamma, d_IP_displ_phys,
+            n_phys_atoms, Nband, total_nproj, d_enl);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Nonlocal stress (6 Voigt pairs)
         if (d_atom_pos) {
             const cuDoubleComplex* d_Dpsi_z_arr[3] = { d_Dpsi_z_x, d_Dpsi_z_y, d_Dpsi_z_z };
 
@@ -1462,23 +1637,13 @@ void compute_force_stress_kpt_gpu(
         }
     }
 
-    // ----------------------------------------------------------------
-    // Download results to host
-    // ----------------------------------------------------------------
+    // Download results
     CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    // Force
-    if (total_nproj > 0) {
-        CUDA_CHECK(cudaMemcpyAsync(h_f_nloc, d_force,
-                              3 * n_phys_atoms * sizeof(double), cudaMemcpyDeviceToHost, stream));
-    } else {
-        std::memset(h_f_nloc, 0, 3 * n_phys_atoms * sizeof(double));
-    }
 
     // Kinetic stress
     CUDA_CHECK(cudaMemcpyAsync(h_stress_k, d_sk, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
 
-    // Nonlocal stress & energy
+    // Nonlocal stress
     if (total_nproj > 0) {
         double h_snl_raw[6];
         CUDA_CHECK(cudaMemcpyAsync(h_snl_raw, d_snl, 6 * sizeof(double), cudaMemcpyDeviceToHost, stream));
@@ -1488,8 +1653,6 @@ void compute_force_stress_kpt_gpu(
 
         CUDA_CHECK(cudaStreamSynchronize(stream));
 
-        // Scale: snl *= spn_fac_wk (combines spn_fac and wk)
-        // energy_nl = enl_raw * (spn_fac_wk / 2.0) = enl_raw * occfac * wk
         double energy_nl = h_enl_raw * (spn_fac_wk / 2.0);
 
         for (int i = 0; i < 6; ++i) h_snl_raw[i] *= spn_fac_wk;
@@ -1501,15 +1664,12 @@ void compute_force_stress_kpt_gpu(
         h_stress_nl[3] = h_snl_raw[3] - energy_nl;
         h_stress_nl[4] = h_snl_raw[4];
         h_stress_nl[5] = h_snl_raw[5] - energy_nl;
-
-        *h_energy_nl = energy_nl;
     } else {
         CUDA_CHECK(cudaStreamSynchronize(stream));
         std::memset(h_stress_nl, 0, 6 * sizeof(double));
-        *h_energy_nl = 0.0;
     }
 
-    // Free gradient arrays
+    // Free arrays
     cudaFreeAsync(d_Dpsi_z_x, stream);
     cudaFreeAsync(d_Dpsi_z_y, stream);
     cudaFreeAsync(d_Dpsi_z_z, stream);
@@ -1517,7 +1677,6 @@ void compute_force_stress_kpt_gpu(
     if (d_alpha_z) cudaFreeAsync(d_alpha_z, stream);
     if (d_beta_z) cudaFreeAsync(d_beta_z, stream);
 
-    // Restore scratch pool
     ctx.scratch_pool.restore(scratch_cp);
 }
 

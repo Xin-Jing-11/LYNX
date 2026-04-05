@@ -113,7 +113,20 @@ void gradient_gpu(
 
 // gga_pbe_gpu removed — replaced by libxc CUDA device calls below
 
-void compute_force_stress_gpu(
+void compute_nonlocal_force_gpu(
+    const double* d_psi, const double* d_occ,
+    const double* d_Chi_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets, const int* d_chi_offsets,
+    const int* d_ndc_arr, const int* d_nproj_arr,
+    const int* d_IP_displ, const double* d_Gamma,
+    int n_influence, int total_nproj, int max_ndc, int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double occfac,
+    double* h_f_nloc, double* h_energy_nl, cudaStream_t stream = 0);
+
+void compute_kinetic_nonlocal_stress_gpu(
     const double* d_psi, const double* d_occ,
     const double* d_Chi_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets, const int* d_chi_offsets,
@@ -125,7 +138,7 @@ void compute_force_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs, double occfac,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl, cudaStream_t stream = 0);
+    double* h_stress_k, double* h_stress_nl, cudaStream_t stream = 0);
 
 }} // namespace lynx::gpu
 
@@ -1465,12 +1478,28 @@ int main(int argc, char** argv) {
             }
         }
 
-        // GPU force/stress computation
+        // GPU force computation (separate from stress)
         std::vector<double> gpu_f_nloc(3 * n_phys, 0.0);
-        std::array<double, 6> gpu_stress_k = {}, gpu_stress_nl = {};
         double gpu_energy_nl = 0.0;
 
-        lynx::gpu::compute_force_stress_gpu(
+        lynx::gpu::compute_nonlocal_force_gpu(
+            d_psi, d_occ,
+            gpu_vnl_data.d_Chi_flat, gpu_vnl_data.d_gpos_flat,
+            gpu_vnl_data.d_gpos_offsets, gpu_vnl_data.d_chi_offsets,
+            gpu_vnl_data.d_ndc_arr, gpu_vnl_data.d_nproj_arr,
+            gpu_vnl_data.d_IP_displ, gpu_vnl_data.d_Gamma,
+            gpu_vnl_data.n_influence, gpu_vnl_data.total_phys_nproj,
+            gpu_vnl_data.max_ndc, gpu_vnl_data.max_nproj,
+            n_phys,
+            IP_displ_phys.data(),
+            nx, ny, nz, FDn, Nd, Nband,
+            dV, 2.0,  // occfac for Nspin=1
+            gpu_f_nloc.data(), &gpu_energy_nl);
+
+        // GPU stress computation (separate from force)
+        std::array<double, 6> gpu_stress_k = {}, gpu_stress_nl = {};
+
+        lynx::gpu::compute_kinetic_nonlocal_stress_gpu(
             d_psi, d_occ,
             gpu_vnl_data.d_Chi_flat, gpu_vnl_data.d_gpos_flat,
             gpu_vnl_data.d_gpos_offsets, gpu_vnl_data.d_chi_offsets,
@@ -1485,7 +1514,7 @@ int main(int argc, char** argv) {
             dV, grid.dx(), grid.dy(), grid.dz(),
             domain.vertices().xs, domain.vertices().ys, domain.vertices().zs,
             2.0,  // occfac for Nspin=1
-            gpu_f_nloc.data(), gpu_stress_k.data(), gpu_stress_nl.data(), &gpu_energy_nl);
+            gpu_stress_k.data(), gpu_stress_nl.data());
 
         // Normalize stress by cell volume
         {

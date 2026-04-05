@@ -1053,13 +1053,13 @@ void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor
 }
 
 // ============================================================
-// GPU Force+Stress: delegate to GPUForce.cu functions
+// GPU Force/Stress: delegate to split GPUForce.cu functions
 // ============================================================
 
-void Hamiltonian::compute_force_stress_gpu(
+void Hamiltonian::compute_nonlocal_force_gpu(
     const double* d_psi, const double* h_occ, int Nband,
     double occfac,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl) const
+    double* h_f_nloc, double* h_energy_nl) const
 {
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
     if (!gs) return;
@@ -1067,13 +1067,45 @@ void Hamiltonian::compute_force_stress_gpu(
     auto& gv = gs->gpu_vnl;
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
-    // Upload occupations to device
     double* d_occ = nullptr;
     CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
     CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
                           cudaMemcpyHostToDevice, stream));
 
-    gpu::compute_force_stress_gpu(
+    gpu::compute_nonlocal_force_gpu(
+        d_psi, d_occ,
+        gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
+        gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
+        gv.d_IP_displ, gv.d_Gamma,
+        gv.n_influence, gv.total_phys_nproj,
+        gv.max_ndc, gv.max_nproj,
+        gs->n_phys_atoms, gs->h_IP_displ_phys.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV, occfac,
+        h_f_nloc, h_energy_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void Hamiltonian::compute_kinetic_nonlocal_stress_gpu(
+    const double* d_psi, const double* h_occ, int Nband,
+    double occfac,
+    double* h_stress_k, double* h_stress_nl) const
+{
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs) return;
+
+    auto& gv = gs->gpu_vnl;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_kinetic_nonlocal_stress_gpu(
         d_psi, d_occ,
         gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
         gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
@@ -1085,17 +1117,17 @@ void Hamiltonian::compute_force_stress_gpu(
         gs->dV, gs->dx, gs->dy, gs->dz,
         gs->xs, gs->ys, gs->zs,
         occfac,
-        h_f_nloc, h_stress_k, h_stress_nl, h_energy_nl,
+        h_stress_k, h_stress_nl,
         stream);
 
     cudaFreeAsync(d_occ, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
-void Hamiltonian::compute_force_stress_kpt_gpu(
+void Hamiltonian::compute_nonlocal_force_kpt_gpu(
     const void* d_psi_z, const double* h_occ, int Nband,
     double spn_fac_wk,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl) const
+    double* h_f_nloc, double* h_energy_nl) const
 {
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
     if (!gs) return;
@@ -1103,13 +1135,48 @@ void Hamiltonian::compute_force_stress_kpt_gpu(
     auto& gv = gs->gpu_vnl;
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
-    // Upload occupations to device
     double* d_occ = nullptr;
     CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
     CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
                           cudaMemcpyHostToDevice, stream));
 
-    gpu::compute_force_stress_kpt_gpu(
+    gpu::compute_nonlocal_force_kpt_gpu(
+        static_cast<const cuDoubleComplex*>(d_psi_z), d_occ,
+        gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
+        gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
+        gv.d_IP_displ, gv.d_Gamma,
+        gs->d_bloch_fac,
+        gv.n_influence, gv.total_phys_nproj,
+        gv.max_ndc, gv.max_nproj,
+        gs->n_phys_atoms, gs->h_IP_displ_phys.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV,
+        gs->kxLx, gs->kyLy, gs->kzLz,
+        spn_fac_wk,
+        h_f_nloc, h_energy_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void Hamiltonian::compute_kinetic_nonlocal_stress_kpt_gpu(
+    const void* d_psi_z, const double* h_occ, int Nband,
+    double spn_fac_wk,
+    double* h_stress_k, double* h_stress_nl) const
+{
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs) return;
+
+    auto& gv = gs->gpu_vnl;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_kinetic_nonlocal_stress_kpt_gpu(
         static_cast<const cuDoubleComplex*>(d_psi_z), d_occ,
         gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
         gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
@@ -1123,7 +1190,7 @@ void Hamiltonian::compute_force_stress_kpt_gpu(
         gs->xs, gs->ys, gs->zs,
         gs->kxLx, gs->kyLy, gs->kzLz,
         spn_fac_wk,
-        h_f_nloc, h_stress_k, h_stress_nl, h_energy_nl,
+        h_stress_k, h_stress_nl,
         stream);
 
     cudaFreeAsync(d_occ, stream);

@@ -330,17 +330,23 @@ void SCF::compute_gpu_force_stress(const Wavefunction& wfn) {
 
                 double spn_fac_wk = occfac * 2.0 * wk;
 
-                // Hamiltonian method handles occ upload to device internally
-                hamiltonian_->compute_force_stress_kpt_gpu(
+                hamiltonian_->compute_nonlocal_force_kpt_gpu(
                     eigsolver_.device_psi_z(s, k), h_occ, Nband_loc,
                     spn_fac_wk,
-                    h_f_tmp.data(), h_sk_tmp.data(), h_snl_tmp.data(), &h_enl_tmp);
+                    h_f_tmp.data(), &h_enl_tmp);
+                hamiltonian_->compute_kinetic_nonlocal_stress_kpt_gpu(
+                    eigsolver_.device_psi_z(s, k), h_occ, Nband_loc,
+                    spn_fac_wk,
+                    h_sk_tmp.data(), h_snl_tmp.data());
             } else {
-                // Gamma-point: Hamiltonian method handles occ upload internally
-                hamiltonian_->compute_force_stress_gpu(
+                hamiltonian_->compute_nonlocal_force_gpu(
                     eigsolver_.device_psi_real(s, k), h_occ, Nband_loc,
                     occfac,
-                    h_f_tmp.data(), h_sk_tmp.data(), h_snl_tmp.data(), &h_enl_tmp);
+                    h_f_tmp.data(), &h_enl_tmp);
+                hamiltonian_->compute_kinetic_nonlocal_stress_gpu(
+                    eigsolver_.device_psi_real(s, k), h_occ, Nband_loc,
+                    occfac,
+                    h_sk_tmp.data(), h_snl_tmp.data());
             }
 
             // Accumulate across (spin, kpt)
