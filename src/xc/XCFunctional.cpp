@@ -13,6 +13,18 @@
 
 namespace lynx {
 
+// When libxc is built with CUDA, xc_func_init() defaults to XC_FLAGS_ON_DEVICE
+// which rejects host pointers.  Force host mode for the CPU evaluation path.
+#ifdef USE_CUDA
+static inline int xc_func_init_host(xc_func_type* p, int functional, int nspin) {
+    return xc_func_init_flags(p, functional, nspin, XC_FLAGS_ON_HOST);
+}
+#else
+static inline int xc_func_init_host(xc_func_type* p, int functional, int nspin) {
+    return xc_func_init(p, functional, nspin);
+}
+#endif
+
 #ifndef USE_CUDA
 XCFunctional::~XCFunctional() = default;
 #endif
@@ -53,8 +65,8 @@ void XCFunctional::evaluate_cpu(const double* rho, double* Vxc, double* exc, int
     get_func_ids(xc_id, cc_id);
 
     xc_func_type func_x, func_c;
-    xc_func_init(&func_x, xc_id, XC_UNPOLARIZED);
-    xc_func_init(&func_c, cc_id, XC_UNPOLARIZED);
+    xc_func_init_host(&func_x, xc_id, XC_UNPOLARIZED);
+    xc_func_init_host(&func_c, cc_id, XC_UNPOLARIZED);
 
     size_t np = static_cast<size_t>(Nd_d);
 
@@ -112,8 +124,8 @@ void XCFunctional::evaluate_cpu(const double* rho, double* Vxc, double* exc, int
             int np_t = end - start;
             if (np_t > 0) {
                 xc_func_type mx, mc;
-                xc_func_init(&mx, xc_id, XC_UNPOLARIZED);
-                xc_func_init(&mc, cc_id, XC_UNPOLARIZED);
+                xc_func_init_host(&mx, xc_id, XC_UNPOLARIZED);
+                xc_func_init_host(&mc, cc_id, XC_UNPOLARIZED);
                 xc_mgga_exc_vxc(&mx, np_t, &rho[start], &sigma[start], &lapl[start], &tau_in[start],
                                 &zk_x[start], &vrho_x[start], &vsigma_x[start], &vlapl_x[start], &vtau_x[start]);
                 xc_mgga_exc_vxc(&mc, np_t, &rho[start], &sigma[start], &lapl[start], &tau_in[start],
@@ -224,8 +236,8 @@ void XCFunctional::evaluate_cpu(const double* rho, double* Vxc, double* exc, int
             int np_t = end - start;
             if (np_t > 0) {
                 xc_func_type fx, fc;
-                xc_func_init(&fx, xc_id, XC_UNPOLARIZED);
-                xc_func_init(&fc, cc_id, XC_UNPOLARIZED);
+                xc_func_init_host(&fx, xc_id, XC_UNPOLARIZED);
+                xc_func_init_host(&fc, cc_id, XC_UNPOLARIZED);
                 xc_gga_exc_vxc(&fx, np_t, &rho[start], &sigma[start],
                                &zk_x[start], &vrho_x[start], &vsigma_x[start]);
                 xc_gga_exc_vxc(&fc, np_t, &rho[start], &sigma[start],
@@ -293,8 +305,8 @@ void XCFunctional::evaluate_cpu(const double* rho, double* Vxc, double* exc, int
             xc_func_end(&func_c);
             lda_x_id = XC_LDA_X;
             lda_c_id = XC_LDA_C_PW;
-            xc_func_init(&func_x, lda_x_id, XC_UNPOLARIZED);
-            xc_func_init(&func_c, lda_c_id, XC_UNPOLARIZED);
+            xc_func_init_host(&func_x, lda_x_id, XC_UNPOLARIZED);
+            xc_func_init_host(&func_c, lda_c_id, XC_UNPOLARIZED);
         }
 
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(Nd_d, 0.0);
@@ -310,8 +322,8 @@ void XCFunctional::evaluate_cpu(const double* rho, double* Vxc, double* exc, int
             int np_t = end - start;
             if (np_t > 0) {
                 xc_func_type fx, fc;
-                xc_func_init(&fx, lda_x_id, XC_UNPOLARIZED);
-                xc_func_init(&fc, lda_c_id, XC_UNPOLARIZED);
+                xc_func_init_host(&fx, lda_x_id, XC_UNPOLARIZED);
+                xc_func_init_host(&fc, lda_c_id, XC_UNPOLARIZED);
                 xc_lda_exc_vxc(&fx, np_t, &rho[start], &zk_x[start], &vrho_x[start]);
                 xc_lda_exc_vxc(&fc, np_t, &rho[start], &zk_c[start], &vrho_c[start]);
                 xc_func_end(&fx);
@@ -343,8 +355,8 @@ void XCFunctional::evaluate_spin_cpu(const double* rho, double* Vxc, double* exc
     get_func_ids(xc_id, cc_id);
 
     xc_func_type func_x, func_c;
-    xc_func_init(&func_x, xc_id, XC_POLARIZED);
-    xc_func_init(&func_c, cc_id, XC_POLARIZED);
+    xc_func_init_host(&func_x, xc_id, XC_POLARIZED);
+    xc_func_init_host(&func_c, cc_id, XC_POLARIZED);
 
     size_t np = static_cast<size_t>(Nd_d);
 
@@ -433,8 +445,8 @@ void XCFunctional::evaluate_spin_cpu(const double* rho, double* Vxc, double* exc
             int np_t = end - start;
             if (np_t > 0) {
                 xc_func_type mx, mc;
-                xc_func_init(&mx, xc_id, XC_POLARIZED);
-                xc_func_init(&mc, cc_id, XC_POLARIZED);
+                xc_func_init_host(&mx, xc_id, XC_POLARIZED);
+                xc_func_init_host(&mc, cc_id, XC_POLARIZED);
                 xc_mgga_exc_vxc(&mx, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
                                 &lapl_libxc[2*start], &tau_libxc[2*start],
                                 &zk_x[start], &vrho_x[2*start], &vsigma_x[3*start],
@@ -586,8 +598,8 @@ void XCFunctional::evaluate_spin_cpu(const double* rho, double* Vxc, double* exc
             int np_t = end - start;
             if (np_t > 0) {
                 xc_func_type fx, fc;
-                xc_func_init(&fx, xc_id, XC_POLARIZED);
-                xc_func_init(&fc, cc_id, XC_POLARIZED);
+                xc_func_init_host(&fx, xc_id, XC_POLARIZED);
+                xc_func_init_host(&fc, cc_id, XC_POLARIZED);
                 xc_gga_exc_vxc(&fx, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
                                &zk_x[start], &vrho_x[2*start], &vsigma_x[3*start]);
                 xc_gga_exc_vxc(&fc, np_t, &rho_libxc[2*start], &sigma_libxc[3*start],
@@ -677,8 +689,8 @@ void XCFunctional::evaluate_spin_cpu(const double* rho, double* Vxc, double* exc
             xc_func_end(&func_c);
             lda_x_id = XC_LDA_X;
             lda_c_id = XC_LDA_C_PW;
-            xc_func_init(&func_x, lda_x_id, XC_POLARIZED);
-            xc_func_init(&func_c, lda_c_id, XC_POLARIZED);
+            xc_func_init_host(&func_x, lda_x_id, XC_POLARIZED);
+            xc_func_init_host(&func_c, lda_c_id, XC_POLARIZED);
         }
 
         std::vector<double> zk_x(Nd_d, 0.0), vrho_x(2*Nd_d, 0.0);
@@ -694,8 +706,8 @@ void XCFunctional::evaluate_spin_cpu(const double* rho, double* Vxc, double* exc
             int np_t = end - start;
             if (np_t > 0) {
                 xc_func_type fx, fc;
-                xc_func_init(&fx, lda_x_id, XC_POLARIZED);
-                xc_func_init(&fc, lda_c_id, XC_POLARIZED);
+                xc_func_init_host(&fx, lda_x_id, XC_POLARIZED);
+                xc_func_init_host(&fc, lda_c_id, XC_POLARIZED);
                 xc_lda_exc_vxc(&fx, np_t, &rho_libxc[2*start], &zk_x[start], &vrho_x[2*start]);
                 xc_lda_exc_vxc(&fc, np_t, &rho_libxc[2*start], &zk_c[start], &vrho_c[2*start]);
                 xc_func_end(&fx);

@@ -17,6 +17,8 @@
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 
+#include <xc.h>
+#include <xc_funcs.h>
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 #include "core/constants.hpp"
@@ -109,8 +111,7 @@ void gradient_gpu(
     int nx_ex, int ny_ex,
     int direction, int ncol, cudaStream_t stream = 0);
 
-void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
-                  double* d_exc, double* d_vxc, double* d_v2xc, int N, cudaStream_t stream = 0);
+// gga_pbe_gpu removed — replaced by libxc CUDA device calls below
 
 void compute_force_stress_gpu(
     const double* d_psi, const double* d_occ,
@@ -585,8 +586,30 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
     // sigma = |∇ρ|²
     sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
-    // Fused PBE kernel: (rho_xc, sigma) → (exc, Vxc, v2xc)
-    lynx::gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+    // PBE via libxc (device pointers)
+    {
+        xc_func_type fx, fc;
+        xc_func_init_flags(&fx, XC_GGA_X_PBE, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+        xc_func_init_flags(&fc, XC_GGA_C_PBE, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+        auto& sp = ctx.scratch_pool;
+        size_t sp_cp = sp.checkpoint();
+        double* d_exc_c  = sp.alloc<double>(Nd);
+        double* d_vrho_c = sp.alloc<double>(Nd);
+        double* d_vsig_x = sp.alloc<double>(Nd);
+        double* d_vsig_c = sp.alloc<double>(Nd);
+        xc_gga_exc_vxc(&fx, Nd, d_rho_xc, d_sigma, d_exc, d_Vxc, d_vsig_x);
+        xc_gga_exc_vxc(&fc, Nd, d_rho_xc, d_sigma, d_exc_c, d_vrho_c, d_vsig_c);
+        double one = 1.0, two = 2.0;
+        cublasDaxpy(ctx.cublas, Nd, &one, d_exc_c, 1, d_exc, 1);
+        cublasDaxpy(ctx.cublas, Nd, &one, d_vrho_c, 1, d_Vxc, 1);
+        cublasDaxpy(ctx.cublas, Nd, &one, d_vsig_c, 1, d_vsig_x, 1);
+        // d_v2xc = 2 * (vsig_x + vsig_c)
+        CUDA_CHECK(cudaMemcpy(d_v2xc, d_vsig_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+        cublasDscal(ctx.cublas, Nd, &two, d_v2xc, 1);
+        sp.restore(sp_cp);
+        xc_func_end(&fx);
+        xc_func_end(&fc);
+    }
 
     // Divergence correction: Vxc += -div(v2xc * ∇ρ)
     // Scale gradients by v2xc (in place)
