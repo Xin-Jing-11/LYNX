@@ -85,6 +85,10 @@ public:
     // Device pointer accessors (for GPU-resident mGGA pipeline)
     double* d_tau();
     double* d_vtau();
+
+    // GPU kernel wrapper: halo + gradient + tau accumulate for one band (defined in .cu)
+    void gradient_accumulate_tau_gpu(const double* d_psi_col, double* d_tau_s,
+                                     double weight, int Nd);
 #endif
 
     // Access tau data

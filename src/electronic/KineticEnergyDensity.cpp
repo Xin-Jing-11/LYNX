@@ -176,9 +176,143 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
 }
 
 // ============================================================
-// Device-dispatching method (non-CUDA build: always CPU)
+// Device-dispatching compute()
 // ============================================================
-#ifndef USE_CUDA
+#ifdef USE_CUDA
+
+#include <cuda_runtime.h>
+#include <mpi.h>
+#include "core/gpu_common.cuh"
+#include "core/GPUContext.cuh"
+
+void KineticEnergyDensity::compute(const LynxContext& ctx,
+                                    const Wavefunction& wfn,
+                                    const std::vector<double>& kpt_weights,
+                                    Device dev)
+{
+    if (dev == Device::CPU) {
+        compute(ctx, wfn, kpt_weights);
+        return;
+    }
+
+    if (!gpu_state_raw_) {
+        compute(ctx, wfn, kpt_weights);
+        return;
+    }
+
+    int Nd = ctx.domain().Nd_d();
+    int Nspin_global = ctx.Nspin();
+    int Nspin_local = ctx.Nspin_local();
+    int spin_start = ctx.spin_start();
+    int kpt_start = ctx.kpt_start();
+    int band_start = ctx.band_start();
+    int Nband = wfn.Nband();
+    int Nkpts = wfn.Nkpts();
+    bool is_kpt = !ctx.kpoints().is_gamma_only();
+
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    // Zero tau on device
+    int tau_size = (Nspin_global >= 2) ? 3 * Nd : Nd;
+    allocate(Nd, Nspin_global);
+
+    // Access d_tau from opaque state
+    double* d_tau_base = d_tau();
+    CUDA_CHECK(cudaMemsetAsync(d_tau_base, 0, tau_size * sizeof(double), stream));
+
+    for (int s = 0; s < Nspin_local; ++s) {
+        int s_glob = spin_start + s;
+        double* d_tau_s = d_tau_base + s_glob * Nd;
+
+        for (int k = 0; k < Nkpts; ++k) {
+            double wk = kpt_weights[kpt_start + k];
+            const auto& occ = wfn.occupations(s, k);
+
+            if (is_kpt) {
+                // Complex k-point: fall back to CPU (complex halo+gradient not wired for tau)
+                compute(ctx, wfn, kpt_weights);
+                return;
+            }
+
+            // Real gamma-point path
+            const auto& psi = wfn.psi(s, k);
+
+            for (int n = 0; n < Nband; ++n) {
+                double fn = occ(band_start + n);
+                if (fn < 1e-16) continue;
+                double g_nk = wk * fn;
+
+                // Upload psi column to a temp device buffer
+                auto& sp = gpu::GPUContext::instance().scratch_pool;
+                size_t sp_cp = sp.checkpoint();
+                double* d_psi_col = sp.alloc<double>(Nd);
+                const double* col = psi.col(n);
+                CUDA_CHECK(cudaMemcpyAsync(d_psi_col, col, Nd * sizeof(double),
+                                           cudaMemcpyHostToDevice, stream));
+
+                // Per-band gradient + tau accumulation via _gpu() wrapper
+                gradient_accumulate_tau_gpu(d_psi_col, d_tau_s, g_nk, Nd);
+
+                sp.restore(sp_cp);
+            }
+        }
+    }
+
+    // Download tau to host
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaMemcpyAsync(tau_.data(), d_tau_base, tau_size * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // MPI reductions on host (same as CPU path)
+    const auto& bandcomm = ctx.scf_bandcomm();
+    const auto& kptcomm = ctx.kpt_bridge();
+    const auto& spincomm = ctx.spin_bridge();
+
+    if (!bandcomm.is_null() && bandcomm.size() > 1) {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start + s;
+            bandcomm.allreduce_sum(tau_.data() + s_glob * Nd, Nd);
+        }
+    }
+
+    if (!kptcomm.is_null() && kptcomm.size() > 1) {
+        for (int s = 0; s < Nspin_local; ++s) {
+            int s_glob = spin_start + s;
+            kptcomm.allreduce_sum(tau_.data() + s_glob * Nd, Nd);
+        }
+    }
+
+    if (!spincomm.is_null() && spincomm.size() > 1 && Nspin_global == 2) {
+        int my_spin = spin_start;
+        int other_spin = 1 - my_spin;
+        int partner = (spincomm.rank() == 0) ? 1 : 0;
+        MPI_Sendrecv(tau_.data() + my_spin * Nd, Nd, MPI_DOUBLE, partner, 0,
+                     tau_.data() + other_spin * Nd, Nd, MPI_DOUBLE, partner, 0,
+                     spincomm.comm(), MPI_STATUS_IGNORE);
+    }
+
+    // Spin finalize: 0.5 factor + total
+    if (Nspin_global == 2) {
+        double* tau_up = tau_.data();
+        double* tau_dn = tau_.data() + Nd;
+        double* tau_tot = tau_.data() + 2 * Nd;
+        for (int i = 0; i < Nd; ++i) {
+            tau_up[i] *= 0.5;
+            tau_dn[i] *= 0.5;
+            tau_tot[i] = tau_up[i] + tau_dn[i];
+        }
+    }
+
+    // Re-upload final tau to device
+    CUDA_CHECK(cudaMemcpyAsync(d_tau_base, tau_.data(), tau_size * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
+
+    valid_ = true;
+}
+
+#else // !USE_CUDA
+
 void KineticEnergyDensity::compute(const LynxContext& ctx,
                                     const Wavefunction& wfn,
                                     const std::vector<double>& kpt_weights,
@@ -186,6 +320,7 @@ void KineticEnergyDensity::compute(const LynxContext& ctx,
 {
     compute(ctx, wfn, kpt_weights);
 }
-#endif // !USE_CUDA
+
+#endif // USE_CUDA
 
 } // namespace lynx
