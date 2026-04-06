@@ -6,10 +6,17 @@ option(USE_CUDA "Enable CUDA" OFF)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_PYTHON "Build Python bindings (pybind11)" OFF)
 
-# Set CUDA architectures before project() so compiler identification uses valid arch
+# Set CUDA architectures before project() so compiler identification uses valid arch.
+# Use "native" to auto-detect the GPU on the build machine (CMake 3.24+),
+# or fall back to a safe baseline that works across CUDA 12.x and 13.x.
 if(USE_CUDA)
     if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "75;80;86;89;90;100;120")
+        set(CMAKE_CUDA_ARCHITECTURES "native")
+    endif()
+    # Prefer /usr/local/cuda/bin/nvcc when no explicit compiler is set,
+    # because /usr/bin/nvcc may be an older system-installed version.
+    if(NOT DEFINED CMAKE_CUDA_COMPILER AND EXISTS "/usr/local/cuda/bin/nvcc")
+        set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
     endif()
     project(LYNX LANGUAGES CXX CUDA)
     set(CMAKE_CUDA_STANDARD 17)
