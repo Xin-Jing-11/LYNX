@@ -65,7 +65,8 @@ public:
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
-    // GPU-resident compute: reads psi and occ from device pointers directly.
+    // Legacy GPU compute: uploads psi from host — for testing only.
+    // Production code must use compute_from_device_ptrs (psi stays GPU-resident).
     void compute_from_device(const LynxContext& ctx,
                              const Wavefunction& wfn,
                              const std::vector<double>& kpt_weights,
@@ -82,7 +83,8 @@ public:
         const std::vector<const double*>& d_psi_real_ptrs,  // [s * Nkpts + k] for gamma
         const std::vector<const void*>& d_psi_z_ptrs);      // [s * Nkpts + k] for kpt
 
-    // GPU compute paths (defined in .cu)
+    // Legacy GPU compute paths — upload psi from host (for testing only).
+    // Production SCF uses compute_from_device_ptrs instead.
     void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                      const std::vector<double>& kpt_weights);
     void compute_spinor_gpu(const LynxContext& ctx, const Wavefunction& wfn,

@@ -82,10 +82,14 @@ public:
     double* gpu_eigvals();
     double* gpu_Veff();
 
-    // Upload/download between host and persistent device buffers
+    // Download eigenvalues from device
+    void download_eigvals(double* h_eigvals, int Nband);
+
+    // Legacy psi transfer methods — for testing only.
+    // Production code must use solve_resident / compute_from_device_ptrs.
+    // Psi must stay GPU-resident in the SCF loop (see GPU Data Residency Rules).
     void upload_psi_to_device(const double* h_psi, int Nd, int Nband);
     void upload_psi_z_to_device(const Complex* h_psi, int Nd, int Nband);
-    void download_eigvals(double* h_eigvals, int Nband);
     void download_psi(double* h_psi, int Nd, int Nband);
     void download_psi_z(Complex* h_psi, int Nd, int Nband);
     void upload_Veff(const double* h_Veff, int Nd);

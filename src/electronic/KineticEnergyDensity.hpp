@@ -81,7 +81,8 @@ public:
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
-    // GPU compute path (defined in .cu)
+    // Legacy GPU compute — uploads psi from host (for testing only).
+    // Production SCF uses compute_gpu_from_device instead.
     void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                      const std::vector<double>& kpt_weights);
 
