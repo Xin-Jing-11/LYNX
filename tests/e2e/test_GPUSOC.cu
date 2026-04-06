@@ -181,8 +181,12 @@ int main(int argc, char** argv) {
     double Jacbdet = grid.lattice().jacobian() / (L.x * L.y * L.z);
     double cell_measure = Jacbdet * L.x * L.y * L.z;
     stress.set_cell_measure(cell_measure);
-    stress.compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl,
-                                     kpt_weights);
+    MPIComm kptcomm;   // MPI_COMM_SELF
+    MPIComm spincomm;  // MPI_COMM_SELF
+    stress.compute_nonlocal_kinetic_cpu(wfn, crystal, nloc_influence, vnl,
+                                        gradient, halo, domain, grid,
+                                        kpt_weights, bandcomm, kptcomm, spincomm,
+                                        &kpoints, 0, 0);
     const auto& s_soc = stress.soc_stress();
     printf("  SOC stress: [%.6e, %.6e, %.6e, %.6e, %.6e, %.6e]\n",
            s_soc[0], s_soc[1], s_soc[2], s_soc[3], s_soc[4], s_soc[5]);
