@@ -323,11 +323,8 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
                     const_cast<NonlocalProjector*>(vnl_)->set_kpoint(kpt);
                     hamiltonian_->set_vnl_kpt(vnl_);
                 }
-#ifdef USE_CUDA
-                if (dev_ == Device::GPU)
-                    hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
-#endif
 
+                hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
                 eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
                                             Nd_d, Nband_loc,
                                             state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
