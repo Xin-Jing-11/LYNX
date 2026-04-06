@@ -162,52 +162,33 @@ __global__ void scale_inplace_kernel(double* v, double scale, int N) {
 // Public API: GPU CheFSI
 // ============================================================
 
-// Chebyshev filter: all data on GPU, returns filtered Y in d_Y
-// H->apply() is called directly (no callback).
-void chebyshev_filter_gpu(
-    const double* d_X,      // (Nd, Ns) input orbitals
-    double* d_Y,            // (Nd, Ns) output filtered orbitals
-    double* d_Xold,         // (Nd, Ns) workspace
-    double* d_Xnew,         // (Nd, Ns) workspace
-    double* d_HX,           // (Nd, Ns) workspace for H*psi
-    const double* d_Veff,   // (Nd) effective potential
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int degree,
-    const Hamiltonian* H,
+// Chebyshev filter init step: Y = (HX - c*X) * scale, Xold = X
+void chefsi_init_real_gpu(
+    const double* d_HX, const double* d_X,
+    double* d_Y, double* d_Xold,
+    double scale, double c, int total,
     cudaStream_t stream)
 {
-    double e = (eigval_max - lambda_cutoff) / 2.0;
-    double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma_1 = e / (eigval_min - c);
-    double sigma = sigma_1;
-
-    int total = Nd * Ns;
     int bs = 256;
     int grid = ceildiv(total, bs);
-
-    // Step 1: Y = (H*X - c*X) * (sigma/e)
-    H->apply(d_X, d_Veff, d_HX, Ns, 0.0);
-    double scale = sigma / e;
     chefsi_init_kernel<<<grid, bs, 0, stream>>>(d_HX, d_X, d_Y, scale, c, total);
-
-    // Xold = X
     CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_X, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+}
 
-    // Steps 2..degree
-    for (int k = 2; k <= degree; ++k) {
-        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
-        double gamma = 2.0 * sigma_new / e;
-        double ss = sigma * sigma_new;
-
-        H->apply(d_Y, d_Veff, d_HX, Ns, 0.0);
-        chefsi_step_kernel<<<grid, bs, 0, stream>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
-
-        // Rotate: Xold <- Y, Y <- Xnew (pointer swap via memcpy)
-        CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_Y, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(d_Y, d_Xnew, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
-        sigma = sigma_new;
-    }
+// Chebyshev filter iteration step: Xnew = gamma*(HX - c*Y) - ss*Xold, rotate
+void chefsi_step_real_gpu(
+    const double* d_HX, const double* d_Y,
+    const double* d_Xold, double* d_Xnew,
+    double* d_Y_out, double* d_Xold_out,
+    double gamma, double c, double ss, int total,
+    cudaStream_t stream)
+{
+    int bs = 256;
+    int grid = ceildiv(total, bs);
+    chefsi_step_kernel<<<grid, bs, 0, stream>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
+    // Rotate: Xold <- Y, Y <- Xnew
+    CUDA_CHECK(cudaMemcpyAsync(d_Xold_out, d_Y, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_Y_out, d_Xnew, total * sizeof(double), cudaMemcpyDeviceToDevice, stream));
 }
 
 // Compute S = X^T * X * dV on GPU (uses custom dot kernel for N ≤ 200, cuBLAS otherwise)
@@ -435,59 +416,32 @@ __global__ void compute_density_z_kernel(
 // ============================================================
 // Complex Chebyshev filter (host function)
 // ============================================================
-void chebyshev_filter_z_gpu(
-    const cuDoubleComplex* d_X,
-    cuDoubleComplex* d_Y,
-    cuDoubleComplex* d_Xold,
-    cuDoubleComplex* d_Xnew,
-    cuDoubleComplex* d_HX,
-    const double* d_Veff,
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int degree,
-    const Hamiltonian* H,
+// Complex Chebyshev filter init step
+void chefsi_init_z_gpu(
+    const cuDoubleComplex* d_HX, const cuDoubleComplex* d_X,
+    cuDoubleComplex* d_Y, cuDoubleComplex* d_Xold,
+    double scale, double c, int total,
     cudaStream_t stream)
 {
-    double e = (eigval_max - lambda_cutoff) / 2.0;
-    double c = (eigval_max + lambda_cutoff) / 2.0;
-    double sigma_1 = e / (eigval_min - c);
-    double sigma = sigma_1;
-
-    int total = Nd * Ns;
     int bs = 256;
     int grid = ceildiv(total, bs);
-
-    // Step 1: Y = (H*X - c*X) * (sigma/e)
-    H->apply_kpt(
-        reinterpret_cast<const std::complex<double>*>(d_X),
-        d_Veff,
-        reinterpret_cast<std::complex<double>*>(d_HX),
-        Ns, {0,0,0}, {0,0,0}, 0.0);
-
-    double scale = sigma / e;
     chefsi_init_kernel_z<<<grid, bs, 0, stream>>>(d_Y, d_HX, d_X, scale, c, total);
-
-    // Xold = X
     CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_X, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
+}
 
-    // Steps 2..degree
-    for (int k = 2; k <= degree; ++k) {
-        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
-        double gamma = 2.0 * sigma_new / e;
-        double ss = sigma * sigma_new;
-
-        H->apply_kpt(
-            reinterpret_cast<const std::complex<double>*>(d_Y),
-            d_Veff,
-            reinterpret_cast<std::complex<double>*>(d_HX),
-            Ns, {0,0,0}, {0,0,0}, 0.0);
-        chefsi_step_kernel_z<<<grid, bs, 0, stream>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
-
-        // Rotate: Xold <- Y, Y <- Xnew
-        CUDA_CHECK(cudaMemcpyAsync(d_Xold, d_Y, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync(d_Y, d_Xnew, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
-        sigma = sigma_new;
-    }
+// Complex Chebyshev filter iteration step
+void chefsi_step_z_gpu(
+    const cuDoubleComplex* d_HX, const cuDoubleComplex* d_Y,
+    const cuDoubleComplex* d_Xold, cuDoubleComplex* d_Xnew,
+    cuDoubleComplex* d_Y_out, cuDoubleComplex* d_Xold_out,
+    double gamma, double c, double ss, int total,
+    cudaStream_t stream)
+{
+    int bs = 256;
+    int grid = ceildiv(total, bs);
+    chefsi_step_kernel_z<<<grid, bs, 0, stream>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
+    CUDA_CHECK(cudaMemcpyAsync(d_Xold_out, d_Y, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_Y_out, d_Xnew, total * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice, stream));
 }
 
 // ============================================================
@@ -805,10 +759,29 @@ void EigenSolver::chebyshev_filter_gpu(int Nd_d, int Nband,
                                         int cheb_degree) {
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    gpu::chebyshev_filter_gpu(gs->d_psi, gs->d_Y, gs->d_Xold, gs->d_Xnew, gs->d_HX,
-                               gs->d_Veff, Nd_d, Nband,
-                               lambda_cutoff, eigval_min, eigval_max,
-                               cheb_degree, gs->H, stream);
+
+    double e = (eigval_max - lambda_cutoff) / 2.0;
+    double c = (eigval_max + lambda_cutoff) / 2.0;
+    double sigma_1 = e / (eigval_min - c);
+    double sigma = sigma_1;
+    int total = Nd_d * Nband;
+
+    // Step 1: HX = H*psi, Y = (HX - c*X) * (sigma/e), Xold = X
+    gs->H->apply(gs->d_psi, gs->d_Veff, gs->d_HX, Nband, 0.0);
+    gpu::chefsi_init_real_gpu(gs->d_HX, gs->d_psi, gs->d_Y, gs->d_Xold,
+                              sigma / e, c, total, stream);
+
+    // Steps 2..degree
+    for (int k = 2; k <= cheb_degree; ++k) {
+        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
+        double gamma = 2.0 * sigma_new / e;
+        double ss = sigma * sigma_new;
+
+        gs->H->apply(gs->d_Y, gs->d_Veff, gs->d_HX, Nband, 0.0);
+        gpu::chefsi_step_real_gpu(gs->d_HX, gs->d_Y, gs->d_Xold, gs->d_Xnew,
+                                  gs->d_Y, gs->d_Xold, gamma, c, ss, total, stream);
+        sigma = sigma_new;
+    }
 }
 
 void EigenSolver::orthogonalize_gpu(int Nd_d, int Nband) {
@@ -838,10 +811,37 @@ void EigenSolver::chebyshev_filter_kpt_gpu(int Nd_d, int Nband,
                                             int cheb_degree) {
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    gpu::chebyshev_filter_z_gpu(gs->d_psi_z, gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
-                                 gs->d_Veff, Nd_d, Nband,
-                                 lambda_cutoff, eigval_min, eigval_max,
-                                 cheb_degree, gs->H, stream);
+
+    double e = (eigval_max - lambda_cutoff) / 2.0;
+    double c = (eigval_max + lambda_cutoff) / 2.0;
+    double sigma_1 = e / (eigval_min - c);
+    double sigma = sigma_1;
+    int total = Nd_d * Nband;
+
+    // Step 1: HX = H*psi_z, Y = (HX - c*X) * (sigma/e), Xold = X
+    gs->H->apply_kpt(
+        reinterpret_cast<const std::complex<double>*>(gs->d_psi_z),
+        gs->d_Veff,
+        reinterpret_cast<std::complex<double>*>(gs->d_HX_z),
+        Nband, {0,0,0}, {0,0,0}, 0.0);
+    gpu::chefsi_init_z_gpu(gs->d_HX_z, gs->d_psi_z, gs->d_Y_z, gs->d_Xold_z,
+                            sigma / e, c, total, stream);
+
+    // Steps 2..degree
+    for (int k = 2; k <= cheb_degree; ++k) {
+        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
+        double gamma = 2.0 * sigma_new / e;
+        double ss = sigma * sigma_new;
+
+        gs->H->apply_kpt(
+            reinterpret_cast<const std::complex<double>*>(gs->d_Y_z),
+            gs->d_Veff,
+            reinterpret_cast<std::complex<double>*>(gs->d_HX_z),
+            Nband, {0,0,0}, {0,0,0}, 0.0);
+        gpu::chefsi_step_z_gpu(gs->d_HX_z, gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z,
+                                gs->d_Y_z, gs->d_Xold_z, gamma, c, ss, total, stream);
+        sigma = sigma_new;
+    }
 }
 
 void EigenSolver::orthogonalize_kpt_gpu(int Nd_d, int Nband) {
@@ -877,50 +877,18 @@ double* EigenSolver::gpu_Hs() {
 }
 
 // ============================================================
-// GPU-resident solve: algorithm lives in .cpp (solve_resident),
-// called through _gpu() sub-step methods.
+// GPU transfer helpers (called from solve_resident in .cpp)
 // ============================================================
-void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
-                                  int Nd_d, int Nband,
-                                  double lambda_cutoff, double eigval_min, double eigval_max,
-                                  int cheb_degree) {
+void EigenSolver::upload_Veff_sync(const double* h_Veff, int Nd) {
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-
-    // Upload Veff only (psi stays resident on device)
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
-
-    // CheFSI sub-steps via _gpu() class methods
-    chebyshev_filter_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
-    orthogonalize_gpu(Nd_d, Nband);
-    project_and_diag_gpu(Nd_d, Nband);
-    subspace_rotation_gpu(Nd_d, Nband);
-
-    // Download only eigenvalues (tiny: Nband doubles)
-    CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
-void EigenSolver::solve_kpt_resident(double* h_eigvals, const double* h_Veff,
-                                      int Nd_d, int Nband,
-                                      double lambda_cutoff, double eigval_min, double eigval_max,
-                                      int cheb_degree) {
+void EigenSolver::download_eigvals_sync(double* h_eigvals, int Nband) {
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-
-    // Upload Veff only (psi_z stays resident on device)
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
-                               cudaMemcpyHostToDevice, stream));
-
-    // CheFSI sub-steps via _gpu() class methods
-    chebyshev_filter_kpt_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
-    orthogonalize_kpt_gpu(Nd_d, Nband);
-    project_and_diag_kpt_gpu(Nd_d, Nband);
-    subspace_rotation_kpt_gpu(Nd_d, Nband);
-
-    // Download only eigenvalues (tiny: Nband doubles)
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
                                cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));

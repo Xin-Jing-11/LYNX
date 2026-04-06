@@ -188,6 +188,47 @@ void EigenSolver::cleanup_blacs() {
     blacs_setup_ = false;
 }
 
+// ============================================================
+// GPU-resident solve: algorithm in .cpp, calls _gpu() sub-steps.
+// ============================================================
+#ifdef USE_CUDA
+
+void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
+                                  int Nd_d, int Nband,
+                                  double lambda_cutoff, double eigval_min, double eigval_max,
+                                  int cheb_degree) {
+    // Upload Veff only (psi stays resident on device)
+    upload_Veff_sync(h_Veff, Nd_d);
+
+    // CheFSI sub-steps via _gpu() class methods
+    chebyshev_filter_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_gpu(Nd_d, Nband);
+    project_and_diag_gpu(Nd_d, Nband);
+    subspace_rotation_gpu(Nd_d, Nband);
+
+    // Download only eigenvalues (tiny: Nband doubles)
+    download_eigvals_sync(h_eigvals, Nband);
+}
+
+void EigenSolver::solve_kpt_resident(double* h_eigvals, const double* h_Veff,
+                                      int Nd_d, int Nband,
+                                      double lambda_cutoff, double eigval_min, double eigval_max,
+                                      int cheb_degree) {
+    // Upload Veff only (psi_z stays resident on device)
+    upload_Veff_sync(h_Veff, Nd_d);
+
+    // CheFSI sub-steps via _gpu() class methods
+    chebyshev_filter_kpt_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_kpt_gpu(Nd_d, Nband);
+    project_and_diag_kpt_gpu(Nd_d, Nband);
+    subspace_rotation_kpt_gpu(Nd_d, Nband);
+
+    // Download only eigenvalues (tiny: Nband doubles)
+    download_eigvals_sync(h_eigvals, Nband);
+}
+
+#endif // USE_CUDA
+
 void EigenSolver::orthogonalize_scalapack(double* X, int Nd_d, int Nband_loc, double dV) {
     // Cholesky QR with ScaLAPACK:
     // 1. S = X^T * X * dV (distributed: each proc has Nd_d x Nband_loc block)

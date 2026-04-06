@@ -92,6 +92,7 @@ public:
 
     // GPU-resident solve: psi is already on device, only upload Veff and
     // download eigvals. psi stays on device after the call.
+    // Algorithm lives in EigenSolver.cpp, calls _gpu() sub-steps.
     void solve_resident(double* h_eigvals, const double* h_Veff,
                         int Nd_d, int Nband,
                         double lambda_cutoff, double eigval_min, double eigval_max,
@@ -102,6 +103,10 @@ public:
                             int Nd_d, int Nband,
                             double lambda_cutoff, double eigval_min, double eigval_max,
                             int cheb_degree);
+
+    // GPU transfer helpers (defined in EigenSolver.cu, called from .cpp algorithm)
+    void upload_Veff_sync(const double* h_Veff, int Nd);
+    void download_eigvals_sync(double* h_eigvals, int Nband);
 
     // --- GPU sub-step methods (defined in EigenSolver.cu) ---
     // Real (gamma-point) GPU sub-steps
