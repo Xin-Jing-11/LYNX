@@ -46,17 +46,16 @@ struct GPUDensityState {
 };
 
 void ElectronDensity::setup_gpu(const LynxContext& ctx, int Nspin) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUDensityState();
-    auto* gs = static_cast<GPUDensityState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUDensityState());
+    auto* gs = gpu_state_.as<GPUDensityState>();
 
     gs->Nd    = ctx.domain().Nd_d();
     gs->Nspin = Nspin;
 }
 
 void ElectronDensity::cleanup_gpu() {
-    delete static_cast<GPUDensityState*>(gpu_state_raw_);
-    gpu_state_raw_ = nullptr;
+    gpu_state_.reset();
 }
 
 ElectronDensity::~ElectronDensity() {

@@ -715,9 +715,9 @@ struct GPUEigenState {
 
 void EigenSolver::setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
                                    bool is_kpt, bool is_soc) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUEigenState();
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUEigenState());
+    auto* gs = gpu_state_.as<GPUEigenState>();
 
     gs->H = H_;
     gs->Nd = ctx.domain().Nd_d();
@@ -732,11 +732,9 @@ void EigenSolver::setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
 }
 
 void EigenSolver::cleanup_gpu() {
-    if (!gpu_state_raw_) return;
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
-    gs->free_buffers();
-    delete gs;
-    gpu_state_raw_ = nullptr;
+    if (!gpu_state_) return;
+    gpu_state_.as<GPUEigenState>()->free_buffers();
+    gpu_state_.reset();
 }
 
 EigenSolver::~EigenSolver() {
@@ -757,7 +755,7 @@ EigenSolver::~EigenSolver() {
 void EigenSolver::chebyshev_filter_gpu(int Nd_d, int Nband,
                                         double lambda_cutoff, double eigval_min, double eigval_max,
                                         int cheb_degree) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     double e = (eigval_max - lambda_cutoff) / 2.0;
@@ -785,18 +783,18 @@ void EigenSolver::chebyshev_filter_gpu(int Nd_d, int Nband,
 }
 
 void EigenSolver::orthogonalize_gpu(int Nd_d, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     gpu::orthogonalize_gpu(gs->d_Y, gs->d_Ms, Nd_d, Nband, gs->dV);
 }
 
 void EigenSolver::project_and_diag_gpu(int Nd_d, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     gpu::project_and_diag_gpu(gs->d_Y, gs->d_HX, gs->d_Hs, gs->d_eigvals,
                                gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
 }
 
 void EigenSolver::subspace_rotation_gpu(int Nd_d, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     gpu::rotate_orbitals_gpu(gs->d_Y, gs->d_Hs, gs->d_psi, Nd_d, Nband);
     // Copy Y back to psi
@@ -809,7 +807,7 @@ void EigenSolver::subspace_rotation_gpu(int Nd_d, int Nband) {
 void EigenSolver::chebyshev_filter_kpt_gpu(int Nd_d, int Nband,
                                             double lambda_cutoff, double eigval_min, double eigval_max,
                                             int cheb_degree) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     double e = (eigval_max - lambda_cutoff) / 2.0;
@@ -845,18 +843,18 @@ void EigenSolver::chebyshev_filter_kpt_gpu(int Nd_d, int Nband,
 }
 
 void EigenSolver::orthogonalize_kpt_gpu(int Nd_d, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     gpu::orthogonalize_z_gpu(gs->d_Y_z, gs->d_Ms_z, Nd_d, Nband, gs->dV);
 }
 
 void EigenSolver::project_and_diag_kpt_gpu(int Nd_d, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     gpu::project_and_diag_z_gpu(gs->d_Y_z, gs->d_HX_z, gs->d_Hs_z, gs->d_eigvals,
                                  gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
 }
 
 void EigenSolver::subspace_rotation_kpt_gpu(int Nd_d, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     gpu::rotate_orbitals_z_gpu(gs->d_Y_z, gs->d_Hs_z, gs->d_psi_z, Nd_d, Nband);
     // Copy Y_z back to psi_z
@@ -867,12 +865,12 @@ void EigenSolver::subspace_rotation_kpt_gpu(int Nd_d, int Nband) {
 // --- GPU workspace pointer accessors ---
 
 double* EigenSolver::gpu_Y() {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     return gs ? gs->d_Y : nullptr;
 }
 
 double* EigenSolver::gpu_Hs() {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     return gs ? gs->d_Hs : nullptr;
 }
 
@@ -880,14 +878,14 @@ double* EigenSolver::gpu_Hs() {
 // GPU transfer helpers (called from solve_resident in .cpp)
 // ============================================================
 void EigenSolver::upload_Veff_sync(const double* h_Veff, int Nd) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 }
 
 void EigenSolver::download_eigvals_sync(double* h_eigvals, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
                                cudaMemcpyDeviceToHost, stream));
@@ -899,41 +897,41 @@ void EigenSolver::download_eigvals_sync(double* h_eigvals, int Nband) {
 // ============================================================
 
 double* EigenSolver::gpu_psi() {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     return gs ? gs->d_psi : nullptr;
 }
 
 const double* EigenSolver::gpu_psi() const {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     return gs ? gs->d_psi : nullptr;
 }
 
 double* EigenSolver::gpu_eigvals() {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     return gs ? gs->d_eigvals : nullptr;
 }
 
 double* EigenSolver::gpu_Veff() {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     return gs ? gs->d_Veff : nullptr;
 }
 
 void EigenSolver::upload_psi_to_device(const double* h_psi, int Nd, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_psi, h_psi, (size_t)Nd * Nband * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 }
 
 void EigenSolver::upload_psi_z_to_device(const Complex* h_psi, int Nd, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, h_psi, (size_t)Nd * Nband * sizeof(cuDoubleComplex),
                                cudaMemcpyHostToDevice, stream));
 }
 
 void EigenSolver::download_eigvals(double* h_eigvals, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
                                cudaMemcpyDeviceToHost, stream));
@@ -941,7 +939,7 @@ void EigenSolver::download_eigvals(double* h_eigvals, int Nband) {
 }
 
 void EigenSolver::download_psi(double* h_psi, int Nd, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(h_psi, gs->d_psi, (size_t)Nd * Nband * sizeof(double),
                                cudaMemcpyDeviceToHost, stream));
@@ -949,7 +947,7 @@ void EigenSolver::download_psi(double* h_psi, int Nd, int Nband) {
 }
 
 void EigenSolver::download_psi_z(Complex* h_psi, int Nd, int Nband) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(h_psi, gs->d_psi_z, (size_t)Nd * Nband * sizeof(cuDoubleComplex),
                                cudaMemcpyDeviceToHost, stream));
@@ -957,7 +955,7 @@ void EigenSolver::download_psi_z(Complex* h_psi, int Nd, int Nband) {
 }
 
 void EigenSolver::upload_Veff(const double* h_Veff, int Nd) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
@@ -968,7 +966,7 @@ void EigenSolver::upload_Veff(const double* h_Veff, int Nd) {
 // ============================================================
 
 void EigenSolver::allocate_psi_buffers(int Nspin_local, int Nkpts) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
 
     int nsk = Nspin_local * Nkpts;
@@ -1006,7 +1004,7 @@ void EigenSolver::allocate_psi_buffers(int Nspin_local, int Nkpts) {
 }
 
 void EigenSolver::set_active_psi(int spin, int kpt) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     int idx = spin * gs->psi_Nkpts + kpt;
 
     if (gs->is_kpt || gs->is_soc) {
@@ -1017,35 +1015,35 @@ void EigenSolver::set_active_psi(int spin, int kpt) {
 }
 
 double* EigenSolver::device_psi_real(int spin, int kpt) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     if (gs->d_psi_sk.empty()) return gs->d_psi;  // fallback: single buffer
     int idx = spin * gs->psi_Nkpts + kpt;
     return gs->d_psi_sk[idx];
 }
 
 const double* EigenSolver::device_psi_real(int spin, int kpt) const {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     if (gs->d_psi_sk.empty()) return gs->d_psi;
     int idx = spin * gs->psi_Nkpts + kpt;
     return gs->d_psi_sk[idx];
 }
 
 void* EigenSolver::device_psi_z(int spin, int kpt) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     if (gs->d_psi_z_sk.empty()) return gs->d_psi_z;
     int idx = spin * gs->psi_Nkpts + kpt;
     return gs->d_psi_z_sk[idx];
 }
 
 const void* EigenSolver::device_psi_z(int spin, int kpt) const {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     if (gs->d_psi_z_sk.empty()) return gs->d_psi_z;
     int idx = spin * gs->psi_Nkpts + kpt;
     return gs->d_psi_z_sk[idx];
 }
 
 void EigenSolver::randomize_psi_gpu(int Nspin_local, int spin_start, int Nkpts) {
-    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUEigenState>();
     auto& gctx = gpu::GPUContext::instance();
     cudaStream_t stream = gctx.compute_stream;
     curandGenerator_t curand = gctx.handles.curand;

@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "operators/Laplacian.hpp"
 #include "operators/Gradient.hpp"
 #include "operators/FDStencil.hpp"
@@ -40,30 +41,8 @@ class EffectivePotential {
 public:
     EffectivePotential() = default;
     ~EffectivePotential();
-    EffectivePotential(EffectivePotential&& o) noexcept
-        : domain_(o.domain_), grid_(o.grid_), stencil_(o.stencil_),
-          laplacian_(o.laplacian_), gradient_(o.gradient_),
-          hamiltonian_(o.hamiltonian_), halo_(o.halo_), Nspin_global_(o.Nspin_global_)
-    {
-#ifdef USE_CUDA
-        gpu_state_raw_ = o.gpu_state_raw_;
-        o.gpu_state_raw_ = nullptr;
-#endif
-    }
-    EffectivePotential& operator=(EffectivePotential&& o) noexcept {
-        if (this != &o) {
-#ifdef USE_CUDA
-            cleanup_gpu();
-            gpu_state_raw_ = o.gpu_state_raw_;
-            o.gpu_state_raw_ = nullptr;
-#endif
-            domain_ = o.domain_; grid_ = o.grid_; stencil_ = o.stencil_;
-            laplacian_ = o.laplacian_; gradient_ = o.gradient_;
-            hamiltonian_ = o.hamiltonian_; halo_ = o.halo_;
-            Nspin_global_ = o.Nspin_global_;
-        }
-        return *this;
-    }
+    EffectivePotential(EffectivePotential&&) noexcept = default;
+    EffectivePotential& operator=(EffectivePotential&&) noexcept = default;
     EffectivePotential(const EffectivePotential&) = delete;
     EffectivePotential& operator=(const EffectivePotential&) = delete;
 
@@ -96,7 +75,7 @@ public:
                         VeffArrays& arrays);
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUVeffState (defined in .cu)
+    GPUStatePtr gpu_state_;  // Opaque pointer to GPUVeffState (defined in .cu)
 
     void setup_gpu(const LynxContext& ctx, int Nspin,
                         XCType xc_type, const double* rho_b,

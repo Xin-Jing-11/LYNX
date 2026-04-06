@@ -8,6 +8,7 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "core/LynxContext.hpp"
+#include "core/GPUStatePtr.hpp"
 #include <complex>
 
 namespace lynx {
@@ -70,7 +71,7 @@ public:
                                     double tol_lanczos = 1e-2, int max_iter = 1000);
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUEigenState (defined in .cu)
+    GPUStatePtr gpu_state_;  // RAII-managed GPUEigenState (defined in .cu)
 
     void setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
                          bool is_kpt, bool is_soc);

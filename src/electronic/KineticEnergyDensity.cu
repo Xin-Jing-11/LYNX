@@ -73,9 +73,9 @@ struct GPUTauState {
 // ============================================================
 
 void KineticEnergyDensity::setup_gpu(const LynxContext& ctx, int Nspin) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUTauState();
-    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUTauState());
+    auto* gs = gpu_state_.as<GPUTauState>();
 
     const auto& grid = ctx.grid();
     const auto& domain = ctx.domain();
@@ -105,8 +105,8 @@ void KineticEnergyDensity::setup_gpu(const LynxContext& ctx, int Nspin) {
 }
 
 void KineticEnergyDensity::cleanup_gpu() {
-    if (!gpu_state_raw_) return;
-    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    if (!gpu_state_) return;
+    auto* gs = gpu_state_.as<GPUTauState>();
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
@@ -114,8 +114,7 @@ void KineticEnergyDensity::cleanup_gpu() {
     safe_free(gs->d_tau);
     safe_free(gs->d_vtau);
 
-    delete gs;
-    gpu_state_raw_ = nullptr;
+    gpu_state_.reset();
 }
 
 KineticEnergyDensity::~KineticEnergyDensity() {
@@ -123,12 +122,12 @@ KineticEnergyDensity::~KineticEnergyDensity() {
 }
 
 double* KineticEnergyDensity::d_tau() {
-    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUTauState>();
     return gs ? gs->d_tau : nullptr;
 }
 
 double* KineticEnergyDensity::d_vtau() {
-    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUTauState>();
     return gs ? gs->d_vtau : nullptr;
 }
 
@@ -138,7 +137,7 @@ double* KineticEnergyDensity::d_vtau() {
 void KineticEnergyDensity::gradient_accumulate_tau_gpu(
     const double* d_psi_col, double* d_tau_s, double weight, int Nd)
 {
-    auto* gs = static_cast<GPUTauState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUTauState>();
     auto& gctx = gpu::GPUContext::instance();
     cudaStream_t stream = gctx.compute_stream;
     int bs = 256;
@@ -187,7 +186,7 @@ void KineticEnergyDensity::compute_gpu(const LynxContext& ctx,
                                         const Wavefunction& wfn,
                                         const std::vector<double>& kpt_weights)
 {
-    if (!gpu_state_raw_) {
+    if (!gpu_state_) {
         // No GPU state — fall back to CPU
         dev_ = Device::CPU;
         compute(ctx, wfn, kpt_weights);
@@ -314,7 +313,7 @@ void KineticEnergyDensity::compute_gpu_from_device(
     const std::vector<const double*>& d_psi_real_ptrs,
     const std::vector<const void*>& d_psi_z_ptrs)
 {
-    if (!gpu_state_raw_) {
+    if (!gpu_state_) {
         dev_ = Device::CPU;
         compute(ctx, wfn, kpt_weights);
         dev_ = Device::GPU;

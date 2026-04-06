@@ -166,9 +166,9 @@ struct GPUPoissonState {
 // ============================================================
 
 void PoissonSolver::setup_gpu(const LynxContext& ctx) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUPoissonState();
-    auto* gs = static_cast<GPUPoissonState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUPoissonState());
+    auto* gs = gpu_state_.as<GPUPoissonState>();
 
     const auto& grid    = ctx.grid();
     const auto& domain  = ctx.domain();
@@ -192,9 +192,7 @@ void PoissonSolver::setup_gpu(const LynxContext& ctx) {
 }
 
 void PoissonSolver::cleanup_gpu() {
-    if (!gpu_state_raw_) return;
-    delete static_cast<GPUPoissonState*>(gpu_state_raw_);
-    gpu_state_raw_ = nullptr;
+    gpu_state_.reset();
 }
 
 PoissonSolver::~PoissonSolver() {
@@ -206,7 +204,7 @@ PoissonSolver::~PoissonSolver() {
 // ============================================================
 
 void PoissonSolver::apply_laplacian_gpu(const double* d_x, double* d_Ax) const {
-    auto* gs = static_cast<GPUPoissonState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUPoissonState>();
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
 
@@ -226,7 +224,7 @@ void PoissonSolver::apply_laplacian_gpu(const double* d_x, double* d_Ax) const {
 }
 
 void PoissonSolver::apply_preconditioner_gpu(const double* d_r, double* d_f, int N) const {
-    auto* gs = static_cast<GPUPoissonState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUPoissonState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
     jacobi_scale_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(

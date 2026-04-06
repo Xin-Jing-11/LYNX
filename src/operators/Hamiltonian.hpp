@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "operators/FDStencil.hpp"
 #include "operators/Gradient.hpp"
 #include "operators/NonlocalProjector.hpp"
@@ -29,27 +30,17 @@ public:
     Hamiltonian(Hamiltonian&& other) noexcept
         : stencil_(other.stencil_), domain_(other.domain_), grid_(other.grid_),
           halo_(other.halo_), vnl_(other.vnl_), vnl_kpt_(other.vnl_kpt_),
-          vtau_(other.vtau_), exx_(other.exx_), exx_spin_(other.exx_spin_), exx_kpt_(other.exx_kpt_)
-    {
-#ifdef USE_CUDA
-        gpu_state_raw_ = other.gpu_state_raw_;
-        other.gpu_state_raw_ = nullptr;
-#endif
-    }
+          vtau_(other.vtau_), exx_(other.exx_), exx_spin_(other.exx_spin_), exx_kpt_(other.exx_kpt_),
+          gpu_state_(std::move(other.gpu_state_))
+    {}
     Hamiltonian& operator=(Hamiltonian&& other) noexcept {
         if (this != &other) {
-#ifdef USE_CUDA
-            cleanup_gpu();
-#endif
             stencil_ = other.stencil_; domain_ = other.domain_;
             grid_ = other.grid_; halo_ = other.halo_;
             vnl_ = other.vnl_; vnl_kpt_ = other.vnl_kpt_;
             vtau_ = other.vtau_; exx_ = other.exx_;
             exx_spin_ = other.exx_spin_; exx_kpt_ = other.exx_kpt_;
-#ifdef USE_CUDA
-            gpu_state_raw_ = other.gpu_state_raw_;
-            other.gpu_state_raw_ = nullptr;
-#endif
+            gpu_state_ = std::move(other.gpu_state_);
         }
         return *this;
     }
@@ -124,7 +115,6 @@ public:
 
 #ifdef USE_CUDA
     // ── GPU state management ─────────────────────────────────────
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUHamiltonianState (defined in .cu)
 public:
     void setup_gpu(const LynxContext& ctx,
                    const NonlocalProjector* vnl,
@@ -132,8 +122,8 @@ public:
                    const std::vector<struct AtomNlocInfluence>& nloc_influence,
                    int Nband);
     void cleanup_gpu();
-    void* gpu_state_ptr() { return gpu_state_raw_; }
-    const void* gpu_state_ptr() const { return gpu_state_raw_; }
+    void* gpu_state_ptr() { return gpu_state_.as<void>(); }
+    const void* gpu_state_ptr() const { return gpu_state_.as<void>(); }
 
     // Update k-point Bloch phase factors on GPU (kxLx, kyLy, kzLz + d_bloch_fac).
     void set_kpoint_gpu(const Vec3& kpt_cart, const Vec3& cell_lengths);
@@ -183,6 +173,7 @@ public:
 
 private:
     Device dev_ = Device::CPU;
+    GPUStatePtr gpu_state_;                             // RAII wrapper for GPUHamiltonianState (defined in .cu)
     const FDStencil* stencil_ = nullptr;
     const Domain* domain_ = nullptr;
     const FDGrid* grid_ = nullptr;

@@ -4,6 +4,7 @@
 #include "core/types.hpp"
 #include "core/LynxContext.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "parallel/MPIComm.hpp"
 
@@ -16,31 +17,8 @@ public:
     ~ElectronDensity();
     ElectronDensity(const ElectronDensity&) = delete;
     ElectronDensity& operator=(const ElectronDensity&) = delete;
-    ElectronDensity(ElectronDensity&& o) noexcept
-        : Nd_d_(o.Nd_d_), Nspin_(o.Nspin_),
-          rho_(std::move(o.rho_)), rho_total_(std::move(o.rho_total_)),
-          mag_(std::move(o.mag_)), mag_x_(std::move(o.mag_x_)),
-          mag_y_(std::move(o.mag_y_)), mag_z_(std::move(o.mag_z_))
-    {
-#ifdef USE_CUDA
-        gpu_state_raw_ = o.gpu_state_raw_;
-        o.gpu_state_raw_ = nullptr;
-#endif
-    }
-    ElectronDensity& operator=(ElectronDensity&& o) noexcept {
-        if (this != &o) {
-#ifdef USE_CUDA
-            cleanup_gpu();
-            gpu_state_raw_ = o.gpu_state_raw_;
-            o.gpu_state_raw_ = nullptr;
-#endif
-            Nd_d_ = o.Nd_d_; Nspin_ = o.Nspin_;
-            rho_ = std::move(o.rho_); rho_total_ = std::move(o.rho_total_);
-            mag_ = std::move(o.mag_); mag_x_ = std::move(o.mag_x_);
-            mag_y_ = std::move(o.mag_y_); mag_z_ = std::move(o.mag_z_);
-        }
-        return *this;
-    }
+    ElectronDensity(ElectronDensity&&) noexcept = default;
+    ElectronDensity& operator=(ElectronDensity&&) noexcept = default;
 
     void allocate(int Nd_d, int Nspin);
 
@@ -60,7 +38,7 @@ public:
                         const std::vector<double>& kpt_weights);
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUDensityState (defined in .cu)
+    GPUStatePtr gpu_state_;  // Opaque pointer to GPUDensityState (defined in .cu)
 
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();

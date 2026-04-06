@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "operators/Gradient.hpp"
 #include "parallel/HaloExchange.hpp"
 
@@ -58,7 +59,7 @@ public:
                            const double* tau = nullptr, double* vtau = nullptr) const;
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUXCState (defined in .cu)
+    GPUStatePtr gpu_state_;  // Opaque pointer to GPUXCState (defined in .cu)
 public:
     void setup_gpu(const class LynxContext& ctx, int Nspin);
     void cleanup_gpu();

@@ -5,6 +5,7 @@
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "operators/Laplacian.hpp"
 #include "operators/FDStencil.hpp"
 #include "parallel/HaloExchange.hpp"
@@ -98,7 +99,7 @@ private:
     void mean_subtract_gpu(double* d_x, double mean, int N) const;
 
     // Opaque GPU state (grid parameters for laplacian dispatch)
-    void* gpu_state_raw_ = nullptr;
+    GPUStatePtr gpu_state_;
 #endif
 };
 
