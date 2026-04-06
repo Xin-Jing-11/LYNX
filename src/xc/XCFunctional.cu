@@ -368,9 +368,9 @@ struct GPUXCState {
 // ── setup_gpu / cleanup_gpu ──────────────────────────
 
 void XCFunctional::setup_gpu(const LynxContext& ctx, int Nspin) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUXCState();
-    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUXCState());
+    auto* gs = gpu_state_.as<GPUXCState>();
 
     const auto& grid    = ctx.grid();
     const auto& domain  = ctx.domain();
@@ -401,16 +401,15 @@ void XCFunctional::setup_gpu(const LynxContext& ctx, int Nspin) {
 }
 
 void XCFunctional::cleanup_gpu() {
-    if (!gpu_state_raw_) return;
-    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    if (!gpu_state_) return;
+    auto* gs = gpu_state_.as<GPUXCState>();
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
     safe_free(gs->d_rho_core);
 
-    delete gs;
-    gpu_state_raw_ = nullptr;
+    gpu_state_.reset();
 }
 
 XCFunctional::~XCFunctional() {
@@ -418,7 +417,7 @@ XCFunctional::~XCFunctional() {
 }
 
 void XCFunctional::set_gpu_nlcc(const double* rho_core, int Nd) {
-    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUXCState>();
     if (!gs) return;
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
@@ -434,7 +433,7 @@ void XCFunctional::set_gpu_nlcc(const double* rho_core, int Nd) {
 }
 
 void XCFunctional::set_gpu_tau_valid(bool valid) {
-    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUXCState>();
     if (gs) gs->tau_valid = valid;
 }
 
@@ -444,7 +443,7 @@ void XCFunctional::set_gpu_tau_valid(bool valid) {
 void XCFunctional::evaluate_gpu(const double* rho, double* Vxc, double* exc, int Nd_d,
                                  double* Dxcdgrho,
                                  const double* tau, double* vtau) const {
-    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUXCState>();
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
     int bs = 256;
@@ -628,7 +627,7 @@ void XCFunctional::evaluate_spin_gpu(const double* rho, double* Vxc, double* exc
                                       double* Dxcdgrho,
                                       const double* tau, double* vtau) const {
     // GPU path — mirrors GPUSCF::gpu_xc_evaluate_spin()
-    auto* gs = static_cast<GPUXCState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUXCState>();
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
     int bs = 256;

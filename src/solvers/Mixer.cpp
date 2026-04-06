@@ -115,7 +115,7 @@ void Mixer::apply_density_constraint(double* x, int ncol) {
 
 void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
 #ifdef USE_CUDA
-    if (dev_ == Device::GPU && gpu_state_raw_) {
+    if (dev_ == Device::GPU && gpu_state_) {
         mix_gpu(x_k, g_k, Nd_d, ncol);
         return;
     }

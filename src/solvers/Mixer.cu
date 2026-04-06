@@ -179,9 +179,9 @@ struct GPUMixerState {
 // ============================================================
 
 void Mixer::setup_gpu(int Nd_d, int ncol, int m_depth, double beta_mix) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUMixerState();
-    auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUMixerState());
+    auto* gs = gpu_state_.as<GPUMixerState>();
 
     gs->Nd = Nd_d;
     // m_depth, beta, ncol are stored in class members (m_, beta_)
@@ -189,14 +189,12 @@ void Mixer::setup_gpu(int Nd_d, int ncol, int m_depth, double beta_mix) {
 }
 
 void Mixer::cleanup_gpu() {
-    if (!gpu_state_raw_) return;
-    auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
+    if (!gpu_state_) return;
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     if (d_fkm1_) { cudaFreeAsync(d_fkm1_, stream); d_fkm1_ = nullptr; }
 
-    delete gs;
-    gpu_state_raw_ = nullptr;
+    gpu_state_.reset();
 }
 
 Mixer::~Mixer() {
@@ -223,7 +221,7 @@ void Mixer::mixer_store_history_gpu(const double* d_x, const double* d_x_old,
 }
 
 void Mixer::kerker_apply_op_gpu(const double* d_x, double* d_Ax, int Nd) {
-    auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUMixerState>();
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
 
@@ -244,7 +242,7 @@ void Mixer::kerker_apply_op_gpu(const double* d_x, double* d_Ax, int Nd) {
 }
 
 void Mixer::kerker_apply_rhs_gpu(const double* d_f, double* d_Lf, int Nd) {
-    auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUMixerState>();
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
 
@@ -265,7 +263,7 @@ void Mixer::kerker_apply_rhs_gpu(const double* d_f, double* d_Lf, int Nd) {
 }
 
 void Mixer::kerker_precondition_gpu(const double* d_r, double* d_f, int N) {
-    auto* gs = static_cast<GPUMixerState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUMixerState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
     jacobi_scale_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(d_r, d_f, gs->kerker_m_inv, N);

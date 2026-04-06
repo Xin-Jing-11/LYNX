@@ -3,6 +3,7 @@
 #include "core/types.hpp"
 #include "core/DeviceArray.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "solvers/Preconditioner.hpp"
 
 #include <vector>
@@ -49,7 +50,7 @@ public:
     void mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol = 1);
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUMixerState (defined in .cu)
+    GPUStatePtr gpu_state_;  // Opaque pointer to GPUMixerState (defined in .cu)
     double* d_fkm1_ = nullptr;       // Persistent GPU buffer for previous residual
     int gpu_mix_iter_ = 0;            // GPU-side iteration counter
     double gpu_precond_tol_ = 1e-3;   // Kerker preconditioner tolerance

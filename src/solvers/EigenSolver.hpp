@@ -8,6 +8,7 @@
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"
 #include "core/LynxContext.hpp"
+#include "core/GPUStatePtr.hpp"
 #include <complex>
 
 namespace lynx {
@@ -70,7 +71,7 @@ public:
                                     double tol_lanczos = 1e-2, int max_iter = 1000);
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUEigenState (defined in .cu)
+    GPUStatePtr gpu_state_;  // RAII-managed GPUEigenState (defined in .cu)
 
     void setup_gpu(const LynxContext& ctx, int Nband, int Nband_global,
                          bool is_kpt, bool is_soc);
@@ -82,16 +83,21 @@ public:
     double* gpu_eigvals();
     double* gpu_Veff();
 
-    // Upload/download between host and persistent device buffers
+    // Download eigenvalues from device
+    void download_eigvals(double* h_eigvals, int Nband);
+
+    // Legacy psi transfer methods — for testing only.
+    // Production code must use solve_resident / compute_from_device_ptrs.
+    // Psi must stay GPU-resident in the SCF loop (see GPU Data Residency Rules).
     void upload_psi_to_device(const double* h_psi, int Nd, int Nband);
     void upload_psi_z_to_device(const Complex* h_psi, int Nd, int Nband);
-    void download_eigvals(double* h_eigvals, int Nband);
     void download_psi(double* h_psi, int Nd, int Nband);
     void download_psi_z(Complex* h_psi, int Nd, int Nband);
     void upload_Veff(const double* h_Veff, int Nd);
 
     // GPU-resident solve: psi is already on device, only upload Veff and
     // download eigvals. psi stays on device after the call.
+    // Algorithm lives in EigenSolver.cpp, calls _gpu() sub-steps.
     void solve_resident(double* h_eigvals, const double* h_Veff,
                         int Nd_d, int Nband,
                         double lambda_cutoff, double eigval_min, double eigval_max,
@@ -102,6 +108,10 @@ public:
                             int Nd_d, int Nband,
                             double lambda_cutoff, double eigval_min, double eigval_max,
                             int cheb_degree);
+
+    // GPU transfer helpers (defined in EigenSolver.cu, called from .cpp algorithm)
+    void upload_Veff_sync(const double* h_Veff, int Nd);
+    void download_eigvals_sync(double* h_eigvals, int Nband);
 
     // --- GPU sub-step methods (defined in EigenSolver.cu) ---
     // Real (gamma-point) GPU sub-steps

@@ -7,6 +7,7 @@
 #include "core/KPoints.hpp"
 #include "core/LynxContext.hpp"
 #include "core/DeviceTag.hpp"
+#include "core/GPUStatePtr.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "operators/Gradient.hpp"
 #include "parallel/MPIComm.hpp"
@@ -22,25 +23,8 @@ class KineticEnergyDensity {
 public:
     KineticEnergyDensity() = default;
     ~KineticEnergyDensity();
-    KineticEnergyDensity(KineticEnergyDensity&& o) noexcept
-        : tau_(std::move(o.tau_)), valid_(o.valid_)
-    {
-#ifdef USE_CUDA
-        gpu_state_raw_ = o.gpu_state_raw_;
-        o.gpu_state_raw_ = nullptr;
-#endif
-    }
-    KineticEnergyDensity& operator=(KineticEnergyDensity&& o) noexcept {
-        if (this != &o) {
-#ifdef USE_CUDA
-            cleanup_gpu();
-            gpu_state_raw_ = o.gpu_state_raw_;
-            o.gpu_state_raw_ = nullptr;
-#endif
-            tau_ = std::move(o.tau_); valid_ = o.valid_;
-        }
-        return *this;
-    }
+    KineticEnergyDensity(KineticEnergyDensity&&) noexcept = default;
+    KineticEnergyDensity& operator=(KineticEnergyDensity&&) noexcept = default;
     KineticEnergyDensity(const KineticEnergyDensity&) = delete;
     KineticEnergyDensity& operator=(const KineticEnergyDensity&) = delete;
 
@@ -76,12 +60,13 @@ public:
                  int Nspin_global);
 
 #ifdef USE_CUDA
-    void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUTauState (defined in .cu)
+    GPUStatePtr gpu_state_;  // Opaque pointer to GPUTauState (defined in .cu)
 
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
-    // GPU compute path (defined in .cu)
+    // Legacy GPU compute — uploads psi from host (for testing only).
+    // Production SCF uses compute_gpu_from_device instead.
     void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                      const std::vector<double>& kpt_weights);
 

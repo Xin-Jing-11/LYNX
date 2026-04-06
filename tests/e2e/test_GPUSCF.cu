@@ -37,7 +37,6 @@
 #include "atoms/AtomType.hpp"
 #include "electronic/Wavefunction.hpp"
 #include "electronic/Occupation.hpp"
-#include "solvers/LinearSolver.hpp"
 #include "solvers/EigenSolver.hpp"
 #include "solvers/PoissonSolver.hpp"
 #include "solvers/Mixer.hpp"

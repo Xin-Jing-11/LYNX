@@ -147,9 +147,9 @@ struct GPUVeffState {
 void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
                                          XCType xc_type, const double* rho_b,
                                          const double* rho_core) {
-    if (!gpu_state_raw_)
-        gpu_state_raw_ = new GPUVeffState();
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gpu_state_)
+        gpu_state_.reset(new GPUVeffState());
+    auto* gs = gpu_state_.as<GPUVeffState>();
 
     gs->Nd    = ctx.domain().Nd_d();
     gs->Nspin = Nspin;
@@ -186,8 +186,8 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
 }
 
 void EffectivePotential::cleanup_gpu() {
-    if (!gpu_state_raw_) return;
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    if (!gpu_state_) return;
+    auto* gs = gpu_state_.as<GPUVeffState>();
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
@@ -201,8 +201,7 @@ void EffectivePotential::cleanup_gpu() {
     gs->xc.cleanup_gpu();
     gs->poisson.cleanup_gpu();
 
-    delete gs;
-    gpu_state_raw_ = nullptr;
+    gpu_state_.reset();
 }
 
 EffectivePotential::~EffectivePotential() {
@@ -269,7 +268,7 @@ void EffectivePotential::compute_gpu(const ElectronDensity& density,
                                       const double* tau,
                                       bool tau_valid)
 {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int Nd = gs->Nd;
@@ -342,37 +341,37 @@ void EffectivePotential::compute_spinor_gpu(const ElectronDensity& density,
 // ============================================================
 
 double* EffectivePotential::gpu_Veff() {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_Veff : nullptr;
 }
 
 const double* EffectivePotential::gpu_Veff() const {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_Veff : nullptr;
 }
 
 double* EffectivePotential::gpu_phi() {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_phi : nullptr;
 }
 
 double* EffectivePotential::gpu_exc() {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_exc : nullptr;
 }
 
 double* EffectivePotential::gpu_Vxc() {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_Vxc : nullptr;
 }
 
 double* EffectivePotential::gpu_rho() {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_rho : nullptr;
 }
 
 double* EffectivePotential::gpu_rho_total() {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     return gs ? gs->d_rho_total : nullptr;
 }
 
@@ -380,7 +379,7 @@ double* EffectivePotential::gpu_rho_total() {
 // Set device tau/vtau pointers for mGGA GPU pipeline
 // ============================================================
 void EffectivePotential::set_device_tau(double* d_tau, double* d_vtau) {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     if (!gs) return;
     gs->d_tau = d_tau;
     gs->d_vtau = d_vtau;
@@ -390,7 +389,7 @@ void EffectivePotential::set_device_tau(double* d_tau, double* d_vtau) {
 // Upload density from host to device buffers
 // ============================================================
 void EffectivePotential::upload_density(const ElectronDensity& density) {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     if (!gs || !gs->buffers_allocated) return;
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
@@ -412,7 +411,7 @@ void EffectivePotential::upload_density(const ElectronDensity& density) {
 // Download potential arrays from device to host VeffArrays
 // ============================================================
 void EffectivePotential::download_to_host(VeffArrays& arrays) {
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
+    auto* gs = gpu_state_.as<GPUVeffState>();
     if (!gs || !gs->buffers_allocated) return;
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
