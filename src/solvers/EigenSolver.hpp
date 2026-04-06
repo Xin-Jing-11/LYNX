@@ -130,6 +130,10 @@ public:
     void allocate_psi_buffers(int Nspin_local, int Nkpts);
     void set_active_psi(int spin, int kpt);
 
+    // Randomize all per-(spin,kpt) psi buffers directly on GPU via cuRAND.
+    // Psi is born on GPU — no CPU randomization or H2D transfer needed.
+    void randomize_psi_gpu(int Nspin_local, int spin_start, int Nkpts);
+
     // Device psi pointer for a specific (spin, kpt)
     double* device_psi_real(int spin, int kpt);
     const double* device_psi_real(int spin, int kpt) const;

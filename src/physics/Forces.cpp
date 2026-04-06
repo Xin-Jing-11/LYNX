@@ -27,10 +27,13 @@ void Forces::compute(
     const AtomSetup& atoms,
     const NonlocalProjector& vnl) {
 
+    // Set device for internal dispatch
+    dev_ = Device::CPU;
 #ifdef USE_CUDA
-    // Inject GPU nonlocal forces if computed on device (psi never left GPU)
-    if (scf.has_gpu_force_stress()) {
-        set_gpu_nloc_forces(scf.gpu_force_stress().f_nloc);
+    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()) {
+        dev_ = Device::GPU;
+        hamiltonian_ = scf.hamiltonian_ptr();
+        eigsolver_ = &scf.eigsolver();
     }
 #endif
 
@@ -79,12 +82,8 @@ std::vector<double> Forces::compute_impl(
     // Local force using pseudocharge-based formula (matches reference)
     compute_local(crystal, influence, phi, Vloc, b, b_ref);
 
-    // Nonlocal force from KB projectors
-    if (!gpu_nloc_set_) {
-        // CPU path: compute nonlocal force from host psi
-        compute_nonlocal(wfn, crystal, nloc_influence, vnl, kpt_weights);
-    }
-    // else: GPU nonlocal forces already injected via set_gpu_nloc_forces
+    // Nonlocal force from KB projectors (dispatches to CPU or GPU)
+    compute_nonlocal(wfn, crystal, nloc_influence, vnl, kpt_weights);
 
     // SOC nonlocal force from spin-orbit coupling projectors
     if (vnl.has_soc() && wfn.Nspinor() == 2) {
@@ -393,12 +392,33 @@ void Forces::compute_local(
 //
 // Algorithm:
 // 1. For all bands at once: compute alpha = <χ|ψ>·dV
+// Dispatcher: routes to CPU or GPU path based on dev_.
+// ---------------------------------------------------------------------------
+void Forces::compute_nonlocal(
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const std::vector<double>& kpt_weights) {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        compute_nonlocal_gpu(wfn, crystal, nloc_influence, vnl, kpt_weights);
+        return;
+    }
+#endif
+    compute_nonlocal_cpu(wfn, crystal, nloc_influence, vnl, kpt_weights);
+}
+
+// ---------------------------------------------------------------------------
+// CPU nonlocal force implementation.
+// Algorithm:
+// 1. For each (spin, kpt, band): alpha = dV · <χ|ψ>
 // 2. For each direction dim: compute gradient ∇_dim ψ, then beta_dim = <χ|∇ψ>
 // 3. Allreduce alpha and beta across domain
 // 4. Assemble: F_J = -occfac·2·Σ_n g_n · Σ_lmp Γ · α·β
 // 5. Allreduce across band, kpt, spin comms
 // ---------------------------------------------------------------------------
-void Forces::compute_nonlocal(
+void Forces::compute_nonlocal_cpu(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,

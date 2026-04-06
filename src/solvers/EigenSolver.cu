@@ -1076,6 +1076,38 @@ const void* EigenSolver::device_psi_z(int spin, int kpt) const {
     return gs->d_psi_z_sk[idx];
 }
 
+void EigenSolver::randomize_psi_gpu(int Nspin_local, int spin_start, int Nkpts) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
+    curandGenerator_t curand = gctx.handles.curand;
+
+    int nsk = Nspin_local * Nkpts;
+    size_t psi_sz = (size_t)gs->Nd * gs->Nband;
+
+    if (gs->is_kpt || gs->is_soc) {
+        size_t psi_sz_z = gs->is_soc ? (size_t)(2 * gs->Nd) * gs->Nband : psi_sz;
+        // Fill complex buffers: generate 2*psi_sz_z doubles (real+imag interleaved)
+        for (int i = 0; i < nsk; ++i) {
+            int s = i / Nkpts;
+            unsigned long long seed = (unsigned long long)(spin_start + s) * 1000 + i * 13 + 1;
+            curandSetPseudoRandomGeneratorSeed(curand, seed);
+            curandGenerateUniformDouble(curand, reinterpret_cast<double*>(gs->d_psi_z_sk[i]),
+                                        2 * psi_sz_z);
+        }
+    } else {
+        // Fill real buffers
+        for (int i = 0; i < nsk; ++i) {
+            int s = i / Nkpts;
+            unsigned long long seed = (unsigned long long)(spin_start + s) * 1000 + i * 13 + 1;
+            curandSetPseudoRandomGeneratorSeed(curand, seed);
+            curandGenerateUniformDouble(curand, gs->d_psi_sk[i], psi_sz);
+        }
+    }
+
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
 } // namespace lynx
 
 #endif // USE_CUDA

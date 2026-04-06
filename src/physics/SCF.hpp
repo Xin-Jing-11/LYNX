@@ -93,6 +93,7 @@ struct SCFParams {
 class SCF {
 public:
     SCF() = default;
+    ~SCF();
     SCF(const SCF&) = delete;
     SCF& operator=(const SCF&) = delete;
     SCF(SCF&&) = default;
@@ -143,31 +144,10 @@ public:
     // GPU mGGA stress: computed post-SCF using Hamiltonian's GPU state
     // (psi stays on device; see Stress.cpp for usage)
     const Hamiltonian* hamiltonian_ptr() const { return hamiltonian_; }
+    const EigenSolver& eigsolver() const { return eigsolver_; }
 
-    // Post-SCF device psi access (for forces/stress on GPU).
-    // Returns device psi pointer for a specific (spin, kpt).
-    const double* device_psi_real(int spin, int kpt) const { return eigsolver_.device_psi_real(spin, kpt); }
-    const void* device_psi_z(int spin, int kpt) const { return eigsolver_.device_psi_z(spin, kpt); }
-
-    // Clean up GPU state (called at end of run(), after GPU force+stress)
+    // Clean up GPU state (called at end of run(), after forces+stress)
     void cleanup_gpu();
-
-    // ── GPU force+stress (psi stays on device) ──────────────────
-    struct GPUForceStressResult {
-        std::vector<double> f_nloc;          // [3 * n_atom]
-        std::array<double, 6> stress_k = {};
-        std::array<double, 6> stress_nl = {};
-        double energy_nl = 0.0;
-        bool computed = false;
-    };
-
-    // Compute nonlocal forces + kinetic/nonlocal stress on GPU.
-    // Loops over all (spin, kpt), accumulates results on host.
-    // Requires that device psi buffers are still live (call BEFORE cleanup_gpu).
-    void compute_gpu_force_stress(const Wavefunction& wfn);
-
-    const GPUForceStressResult& gpu_force_stress() const { return gpu_fs_; }
-    bool has_gpu_force_stress() const { return gpu_fs_.computed; }
 #endif
 
 private:
@@ -267,9 +247,6 @@ private:
         const NonlocalProjector* vnl, int rank_world);
 
 #ifdef USE_CUDA
-    // GPU force+stress result (accumulated across spins/kpts)
-    GPUForceStressResult gpu_fs_;
-
     // GPU-specific data (set via set_gpu_data before run)
     const Crystal* crystal_ = nullptr;
     const std::vector<AtomNlocInfluence>* nloc_influence_ = nullptr;

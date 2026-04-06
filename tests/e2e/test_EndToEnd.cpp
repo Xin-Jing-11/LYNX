@@ -240,12 +240,12 @@ static DFTResult run_single_point(const std::string& json_file) {
     atoms.Nelectron = Nelectron;
     atoms.Natom = Natom;
 
-    // Forces (GPU builds: nonlocal forces already computed on device by SCF)
+    // Forces (GPU builds: dispatches to GPU internally via dev_ member)
     Forces forces;
     forces.compute(ctx, config, wfn, scf, atoms, vnl);
     result.forces = forces.total_forces();
 
-    // Stress (GPU builds: kinetic+nonlocal stress already computed on device by SCF)
+    // Stress (GPU builds: dispatches to GPU internally via dev_ member)
     Stress stress_calc;
     stress_calc.compute(ctx, config, wfn, scf, atoms, vnl);
     result.stress = stress_calc.total_stress();
