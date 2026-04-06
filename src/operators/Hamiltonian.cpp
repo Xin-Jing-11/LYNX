@@ -15,35 +15,35 @@ Hamiltonian::~Hamiltonian() = default;
 #endif
 
 // ---------------------------------------------------------------------------
-// Device-dispatching overloads (CPU-only fallbacks when USE_CUDA is off)
+// Device-dispatching methods: check dev_ and call _cpu() or _gpu().
 // GPU implementations live in Hamiltonian.cu.
 // ---------------------------------------------------------------------------
-#ifndef USE_CUDA
 
 void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
-                        int ncol, Device dev, double c) const {
-    if (dev == Device::GPU)
-        throw std::runtime_error("Hamiltonian::apply(GPU) called but USE_CUDA is off");
-    apply(psi, Veff, y, ncol, c);
+                        int ncol, double c) const {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) { apply_gpu(psi, Veff, y, ncol, c); return; }
+#endif
+    apply_cpu(psi, Veff, y, ncol, c);
 }
 
 void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
                             int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                            Device dev, double c) const {
-    if (dev == Device::GPU)
-        throw std::runtime_error("Hamiltonian::apply_kpt(GPU) called but USE_CUDA is off");
-    apply_kpt(psi, Veff, y, ncol, kpt_cart, cell_lengths, c);
+                            double c) const {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) { apply_kpt_gpu(psi, Veff, y, ncol, c); return; }
+#endif
+    apply_kpt_cpu(psi, Veff, y, ncol, kpt_cart, cell_lengths, c);
 }
 
 void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
                                     int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                                    Device dev, double c) const {
-    if (dev == Device::GPU)
-        throw std::runtime_error("Hamiltonian::apply_spinor_kpt(GPU) called but USE_CUDA is off");
-    apply_spinor_kpt(psi, Veff_spinor, y, ncol, Nd_d, kpt_cart, cell_lengths, c);
+                                    double c) const {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) { apply_spinor_kpt_gpu(psi, Veff_spinor, y, ncol, Nd_d, c); return; }
+#endif
+    apply_spinor_kpt_cpu(psi, Veff_spinor, y, ncol, Nd_d, kpt_cart, cell_lengths, c);
 }
-
-#endif // !USE_CUDA
 
 void Hamiltonian::setup(const FDStencil& stencil,
                         const Domain& domain,
@@ -61,8 +61,8 @@ void Hamiltonian::setup(const FDStencil& stencil,
 // Real (Gamma-point) interface
 // ---------------------------------------------------------------------------
 
-void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
-                        int ncol, double c) const {
+void Hamiltonian::apply_cpu(const double* psi, const double* Veff, double* y,
+                            int ncol, double c) const {
     apply_local(psi, Veff, y, ncol, c);
     if (vnl_ && vnl_->is_setup()) {
         vnl_->apply(psi, y, ncol, grid_->dV());
@@ -91,9 +91,9 @@ void Hamiltonian::apply_local(const double* psi, const double* Veff, double* y,
 // Complex (k-point) interface
 // ---------------------------------------------------------------------------
 
-void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
-                            int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                            double c) const {
+void Hamiltonian::apply_kpt_cpu(const Complex* psi, const double* Veff, Complex* y,
+                                int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                double c) const {
     apply_local_kpt(psi, Veff, y, ncol, kpt_cart, cell_lengths, c);
     if (vnl_kpt_ && vnl_kpt_->is_setup()) {
         vnl_kpt_->apply_kpt(psi, y, ncol, grid_->dV());
@@ -377,9 +377,9 @@ void Hamiltonian::apply_mgga_kpt(const Complex* psi, Complex* y, int ncol,
 // Spinor (SOC) interface
 // ---------------------------------------------------------------------------
 
-void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
-                                    int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                                    double c) const {
+void Hamiltonian::apply_spinor_kpt_cpu(const Complex* psi, const double* Veff_spinor, Complex* y,
+                                        int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                                        double c) const {
     // Veff_spinor layout: [V_uu(Nd_d) | V_dd(Nd_d) | Re(V_ud)(Nd_d) | Im(V_ud)(Nd_d)]
     const double* V_uu = Veff_spinor;
     const double* V_dd = Veff_spinor + Nd_d;

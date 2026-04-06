@@ -275,6 +275,8 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
                             const std::vector<AtomNlocInfluence>& nloc_influence,
                             int Nband)
 {
+    dev_ = Device::GPU;
+
     if (!gpu_state_raw_)
         gpu_state_raw_ = new GPUHamiltonianState();
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
@@ -763,15 +765,10 @@ void Hamiltonian::apply_mgga_gpu(const double* psi, double* y, int ncol) const {
 }
 
 // ============================================================
-// Device-dispatching apply() — real (gamma-point)
+// GPU full-apply: real (gamma-point)
 // ============================================================
-void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
-                        int ncol, Device dev, double c) const {
-    if (dev == Device::CPU) {
-        apply(psi, Veff, y, ncol, c);
-        return;
-    }
-
+void Hamiltonian::apply_gpu(const double* psi, const double* Veff, double* y,
+                            int ncol, double c) const {
     // GPU path: local + nonlocal + mGGA + EXX via named _gpu() sub-steps
     apply_local_gpu(psi, Veff, y, ncol, c);
     apply_nonlocal_gpu(psi, y, ncol);
@@ -791,17 +788,11 @@ void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
 }
 
 // ============================================================
-// Device-dispatching apply_kpt() — complex (k-point)
+// GPU full-apply: complex (k-point)
 // ============================================================
 
-void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
-                            int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                            Device dev, double c) const {
-    if (dev == Device::CPU) {
-        apply_kpt(psi, Veff, y, ncol, kpt_cart, cell_lengths, c);
-        return;
-    }
-
+void Hamiltonian::apply_kpt_gpu(const Complex* psi, const double* Veff, Complex* y,
+                                int ncol, double c) const {
     // GPU path — mirrors GPUSCF::hamiltonian_apply_z_cb
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
@@ -922,17 +913,11 @@ void Hamiltonian::apply_kpt(const Complex* psi, const double* Veff, Complex* y,
 }
 
 // ============================================================
-// Device-dispatching apply_spinor_kpt() — SOC spinor
+// GPU full-apply: SOC spinor
 // ============================================================
 
-void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
-                                    int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                                    Device dev, double c) const {
-    if (dev == Device::CPU) {
-        apply_spinor_kpt(psi, Veff_spinor, y, ncol, Nd_d, kpt_cart, cell_lengths, c);
-        return;
-    }
-
+void Hamiltonian::apply_spinor_kpt_gpu(const Complex* psi, const double* Veff_spinor, Complex* y,
+                                        int ncol, int Nd_d, double c) const {
     // GPU path — mirrors GPUSCF::hamiltonian_apply_spinor_z_cb
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;

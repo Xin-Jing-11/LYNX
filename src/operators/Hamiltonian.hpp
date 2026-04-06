@@ -63,8 +63,13 @@ public:
                const HaloExchange& halo,
                const NonlocalProjector* vnl);  // may be null (Gamma-point)
 
+    // Set device for dispatch (CPU or GPU).
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
     // --- Real (Gamma-point) interface ---
 
+    // Primary dispatcher: checks dev_ and calls _cpu() or _gpu() path.
     void apply(const double* psi, const double* Veff, double* y,
                int ncol, double c = 0.0) const;
 
@@ -76,7 +81,7 @@ public:
     // Set the nonlocal projector for k-point (complex Chi with Bloch phases)
     void set_vnl_kpt(const NonlocalProjector* vnl_kpt) const { vnl_kpt_ = vnl_kpt; }
 
-    // Apply H*psi for a specific k-point
+    // Apply H*psi for a specific k-point (dispatcher: checks dev_).
     // kpt_cart: k-point in Cartesian reciprocal coords
     // cell_lengths: (Lx, Ly, Lz)
     void apply_kpt(const Complex* psi, const double* Veff, Complex* y,
@@ -109,28 +114,13 @@ public:
     void apply_mgga_kpt(const Complex* psi, Complex* y, int ncol,
                          const Vec3& kpt_cart, const Vec3& cell_lengths) const;
 
-    // CPU sub-step names (aliases for existing methods)
+    // CPU sub-step names (aliases for CPU path)
     void apply_local_cpu(const double* psi, const double* Veff, double* y,
-                         int ncol, double c) const { apply(psi, Veff, y, ncol, c); }
+                         int ncol, double c) const { apply_cpu(psi, Veff, y, ncol, c); }
     void apply_mgga_cpu(const double* psi, double* y, int ncol) const { apply_mgga(psi, y, ncol); }
 
     const FDStencil& stencil() const { return *stencil_; }
     const Domain& domain() const { return *domain_; }
-
-    // ── Device-dispatching overloads ─────────────────────────────
-    // These forward to the CPU methods (Device::CPU) or GPU kernels (Device::GPU).
-    // GPU path reads parameters from gpu_state_raw_.
-
-    void apply(const double* psi, const double* Veff, double* y,
-               int ncol, Device dev, double c = 0.0) const;
-
-    void apply_kpt(const Complex* psi, const double* Veff, Complex* y,
-                   int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                   Device dev, double c = 0.0) const;
-
-    void apply_spinor_kpt(const Complex* psi, const double* Veff_spinor, Complex* y,
-                          int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
-                          Device dev, double c = 0.0) const;
 
 #ifdef USE_CUDA
     // ── GPU state management ─────────────────────────────────────
@@ -153,6 +143,14 @@ public:
                          int ncol, double c) const;
     void apply_nonlocal_gpu(const double* psi, double* y, int ncol) const;
     void apply_mgga_gpu(const double* psi, double* y, int ncol) const;
+
+    // GPU full-apply methods (defined in Hamiltonian.cu)
+    void apply_gpu(const double* psi, const double* Veff, double* y,
+                   int ncol, double c) const;
+    void apply_kpt_gpu(const Complex* psi, const double* Veff, Complex* y,
+                       int ncol, double c) const;
+    void apply_spinor_kpt_gpu(const Complex* psi, const double* Veff_spinor, Complex* y,
+                              int ncol, int Nd_d, double c) const;
 
     // GPU force/stress: split into separate force-only and stress-only methods.
     // psi stays on GPU — only scalar results are downloaded.
@@ -184,6 +182,7 @@ public:
 #endif
 
 private:
+    Device dev_ = Device::CPU;
     const FDStencil* stencil_ = nullptr;
     const Domain* domain_ = nullptr;
     const FDGrid* grid_ = nullptr;
@@ -194,6 +193,16 @@ private:
     mutable ExactExchange* exx_ = nullptr;           // EXX operator (hybrid)
     mutable int exx_spin_ = 0;                       // current spin for EXX apply
     mutable int exx_kpt_ = 0;                        // current k-point for EXX apply
+
+    // CPU implementation methods (called by dispatchers when dev_ == CPU)
+    void apply_cpu(const double* psi, const double* Veff, double* y,
+                   int ncol, double c) const;
+    void apply_kpt_cpu(const Complex* psi, const double* Veff, Complex* y,
+                       int ncol, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                       double c) const;
+    void apply_spinor_kpt_cpu(const Complex* psi, const double* Veff_spinor, Complex* y,
+                              int ncol, int Nd_d, const Vec3& kpt_cart, const Vec3& cell_lengths,
+                              double c) const;
 
     // Templated stencil application (shared between real and complex)
     template<typename T>

@@ -187,7 +187,7 @@ void chebyshev_filter_gpu(
     int grid = ceildiv(total, bs);
 
     // Step 1: Y = (H*X - c*X) * (sigma/e)
-    H->apply(d_X, d_Veff, d_HX, Ns, Device::GPU, 0.0);
+    H->apply(d_X, d_Veff, d_HX, Ns, 0.0);
     double scale = sigma / e;
     chefsi_init_kernel<<<grid, bs, 0, stream>>>(d_HX, d_X, d_Y, scale, c, total);
 
@@ -200,7 +200,7 @@ void chebyshev_filter_gpu(
         double gamma = 2.0 * sigma_new / e;
         double ss = sigma * sigma_new;
 
-        H->apply(d_Y, d_Veff, d_HX, Ns, Device::GPU, 0.0);
+        H->apply(d_Y, d_Veff, d_HX, Ns, 0.0);
         chefsi_step_kernel<<<grid, bs, 0, stream>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew (pointer swap via memcpy)
@@ -303,7 +303,7 @@ void project_and_diag_gpu(
     size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
     // HX = H * X
-    H->apply(d_X, d_Veff, d_HX, N, Device::GPU, 0.0);
+    H->apply(d_X, d_Veff, d_HX, N, 0.0);
 
     // Hs = X^T * HX * dV
     compute_atb_gpu(d_X, d_HX, d_Hs, Nd, N, dV, stream);
@@ -462,7 +462,7 @@ void chebyshev_filter_z_gpu(
         reinterpret_cast<const std::complex<double>*>(d_X),
         d_Veff,
         reinterpret_cast<std::complex<double>*>(d_HX),
-        Ns, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
+        Ns, {0,0,0}, {0,0,0}, 0.0);
 
     double scale = sigma / e;
     chefsi_init_kernel_z<<<grid, bs, 0, stream>>>(d_Y, d_HX, d_X, scale, c, total);
@@ -480,7 +480,7 @@ void chebyshev_filter_z_gpu(
             reinterpret_cast<const std::complex<double>*>(d_Y),
             d_Veff,
             reinterpret_cast<std::complex<double>*>(d_HX),
-            Ns, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
+            Ns, {0,0,0}, {0,0,0}, 0.0);
         chefsi_step_kernel_z<<<grid, bs, 0, stream>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew
@@ -579,7 +579,7 @@ void project_and_diag_z_gpu(
         reinterpret_cast<const std::complex<double>*>(d_X),
         d_Veff,
         reinterpret_cast<std::complex<double>*>(d_HX),
-        N, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
+        N, {0,0,0}, {0,0,0}, 0.0);
 
     // Hs = X^H * HX * dV
     compute_atb_z_gpu(d_X, d_HX, d_Hs, Nd, N, dV);
