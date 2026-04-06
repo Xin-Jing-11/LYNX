@@ -313,16 +313,6 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
 
     for (int chefsi_pass = 0; chefsi_pass < nchefsi; ++chefsi_pass) {
         if (is_soc_) {
-            // TODO: GPU-resident spinor eigensolver not yet implemented.
-            // The spinor solver (solve_spinor_kpt) allocates host buffers and
-            // passes them to apply_spinor_kpt. If the Hamiltonian device is GPU,
-            // the dispatcher routes to GPU kernels that dereference those host
-            // pointers, causing an illegal memory access. Force CPU dispatch
-            // until a proper GPU spinor path exists.
-#ifdef USE_CUDA
-            auto saved_dev = hamiltonian_->device();
-            hamiltonian_->set_device(Device::CPU);
-#endif
             for (int k = 0; k < Nkpts; ++k) {
                 double* eig = wfn.eigenvalues(0, k).data();
                 Complex* psi_c = wfn.psi_kpt(0, k).data();
@@ -334,6 +324,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
                     hamiltonian_->set_vnl_kpt(vnl_);
                 }
 
+                hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
                 eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
                                             Nd_d, Nband_loc,
                                             state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
@@ -341,9 +332,6 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
                                             params_.cheb_degree,
                                             wfn.psi_kpt(0, k).ld());
             }
-#ifdef USE_CUDA
-            hamiltonian_->set_device(saved_dev);
-#endif
         } else {
             for (int s = 0; s < Nspin_local; ++s) {
                 int s_glob = spin_start_ + s;
