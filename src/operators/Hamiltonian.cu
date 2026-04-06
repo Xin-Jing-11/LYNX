@@ -17,6 +17,7 @@
 #include "operators/Laplacian.cuh"
 #include "xc/GPUExactExchange.cuh"
 #include <cublas_v2.h>
+#include "physics/GPUForce.cuh"
 
 namespace lynx {
 namespace gpu {
@@ -257,6 +258,13 @@ struct GPUHamiltonianState {
 
     // K-point info
     const class KPoints* kpoints = nullptr;
+
+    // Physical atom data for GPU force/stress computation
+    int n_phys_atoms = 0;
+    std::vector<int> h_IP_displ_phys;    // [n_phys_atoms+1] projector offsets per phys atom
+    std::vector<double> h_atom_pos;       // [n_influence*3] influence atom positions
+    double dx = 0, dy = 0, dz = 0;       // grid spacing
+    int xs = 0, ys = 0, zs = 0;          // domain start indices
 };
 
 // ── setup_gpu / cleanup_gpu ──────────────────────────────────
@@ -345,6 +353,18 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
         }
         gv.total_phys_nproj = IP_displ_global[n_phys];
 
+        // Store for GPU force/stress
+        gs->n_phys_atoms = n_phys;
+        gs->h_IP_displ_phys = IP_displ_global;
+
+        // Grid spacing and domain start for stress position weights
+        gs->dx = grid.lattice().lengths().x / grid.Nx();
+        gs->dy = grid.lattice().lengths().y / grid.Ny();
+        gs->dz = grid.lattice().lengths().z / grid.Nz();
+        gs->xs = domain.vertices().xs;
+        gs->ys = domain.vertices().ys;
+        gs->zs = domain.vertices().zs;
+
         // Count influence atoms
         gv.n_influence = 0;
         for (int it = 0; it < ntypes; it++)
@@ -362,6 +382,8 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
 
         gs->h_image_shifts.clear();
         gs->h_image_shifts.reserve(gv.n_influence);
+        gs->h_atom_pos.clear();
+        gs->h_atom_pos.reserve(gv.n_influence * 3);
 
         for (int it = 0; it < ntypes; it++) {
             const auto& inf = nloc_influence[it];
@@ -383,6 +405,11 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
                     gs->h_image_shifts.push_back(inf.image_shift[iat]);
                 else
                     gs->h_image_shifts.push_back({0.0, 0.0, 0.0});
+
+                // Store atom Cartesian position for stress position weights
+                gs->h_atom_pos.push_back(inf.coords[iat].x);
+                gs->h_atom_pos.push_back(inf.coords[iat].y);
+                gs->h_atom_pos.push_back(inf.coords[iat].z);
 
                 for (int ig = 0; ig < ndc; ig++)
                     h_gpos_flat.push_back(inf.grid_pos[iat][ig]);
@@ -634,18 +661,14 @@ void Hamiltonian::set_kpoint_gpu(const Vec3& kpt_cart, const Vec3& cell_lengths)
 // Device-dispatching apply() — real (Gamma-point)
 // ============================================================
 
-void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
-                        int ncol, Device dev, double c) const {
-    if (dev == Device::CPU) {
-        apply(psi, Veff, y, ncol, c);
-        return;
-    }
+// ============================================================
+// GPU sub-step methods — named wrappers for Hamiltonian sub-operations
+// ============================================================
 
-    // GPU path — mirrors GPUSCF::hamiltonian_apply_cb
+void Hamiltonian::apply_local_gpu(const double* psi, const double* Veff, double* y,
+                                   int ncol, double c) const {
     auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-
-    // Local part: -0.5*Lap + Veff
     gpu::hamiltonian_apply_local_gpu(
         psi, Veff, y, gs->d_x_ex,
         gs->nx, gs->ny, gs->nz, gs->FDn, ncol, c,
@@ -653,87 +676,109 @@ void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
         gs->diag_coeff_ham,
         gs->has_mixed_deriv, gs->has_mixed_deriv, gs->has_mixed_deriv,
         stream);
+}
 
-    // Nonlocal part: Vnl*psi
-    if (gs->gpu_vnl.total_phys_nproj > 0) {
-        gpu::nonlocal_projector_apply_gpu(
-            psi, y,
-            gs->gpu_vnl.d_Chi_flat, gs->gpu_vnl.d_gpos_flat,
-            gs->gpu_vnl.d_gpos_offsets, gs->gpu_vnl.d_chi_offsets,
-            gs->gpu_vnl.d_ndc_arr, gs->gpu_vnl.d_nproj_arr,
-            gs->gpu_vnl.d_IP_displ, gs->gpu_vnl.d_Gamma,
-            gs->gpu_vnl.d_alpha,
-            gs->Nd, ncol, gs->dV,
-            gs->gpu_vnl.n_influence, gs->gpu_vnl.total_phys_nproj,
-            gs->gpu_vnl.max_ndc, gs->gpu_vnl.max_nproj, stream);
-    }
+void Hamiltonian::apply_nonlocal_gpu(const double* psi, double* y, int ncol) const {
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (gs->gpu_vnl.total_phys_nproj <= 0) return;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::nonlocal_projector_apply_gpu(
+        psi, y,
+        gs->gpu_vnl.d_Chi_flat, gs->gpu_vnl.d_gpos_flat,
+        gs->gpu_vnl.d_gpos_offsets, gs->gpu_vnl.d_chi_offsets,
+        gs->gpu_vnl.d_ndc_arr, gs->gpu_vnl.d_nproj_arr,
+        gs->gpu_vnl.d_IP_displ, gs->gpu_vnl.d_Gamma,
+        gs->gpu_vnl.d_alpha,
+        gs->Nd, ncol, gs->dV,
+        gs->gpu_vnl.n_influence, gs->gpu_vnl.total_phys_nproj,
+        gs->gpu_vnl.max_ndc, gs->gpu_vnl.max_nproj, stream);
+}
 
-    // mGGA Hamiltonian term
-    if (gs->d_vtau_active) {
-        auto& ctx = gpu::GPUContext::instance();
-        int Nd = gs->Nd;
-        int nx_ex = gs->nx + 2 * gs->FDn;
-        int ny_ex = gs->ny + 2 * gs->FDn;
-        int bs = 256;
-        int total = Nd * ncol;
-        int gs_total = gpu::ceildiv(total, bs);
+void Hamiltonian::apply_mgga_gpu(const double* psi, double* y, int ncol) const {
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs->d_vtau_active) return;
 
-        double* d_dpsi   = gs->d_mgga_dpsi;
-        double* d_vtdpsi = gs->d_mgga_vtdpsi;
-        double* d_div    = gs->d_mgga_div;
-        double* d_vt_ex  = gs->d_mgga_vt_ex;
+    auto& ctx = gpu::GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
+    int Nd = gs->Nd;
+    int nx_ex = gs->nx + 2 * gs->FDn;
+    int ny_ex = gs->ny + 2 * gs->FDn;
+    int bs = 256;
+    int total = Nd * ncol;
+    int gs_total = gpu::ceildiv(total, bs);
 
-        CUDA_CHECK(cudaMemsetAsync(d_div, 0, (size_t)total * sizeof(double), stream));
+    double* d_dpsi   = gs->d_mgga_dpsi;
+    double* d_vtdpsi = gs->d_mgga_vtdpsi;
+    double* d_div    = gs->d_mgga_div;
+    double* d_vt_ex  = gs->d_mgga_vt_ex;
 
-        if (gs->is_orth) {
-            gpu::halo_exchange_batched_nomemset_gpu(psi, gs->d_x_ex,
+    CUDA_CHECK(cudaMemsetAsync(d_div, 0, (size_t)total * sizeof(double), stream));
+
+    if (gs->is_orth) {
+        gpu::halo_exchange_batched_nomemset_gpu(psi, gs->d_x_ex,
+            gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
+        for (int dir = 0; dir < 3; dir++) {
+            gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi,
+                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, dir, ncol, stream);
+            vtau_multiply_batched_kernel<<<gs_total, bs, 0, stream>>>(
+                d_dpsi, gs->d_vtau_active, d_vtdpsi, Nd, total);
+            gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
                 gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
-            for (int dir = 0; dir < 3; dir++) {
-                gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi,
-                    gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, dir, ncol, stream);
-                vtau_multiply_batched_kernel<<<gs_total, bs, 0, stream>>>(
-                    d_dpsi, gs->d_vtau_active, d_vtdpsi, Nd, total);
-                gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
-                    gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
-                gpu::gradient_v3_gpu(d_vt_ex, d_dpsi,
-                    gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, dir, ncol, stream);
-                double one = 1.0;
-                cublasDaxpy(ctx.cublas, total, &one, d_dpsi, 1, d_div, 1);
-            }
-        } else {
-            double* d_dpsi_x = d_dpsi;
-            double* d_dpsi_y = gs->d_mgga_dpsi_y;
-            double* d_dpsi_zr = gs->d_mgga_dpsi_z_r;
-            int gs_nd = gpu::ceildiv(Nd, bs);
-            gpu::halo_exchange_batched_nomemset_gpu(psi, gs->d_x_ex,
-                gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
-            gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi_x,
-                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, 0, ncol, stream);
-            gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi_y,
-                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, 1, ncol, stream);
-            gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi_zr,
-                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, 2, ncol, stream);
-            for (int dir = 0; dir < 3; dir++) {
-                for (int n = 0; n < ncol; n++) {
-                    vtau_lapcT_multiply_kernel<<<gs_nd, bs, 0, stream>>>(
-                        d_dpsi_x + (size_t)n * Nd, d_dpsi_y + (size_t)n * Nd,
-                        d_dpsi_zr + (size_t)n * Nd,
-                        gs->d_vtau_active, d_vtdpsi + (size_t)n * Nd, Nd,
-                        gs->lapcT[dir*3+0], gs->lapcT[dir*3+1], gs->lapcT[dir*3+2]);
-                }
-                gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
-                    gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
-                gpu::gradient_v3_gpu(d_vt_ex, d_vtdpsi,
-                    gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, dir, ncol, stream);
-                double one = 1.0;
-                cublasDaxpy(ctx.cublas, total, &one, d_vtdpsi, 1, d_div, 1);
-            }
+            gpu::gradient_v3_gpu(d_vt_ex, d_dpsi,
+                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, dir, ncol, stream);
+            double one = 1.0;
+            cublasDaxpy(ctx.cublas, total, &one, d_dpsi, 1, d_div, 1);
         }
-
-        mgga_ham_sub_kernel<<<gs_total, bs, 0, stream>>>(y, d_div, total);
+    } else {
+        double* d_dpsi_x = d_dpsi;
+        double* d_dpsi_y = gs->d_mgga_dpsi_y;
+        double* d_dpsi_zr = gs->d_mgga_dpsi_z_r;
+        int gs_nd = gpu::ceildiv(Nd, bs);
+        gpu::halo_exchange_batched_nomemset_gpu(psi, gs->d_x_ex,
+            gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
+        gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi_x,
+            gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, 0, ncol, stream);
+        gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi_y,
+            gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, 1, ncol, stream);
+        gpu::gradient_v3_gpu(gs->d_x_ex, d_dpsi_zr,
+            gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, 2, ncol, stream);
+        for (int dir = 0; dir < 3; dir++) {
+            for (int n = 0; n < ncol; n++) {
+                vtau_lapcT_multiply_kernel<<<gs_nd, bs, 0, stream>>>(
+                    d_dpsi_x + (size_t)n * Nd, d_dpsi_y + (size_t)n * Nd,
+                    d_dpsi_zr + (size_t)n * Nd,
+                    gs->d_vtau_active, d_vtdpsi + (size_t)n * Nd, Nd,
+                    gs->lapcT[dir*3+0], gs->lapcT[dir*3+1], gs->lapcT[dir*3+2]);
+            }
+            gpu::halo_exchange_batched_nomemset_gpu(d_vtdpsi, d_vt_ex,
+                gs->nx, gs->ny, gs->nz, gs->FDn, ncol, true, true, true, stream);
+            gpu::gradient_v3_gpu(d_vt_ex, d_vtdpsi,
+                gs->nx, gs->ny, gs->nz, gs->FDn, nx_ex, ny_ex, dir, ncol, stream);
+            double one = 1.0;
+            cublasDaxpy(ctx.cublas, total, &one, d_vtdpsi, 1, d_div, 1);
+        }
     }
 
-    // Exact exchange
+    mgga_ham_sub_kernel<<<gs_total, bs, 0, stream>>>(y, d_div, total);
+}
+
+// ============================================================
+// Device-dispatching apply() — real (gamma-point)
+// ============================================================
+void Hamiltonian::apply(const double* psi, const double* Veff, double* y,
+                        int ncol, Device dev, double c) const {
+    if (dev == Device::CPU) {
+        apply(psi, Veff, y, ncol, c);
+        return;
+    }
+
+    // GPU path: local + nonlocal + mGGA + EXX via named _gpu() sub-steps
+    apply_local_gpu(psi, Veff, y, ncol, c);
+    apply_nonlocal_gpu(psi, y, ncol);
+    apply_mgga_gpu(psi, y, ncol);
+
+    // Exact exchange (inline — EXX is a separate operator, not a Hamiltonian sub-step)
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
     if (gs->exx_active && gs->d_Xi && gs->exx_Nocc > 0) {
         auto& ctx = gpu::GPUContext::instance();
         gpu::apply_Vx_gpu(ctx.cublas,
@@ -1005,6 +1050,151 @@ void Hamiltonian::apply_spinor_kpt(const Complex* psi, const double* Veff_spinor
             gs->gpu_soc.n_influence_soc, gs->gpu_soc.total_soc_nproj,
             gs->gpu_soc.max_ndc_soc, gs->gpu_soc.max_nproj_soc, stream);
     }
+}
+
+// ============================================================
+// GPU Force/Stress: delegate to split GPUForce.cu functions
+// ============================================================
+
+void Hamiltonian::compute_nonlocal_force_gpu(
+    const double* d_psi, const double* h_occ, int Nband,
+    double occfac,
+    double* h_f_nloc, double* h_energy_nl) const
+{
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs) return;
+
+    auto& gv = gs->gpu_vnl;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_nonlocal_force_gpu(
+        d_psi, d_occ,
+        gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
+        gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
+        gv.d_IP_displ, gv.d_Gamma,
+        gv.n_influence, gv.total_phys_nproj,
+        gv.max_ndc, gv.max_nproj,
+        gs->n_phys_atoms, gs->h_IP_displ_phys.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV, occfac,
+        h_f_nloc, h_energy_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void Hamiltonian::compute_kinetic_nonlocal_stress_gpu(
+    const double* d_psi, const double* h_occ, int Nband,
+    double occfac,
+    double* h_stress_k, double* h_stress_nl) const
+{
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs) return;
+
+    auto& gv = gs->gpu_vnl;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_kinetic_nonlocal_stress_gpu(
+        d_psi, d_occ,
+        gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
+        gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
+        gv.d_IP_displ, gv.d_Gamma,
+        gv.n_influence, gv.total_phys_nproj,
+        gv.max_ndc, gv.max_nproj,
+        gs->n_phys_atoms, gs->h_IP_displ_phys.data(), gs->h_atom_pos.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV, gs->dx, gs->dy, gs->dz,
+        gs->xs, gs->ys, gs->zs,
+        occfac,
+        h_stress_k, h_stress_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void Hamiltonian::compute_nonlocal_force_kpt_gpu(
+    const void* d_psi_z, const double* h_occ, int Nband,
+    double spn_fac_wk,
+    double* h_f_nloc, double* h_energy_nl) const
+{
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs) return;
+
+    auto& gv = gs->gpu_vnl;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_nonlocal_force_kpt_gpu(
+        static_cast<const cuDoubleComplex*>(d_psi_z), d_occ,
+        gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
+        gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
+        gv.d_IP_displ, gv.d_Gamma,
+        gs->d_bloch_fac,
+        gv.n_influence, gv.total_phys_nproj,
+        gv.max_ndc, gv.max_nproj,
+        gs->n_phys_atoms, gs->h_IP_displ_phys.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV,
+        gs->kxLx, gs->kyLy, gs->kzLz,
+        spn_fac_wk,
+        h_f_nloc, h_energy_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void Hamiltonian::compute_kinetic_nonlocal_stress_kpt_gpu(
+    const void* d_psi_z, const double* h_occ, int Nband,
+    double spn_fac_wk,
+    double* h_stress_k, double* h_stress_nl) const
+{
+    auto* gs = static_cast<GPUHamiltonianState*>(gpu_state_raw_);
+    if (!gs) return;
+
+    auto& gv = gs->gpu_vnl;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_kinetic_nonlocal_stress_kpt_gpu(
+        static_cast<const cuDoubleComplex*>(d_psi_z), d_occ,
+        gv.d_Chi_flat, gv.d_gpos_flat, gv.d_gpos_offsets,
+        gv.d_chi_offsets, gv.d_ndc_arr, gv.d_nproj_arr,
+        gv.d_IP_displ, gv.d_Gamma,
+        gs->d_bloch_fac,
+        gv.n_influence, gv.total_phys_nproj,
+        gv.max_ndc, gv.max_nproj,
+        gs->n_phys_atoms, gs->h_IP_displ_phys.data(), gs->h_atom_pos.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV, gs->dx, gs->dy, gs->dz,
+        gs->xs, gs->ys, gs->zs,
+        gs->kxLx, gs->kyLy, gs->kzLz,
+        spn_fac_wk,
+        h_stress_k, h_stress_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 } // namespace lynx

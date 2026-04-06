@@ -116,10 +116,15 @@ endif()
 # libxc (required — built from submodule)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ENABLE_FORTRAN OFF CACHE BOOL "" FORCE)
-set(ENABLE_CUDA OFF CACHE BOOL "" FORCE)  # libxc CUDA rejects host pointers (cudaMemoryTypeUnregistered) — requires all callers to use pinned memory
+set(ENABLE_CUDA ${USE_CUDA} CACHE BOOL "" FORCE)  # libxc CUDA enabled when building with USE_CUDA — accepts device pointers directly
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(CMAKE_INSTALL_LIBDIR "lib" CACHE STRING "" FORCE)
 add_subdirectory(external/libxc EXCLUDE_FROM_ALL)
+if(USE_CUDA)
+    # Resolve libxc's CUDA device symbols within the xc library itself,
+    # so downstream executables (even pure C++) link cleanly.
+    set_target_properties(xc PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+endif()
 set(LIBXC_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/external/libxc/src
     ${CMAKE_CURRENT_BINARY_DIR}/external/libxc

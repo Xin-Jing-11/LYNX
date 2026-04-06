@@ -2,6 +2,7 @@
 
 #include "core/types.hpp"
 #include "core/DeviceArray.hpp"
+#include "core/DeviceTag.hpp"
 #include "core/Domain.hpp"
 #include "core/FDGrid.hpp"
 #include "core/KPoints.hpp"
@@ -21,6 +22,8 @@ namespace lynx {
 struct AtomSetup;      // forward declaration (defined in AtomSetup.hpp)
 struct SystemConfig;   // forward declaration (defined in InputParser.hpp)
 class SCF;             // forward declaration
+class EigenSolver;     // forward declaration
+class Hamiltonian;     // forward declaration
 
 // Force calculation matching reference LYNX.
 // Three contributions:
@@ -76,6 +79,7 @@ public:
 
 private:
     const LynxContext* ctx_ = nullptr;
+    Device dev_ = Device::CPU;
 
     std::vector<double> f_local_;
     std::vector<double> f_nloc_;
@@ -111,7 +115,7 @@ private:
         const double* b,
         const double* b_ref);
 
-    // Nonlocal force: F = -occfac·2·Σ g_n Γ <χ|ψ><χ|∇ψ>
+    // Nonlocal force: dispatches to _cpu() or _gpu() based on dev_.
     void compute_nonlocal(
         const Wavefunction& wfn,
         const Crystal& crystal,
@@ -119,11 +123,33 @@ private:
         const NonlocalProjector& vnl,
         const std::vector<double>& kpt_weights);
 
+    // CPU path: compute from host psi
+    void compute_nonlocal_cpu(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const std::vector<double>& kpt_weights);
+
+#ifdef USE_CUDA
+    // GPU path: compute from device-resident psi via EigenSolver+Hamiltonian
+    void compute_nonlocal_gpu(
+        const Wavefunction& wfn,
+        const Crystal& crystal,
+        const std::vector<AtomNlocInfluence>& nloc_influence,
+        const NonlocalProjector& vnl,
+        const std::vector<double>& kpt_weights);
+#endif
+
     // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
     void compute_xc_nlcc(
         const Crystal& crystal,
         const std::vector<AtomInfluence>& influence,
         const double* Vxc);
+
+    // Non-owning references for GPU dispatch (set by compute())
+    const EigenSolver* eigsolver_ = nullptr;
+    const Hamiltonian* hamiltonian_ = nullptr;
 };
 
 } // namespace lynx

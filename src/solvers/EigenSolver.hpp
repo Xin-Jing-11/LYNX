@@ -69,25 +69,6 @@ public:
                                     double& eigval_min, double& eigval_max,
                                     double tol_lanczos = 1e-2, int max_iter = 1000);
 
-    // --- Device-dispatching interfaces (CPU delegates to existing, GPU uses gpu:: kernels) ---
-
-    void solve(double* psi, double* eigvals, const double* Veff,
-               int Nd_d, int Nband,
-               double lambda_cutoff, double eigval_min, double eigval_max,
-               int cheb_degree, int ld, Device dev);
-
-    void solve_kpt(Complex* psi, double* eigvals, const double* Veff,
-                   int Nd_d, int Nband,
-                   double lambda_cutoff, double eigval_min, double eigval_max,
-                   const Vec3& kpt_cart, const Vec3& cell_lengths,
-                   int cheb_degree, int ld, Device dev);
-
-    void solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
-                          int Nd_d, int Nband,
-                          double lambda_cutoff, double eigval_min, double eigval_max,
-                          const Vec3& kpt_cart, const Vec3& cell_lengths,
-                          int cheb_degree, int ld, Device dev);
-
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUEigenState (defined in .cu)
 
@@ -96,31 +77,17 @@ public:
     void cleanup_gpu();
 
     // --- GPU-resident data accessors ---
-    // Returns device pointer to persistent psi (real, gamma-point).
-    // Valid after setup_gpu() + first solve() or upload_psi_to_device().
     double* gpu_psi();
     const double* gpu_psi() const;
-
-    // Returns device pointer to eigenvalues on GPU.
     double* gpu_eigvals();
-
-    // Returns device pointer to Veff on GPU (set by SCF before solve).
     double* gpu_Veff();
 
-    // Upload psi from host to persistent device buffer (call once before SCF loop).
+    // Upload/download between host and persistent device buffers
     void upload_psi_to_device(const double* h_psi, int Nd, int Nband);
-
-    // Upload complex psi from host to persistent device buffer.
     void upload_psi_z_to_device(const Complex* h_psi, int Nd, int Nband);
-
-    // Download eigvals from device to host (tiny transfer, per-iteration).
     void download_eigvals(double* h_eigvals, int Nband);
-
-    // Download psi from device to host (once after SCF loop completes).
     void download_psi(double* h_psi, int Nd, int Nband);
     void download_psi_z(Complex* h_psi, int Nd, int Nband);
-
-    // Upload Veff to device buffer (from EffectivePotential host arrays).
     void upload_Veff(const double* h_Veff, int Nd);
 
     // GPU-resident solve: psi is already on device, only upload Veff and
@@ -135,6 +102,43 @@ public:
                             int Nd_d, int Nband,
                             double lambda_cutoff, double eigval_min, double eigval_max,
                             int cheb_degree);
+
+    // --- GPU sub-step methods (defined in EigenSolver.cu) ---
+    // Real (gamma-point) GPU sub-steps
+    void chebyshev_filter_gpu(int Nd_d, int Nband,
+                               double lambda_cutoff, double eigval_min, double eigval_max,
+                               int cheb_degree);
+    void orthogonalize_gpu(int Nd_d, int Nband);
+    void project_and_diag_gpu(int Nd_d, int Nband);
+    void subspace_rotation_gpu(int Nd_d, int Nband);
+
+    // Complex (k-point) GPU sub-steps
+    void chebyshev_filter_kpt_gpu(int Nd_d, int Nband,
+                                   double lambda_cutoff, double eigval_min, double eigval_max,
+                                   int cheb_degree);
+    void orthogonalize_kpt_gpu(int Nd_d, int Nband);
+    void project_and_diag_kpt_gpu(int Nd_d, int Nband);
+    void subspace_rotation_kpt_gpu(int Nd_d, int Nband);
+
+    // GPU workspace pointer accessors (for use in .cpp algorithm)
+    double* gpu_Y();
+    double* gpu_Hs();
+
+    // Per-(spin,kpt) device psi buffer management.
+    // Allocates one psi buffer per (spin,kpt) so all wavefunctions stay
+    // GPU-resident simultaneously — no upload/download between solves.
+    void allocate_psi_buffers(int Nspin_local, int Nkpts);
+    void set_active_psi(int spin, int kpt);
+
+    // Randomize all per-(spin,kpt) psi buffers directly on GPU via cuRAND.
+    // Psi is born on GPU — no CPU randomization or H2D transfer needed.
+    void randomize_psi_gpu(int Nspin_local, int spin_start, int Nkpts);
+
+    // Device psi pointer for a specific (spin, kpt)
+    double* device_psi_real(int spin, int kpt);
+    const double* device_psi_real(int spin, int kpt) const;
+    void* device_psi_z(int spin, int kpt);
+    const void* device_psi_z(int spin, int kpt) const;
 #endif
 
     double lambda_cutoff() const { return lambda_cutoff_; }

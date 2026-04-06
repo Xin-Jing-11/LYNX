@@ -182,6 +182,7 @@ void EffectivePotential::setup_gpu(const LynxContext& ctx, int Nspin,
     // Setup PoissonSolver for GPU dispatch
     gs->poisson.setup(ctx.laplacian(), ctx.stencil(), ctx.domain(), ctx.grid(), ctx.halo());
     gs->poisson.setup_gpu(ctx);
+    gs->poisson.set_device(Device::GPU);
 }
 
 void EffectivePotential::cleanup_gpu() {
@@ -211,89 +212,102 @@ EffectivePotential::~EffectivePotential() {
 // ============================================================
 // Device-dispatching compute() — GPU path
 // ============================================================
-void EffectivePotential::compute(const ElectronDensity& density,
-                                  const double* rho_b,
-                                  const double* rho_core,
-                                  XCType xc_type,
-                                  double exx_frac_scale,
-                                  double poisson_tol,
-                                  VeffArrays& arrays,
-                                  Device dev,
-                                  const double* tau,
-                                  bool tau_valid)
-{
-    if (dev == Device::CPU) {
-        compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
-                poisson_tol, arrays, tau, tau_valid);
-        return;
-    }
+// ============================================================
+// GPU kernel wrappers — thin wrappers, no algorithm logic
+// ============================================================
 
-    // GPU path: XC + Poisson + combine all on GPU
-    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
-    if (!gs || !gs->buffers_allocated) {
-        // Fallback to CPU if GPU state not initialized
-        compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
-                poisson_tol, arrays, tau, tau_valid);
-        return;
+void EffectivePotential::poisson_rhs_gpu(const double* d_rho_total,
+                                          const double* d_pseudocharge,
+                                          double* d_rhs, int Nd) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int bs = 256;
+    int grid_sz = gpu::ceildiv(Nd, bs);
+    if (d_pseudocharge) {
+        poisson_rhs_kernel<<<grid_sz, bs, 0, stream>>>(
+            d_rho_total, d_pseudocharge, d_rhs, 4.0 * constants::PI, Nd);
+    } else {
+        poisson_rhs_nob_kernel<<<grid_sz, bs, 0, stream>>>(
+            d_rho_total, d_rhs, 4.0 * constants::PI, Nd);
     }
+}
+
+void EffectivePotential::combine_veff_gpu(const double* d_Vxc, const double* d_phi,
+                                           double* d_Veff, int Nd, int Nspin) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int bs = 256;
+    int grid_sz = gpu::ceildiv(Nd, bs);
+    for (int s = 0; s < Nspin; ++s) {
+        veff_combine_kernel<<<grid_sz, bs, 0, stream>>>(
+            d_Vxc + s * Nd, d_phi, d_Veff + s * Nd, Nd);
+    }
+}
+
+void EffectivePotential::combine_veff_spinor_gpu(
+    const double* d_Vxc_up, const double* d_Vxc_dn,
+    const double* d_phi,
+    const double* d_mag_x, const double* d_mag_y, const double* d_mag_z,
+    double* d_Veff_spinor, int Nd) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int bs = 256;
+    int grid_sz = gpu::ceildiv(Nd, bs);
+    veff_spinor_from_xc_kernel<<<grid_sz, bs, 0, stream>>>(
+        d_Vxc_up, d_Vxc_dn, d_phi, d_mag_x, d_mag_y, d_mag_z,
+        d_Veff_spinor, Nd);
+}
+
+// ============================================================
+// Device-dispatching compute() — GPU path
+// Algorithm uses _gpu() kernel wrappers + internal GPU operators.
+// ============================================================
+void EffectivePotential::compute_gpu(const ElectronDensity& density,
+                                      const double* rho_b,
+                                      const double* rho_core,
+                                      XCType xc_type,
+                                      double exx_frac_scale,
+                                      double poisson_tol,
+                                      VeffArrays& arrays,
+                                      const double* tau,
+                                      bool tau_valid)
+{
+    auto* gs = static_cast<GPUVeffState*>(gpu_state_raw_);
 
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int Nd = gs->Nd;
     int Nspin = gs->Nspin;
-    int bs = 256;
-    int grid_sz = gpu::ceildiv(Nd, bs);
 
-    // For hybrid functionals: scale exchange
-    if (exx_frac_scale > 0.0) {
+    // Configure exchange scaling for hybrid functionals
+    if (exx_frac_scale > 0.0)
         gs->xc.set_exchange_scale(1.0 - exx_frac_scale);
-    }
-
-    // For mGGA: set tau_valid so GPU XC path uses SCAN kernels when tau is available
-    if (is_mgga_type(xc_type)) {
+    if (is_mgga_type(xc_type))
         gs->xc.set_gpu_tau_valid(tau_valid);
-    }
 
-    // 1. Upload density from host to device
+    // 1. Upload density
     upload_density(density);
 
-    // 2. XC evaluation on GPU
-    // XC handles NLCC internally (rho_core was uploaded in setup_gpu via set_gpu_nlcc).
-    // For mGGA: pass device tau/vtau when available (set via set_device_tau from SCF).
+    // 2. XC evaluation (dev_ is GPU, dispatches internally)
     double* d_tau_ptr = (tau_valid && gs->d_tau) ? gs->d_tau : nullptr;
     double* d_vtau_ptr = (tau_valid && gs->d_vtau) ? gs->d_vtau : nullptr;
-
-    if (Nspin == 2) {
+    gs->xc.set_device(Device::GPU);
+    if (Nspin == 2)
         gs->xc.evaluate_spin(gs->d_rho, gs->d_Vxc, gs->d_exc, Nd,
-                              Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
-    } else {
+                              nullptr, d_tau_ptr, d_vtau_ptr);
+    else
         gs->xc.evaluate(gs->d_rho_total, gs->d_Vxc, gs->d_exc, Nd,
-                         Device::GPU, nullptr, d_tau_ptr, d_vtau_ptr);
-    }
+                         nullptr, d_tau_ptr, d_vtau_ptr);
 
-    // 3. Prepare Poisson RHS on device: 4*pi*(rho_total + pseudocharge)
-    if (rho_b) {
-        poisson_rhs_kernel<<<grid_sz, bs, 0, stream>>>(
-            gs->d_rho_total, gs->d_pseudocharge, gs->d_rhs,
-            4.0 * constants::PI, Nd);
-    } else {
-        poisson_rhs_nob_kernel<<<grid_sz, bs, 0, stream>>>(
-            gs->d_rho_total, gs->d_rhs,
-            4.0 * constants::PI, Nd);
-    }
+    // 3. Poisson RHS via kernel wrapper
+    poisson_rhs_gpu(gs->d_rho_total, rho_b ? gs->d_pseudocharge : nullptr, gs->d_rhs, Nd);
 
-    // 4. Solve Poisson equation on GPU (handles mean-subtraction internally)
-    gs->poisson.solve(gs->d_rhs, gs->d_phi, poisson_tol, Device::GPU);
+    // 4. Poisson solve (dispatches internally to GPU)
+    gs->poisson.solve(gs->d_rhs, gs->d_phi, poisson_tol);
 
-    // 5. Veff = Vxc + phi (per spin channel)
-    for (int s = 0; s < Nspin; ++s) {
-        veff_combine_kernel<<<grid_sz, bs, 0, stream>>>(
-            gs->d_Vxc + s * Nd, gs->d_phi, gs->d_Veff + s * Nd, Nd);
-    }
+    // 5. Combine Veff = Vxc + phi via kernel wrapper
+    combine_veff_gpu(gs->d_Vxc, gs->d_phi, gs->d_Veff, Nd, Nspin);
 
-    // 6. Download results to host arrays (for Energy::compute_all and convergence checks)
+    // 6. Download to host
     download_to_host(arrays);
 
-    // 7. For mGGA: download vtau from device and set on Hamiltonian
+    // 7. mGGA vtau handling
     if (is_mgga_type(xc_type) && tau_valid && gs->d_vtau) {
         int vtau_size = (Nspin == 2) ? 2 * Nd : Nd;
         CUDA_CHECK(cudaMemcpyAsync(arrays.vtau.data(), gs->d_vtau,
@@ -307,24 +321,20 @@ void EffectivePotential::compute(const ElectronDensity& density,
 }
 
 // ============================================================
-// Device-dispatching compute_spinor() — GPU path
+// GPU compute_spinor — not yet implemented, falls back to CPU
 // ============================================================
-void EffectivePotential::compute_spinor(const ElectronDensity& density,
-                                         const double* rho_b,
-                                         const double* rho_core,
-                                         XCType xc_type,
-                                         double poisson_tol,
-                                         VeffArrays& arrays,
-                                         Device dev)
+void EffectivePotential::compute_spinor_gpu(const ElectronDensity& density,
+                                             const double* rho_b,
+                                             const double* rho_core,
+                                             XCType xc_type,
+                                             double poisson_tol,
+                                             VeffArrays& arrays)
 {
-    if (dev == Device::CPU) {
-        compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
-        return;
-    }
-
     // SOC GPU path: not yet implemented (requires noncollinear density on device)
     // Fall back to CPU for correctness
+    dev_ = Device::CPU;
     compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
+    dev_ = Device::GPU;
 }
 
 // ============================================================

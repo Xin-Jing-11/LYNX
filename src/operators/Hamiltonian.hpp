@@ -109,6 +109,11 @@ public:
     void apply_mgga_kpt(const Complex* psi, Complex* y, int ncol,
                          const Vec3& kpt_cart, const Vec3& cell_lengths) const;
 
+    // CPU sub-step names (aliases for existing methods)
+    void apply_local_cpu(const double* psi, const double* Veff, double* y,
+                         int ncol, double c) const { apply(psi, Veff, y, ncol, c); }
+    void apply_mgga_cpu(const double* psi, double* y, int ncol) const { apply_mgga(psi, y, ncol); }
+
     const FDStencil& stencil() const { return *stencil_; }
     const Domain& domain() const { return *domain_; }
 
@@ -142,6 +147,40 @@ public:
 
     // Update k-point Bloch phase factors on GPU (kxLx, kyLy, kzLz + d_bloch_fac).
     void set_kpoint_gpu(const Vec3& kpt_cart, const Vec3& cell_lengths);
+
+    // GPU sub-step methods (defined in Hamiltonian.cu)
+    void apply_local_gpu(const double* psi, const double* Veff, double* y,
+                         int ncol, double c) const;
+    void apply_nonlocal_gpu(const double* psi, double* y, int ncol) const;
+    void apply_mgga_gpu(const double* psi, double* y, int ncol) const;
+
+    // GPU force/stress: split into separate force-only and stress-only methods.
+    // psi stays on GPU — only scalar results are downloaded.
+    // Host-occ overloads: upload h_occ internally, avoiding CUDA calls in .cpp files.
+
+    // Real gamma-point: nonlocal force + energy
+    void compute_nonlocal_force_gpu(
+        const double* d_psi, const double* h_occ, int Nband,
+        double occfac,
+        double* h_f_nloc, double* h_energy_nl) const;
+
+    // Real gamma-point: kinetic + nonlocal stress
+    void compute_kinetic_nonlocal_stress_gpu(
+        const double* d_psi, const double* h_occ, int Nband,
+        double occfac,
+        double* h_stress_k, double* h_stress_nl) const;
+
+    // Complex k-point: nonlocal force + energy
+    void compute_nonlocal_force_kpt_gpu(
+        const void* d_psi_z, const double* h_occ, int Nband,
+        double spn_fac_wk,
+        double* h_f_nloc, double* h_energy_nl) const;
+
+    // Complex k-point: kinetic + nonlocal stress
+    void compute_kinetic_nonlocal_stress_kpt_gpu(
+        const void* d_psi_z, const double* h_occ, int Nband,
+        double spn_fac_wk,
+        double* h_stress_k, double* h_stress_nl) const;
 #endif
 
 private:

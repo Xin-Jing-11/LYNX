@@ -49,12 +49,17 @@ public:
     // For Nspin==2: tau has 3*Nd_d elements [up | down | total].
     void allocate(int Nd_d, int Nspin);
 
-    // Compute tau from wavefunctions and occupations (with LynxContext — preferred).
+    // Set device for dispatch (CPU or GPU).
+    void set_device(Device dev) { dev_ = dev; }
+    Device device() const { return dev_; }
+
+    // Compute tau from wavefunctions and occupations.
+    // Dispatches to CPU or GPU path based on dev_ member.
     void compute(const LynxContext& ctx,
                  const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights);
 
-    // Compute tau from wavefunctions and occupations (explicit params).
+    // Compute tau from wavefunctions and occupations (explicit params — CPU only).
     void compute(const Wavefunction& wfn,
                  const std::vector<double>& kpt_weights,
                  const FDGrid& grid,
@@ -70,21 +75,31 @@ public:
                  int band_start,
                  int Nspin_global);
 
-    // Device-dispatching compute: CPU delegates to existing, GPU uses gpu:: kernels.
-    void compute(const LynxContext& ctx,
-                 const Wavefunction& wfn,
-                 const std::vector<double>& kpt_weights,
-                 Device dev);
-
 #ifdef USE_CUDA
     void* gpu_state_raw_ = nullptr;  // Opaque pointer to GPUTauState (defined in .cu)
 
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
+    // GPU compute path (defined in .cu)
+    void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
+                     const std::vector<double>& kpt_weights);
+
+    // GPU compute from per-(spin,kpt) device-resident psi — no psi H2D transfers
+    void compute_gpu_from_device(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const std::vector<double>& kpt_weights,
+        const std::vector<const double*>& d_psi_real_ptrs,
+        const std::vector<const void*>& d_psi_z_ptrs);
+
     // Device pointer accessors (for GPU-resident mGGA pipeline)
     double* d_tau();
     double* d_vtau();
+
+    // GPU kernel wrapper: halo + gradient + tau accumulate for one band (defined in .cu)
+    void gradient_accumulate_tau_gpu(const double* d_psi_col, double* d_tau_s,
+                                     double weight, int Nd);
 #endif
 
     // Access tau data
@@ -97,6 +112,7 @@ public:
     void set_valid(bool v) { valid_ = v; }
 
 private:
+    Device dev_ = Device::CPU;
     DeviceArray<double> tau_;
     bool valid_ = false;
 };

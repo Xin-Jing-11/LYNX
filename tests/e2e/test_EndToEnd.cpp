@@ -240,12 +240,12 @@ static DFTResult run_single_point(const std::string& json_file) {
     atoms.Nelectron = Nelectron;
     atoms.Natom = Natom;
 
-    // Forces
+    // Forces (GPU builds: dispatches to GPU internally via dev_ member)
     Forces forces;
     forces.compute(ctx, config, wfn, scf, atoms, vnl);
     result.forces = forces.total_forces();
 
-    // Stress
+    // Stress (GPU builds: dispatches to GPU internally via dev_ member)
     Stress stress_calc;
     stress_calc.compute(ctx, config, wfn, scf, atoms, vnl);
     result.stress = stress_calc.total_stress();

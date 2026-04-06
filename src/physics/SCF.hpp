@@ -93,6 +93,7 @@ struct SCFParams {
 class SCF {
 public:
     SCF() = default;
+    ~SCF();
     SCF(const SCF&) = delete;
     SCF& operator=(const SCF&) = delete;
     SCF(SCF&&) = default;
@@ -143,6 +144,10 @@ public:
     // GPU mGGA stress: computed post-SCF using Hamiltonian's GPU state
     // (psi stays on device; see Stress.cpp for usage)
     const Hamiltonian* hamiltonian_ptr() const { return hamiltonian_; }
+    const EigenSolver& eigsolver() const { return eigsolver_; }
+
+    // Clean up GPU state (called at end of run(), after forces+stress)
+    void cleanup_gpu();
 #endif
 
 private:
@@ -192,6 +197,10 @@ private:
     // SOC / noncollinear
     bool is_soc_ = false;
 
+    // Cached SCF dimensions (for post-SCF device psi access)
+    int Nband_loc_ = 0;
+    int Nkpts_ = 0;
+
     // Exact exchange (hybrid functionals)
     ExactExchange* exx_ = nullptr;
 
@@ -199,19 +208,21 @@ private:
     EffectivePotential veff_builder_;
 
     // SCF loop sub-steps (extracted from run())
-    void solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver, SCFState& state, int scf_iter);
+    void solve_eigenproblem(Wavefunction& wfn, SCFState& state, int scf_iter);
     void compute_new_density(const Wavefunction& wfn, const SCFState& state,
-                             ElectronDensity& rho_new, EigenSolver* eigsolver = nullptr);
+                             ElectronDensity& rho_new);
     void compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho_new,
                             const double* rho_b, double Eself, double Ec, SCFState& state);
     bool check_convergence(const Wavefunction& wfn, const ElectronDensity& rho_new,
                            const SCFState& state, int scf_iter);
     void mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
-                        const double* rho_b, const double* rho_core, int Nelectron, SCFState& state,
-                        EigenSolver* eigsolver = nullptr);
+                        const double* rho_b, const double* rho_core, int Nelectron, SCFState& state);
 
     // Kinetic energy density (mGGA)
     KineticEnergyDensity tau_;
+
+    // EigenSolver (member so device psi persists for post-SCF forces/stress)
+    EigenSolver eigsolver_;
 
     // SCF initialization helpers (merged from SCFInitializer)
     static SCFState initialize_scf(

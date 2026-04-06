@@ -17,6 +17,8 @@
 #include <cublas_v2.h>
 #include <cusolverDn.h>
 
+#include <xc.h>
+#include <xc_funcs.h>
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 #include "core/constants.hpp"
@@ -82,15 +84,6 @@ void upload_stencil_coefficients(
     const double* D2xy, const double* D2xz, const double* D2yz,
     int FDn);
 
-void eigensolver_solve_gpu(
-    double* d_psi, double* d_eigvals, const double* d_Veff,
-    double* d_Y, double* d_Xold, double* d_Xnew,
-    double* d_HX, double* d_x_ex,
-    double* d_Hs, double* d_Ms,
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int cheb_degree, double dV,
-    void (*apply_H)(const double*, const double*, double*, double*, int));
 
 void nonlocal_projector_apply_gpu(
     const double* d_psi, double* d_Hpsi,
@@ -118,20 +111,22 @@ void gradient_gpu(
     int nx_ex, int ny_ex,
     int direction, int ncol, cudaStream_t stream = 0);
 
-void gga_pbe_gpu(const double* d_rho, const double* d_sigma,
-                  double* d_exc, double* d_vxc, double* d_v2xc, int N, cudaStream_t stream = 0);
+// gga_pbe_gpu removed — replaced by libxc CUDA device calls below
 
-int aar_gpu(
-    void (*op_gpu)(const double* d_x, double* d_Ax),
-    void (*precond_gpu)(const double* d_r, double* d_f),
-    const double* d_b, double* d_x, int N,
-    double omega, double beta, int m, int p,
-    double tol, int max_iter,
-    double* d_r, double* d_f, double* d_Ax,
-    double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
+void compute_nonlocal_force_gpu(
+    const double* d_psi, const double* d_occ,
+    const double* d_Chi_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets, const int* d_chi_offsets,
+    const int* d_ndc_arr, const int* d_nproj_arr,
+    const int* d_IP_displ, const double* d_Gamma,
+    int n_influence, int total_nproj, int max_ndc, int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double occfac,
+    double* h_f_nloc, double* h_energy_nl, cudaStream_t stream = 0);
 
-void compute_force_stress_gpu(
+void compute_kinetic_nonlocal_stress_gpu(
     const double* d_psi, const double* d_occ,
     const double* d_Chi_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets, const int* d_chi_offsets,
@@ -143,7 +138,7 @@ void compute_force_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs, double occfac,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl, cudaStream_t stream = 0);
+    double* h_stress_k, double* h_stress_nl, cudaStream_t stream = 0);
 
 }} // namespace lynx::gpu
 
@@ -604,8 +599,30 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
     // sigma = |∇ρ|²
     sigma_kernel<<<grid_sz, bs>>>(d_Drho_x, d_Drho_y, d_Drho_z, d_sigma, Nd);
 
-    // Fused PBE kernel: (rho_xc, sigma) → (exc, Vxc, v2xc)
-    lynx::gpu::gga_pbe_gpu(d_rho_xc, d_sigma, d_exc, d_Vxc, d_v2xc, Nd);
+    // PBE via libxc (device pointers)
+    {
+        xc_func_type fx, fc;
+        xc_func_init_flags(&fx, XC_GGA_X_PBE, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+        xc_func_init_flags(&fc, XC_GGA_C_PBE, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+        auto& sp = ctx.scratch_pool;
+        size_t sp_cp = sp.checkpoint();
+        double* d_exc_c  = sp.alloc<double>(Nd);
+        double* d_vrho_c = sp.alloc<double>(Nd);
+        double* d_vsig_x = sp.alloc<double>(Nd);
+        double* d_vsig_c = sp.alloc<double>(Nd);
+        xc_gga_exc_vxc(&fx, Nd, d_rho_xc, d_sigma, d_exc, d_Vxc, d_vsig_x);
+        xc_gga_exc_vxc(&fc, Nd, d_rho_xc, d_sigma, d_exc_c, d_vrho_c, d_vsig_c);
+        double one = 1.0, two = 2.0;
+        cublasDaxpy(ctx.cublas, Nd, &one, d_exc_c, 1, d_exc, 1);
+        cublasDaxpy(ctx.cublas, Nd, &one, d_vrho_c, 1, d_Vxc, 1);
+        cublasDaxpy(ctx.cublas, Nd, &one, d_vsig_c, 1, d_vsig_x, 1);
+        // d_v2xc = 2 * (vsig_x + vsig_c)
+        CUDA_CHECK(cudaMemcpy(d_v2xc, d_vsig_x, Nd * sizeof(double), cudaMemcpyDeviceToDevice));
+        cublasDscal(ctx.cublas, Nd, &two, d_v2xc, 1);
+        sp.restore(sp_cp);
+        xc_func_end(&fx);
+        xc_func_end(&fc);
+    }
 
     // Divergence correction: Vxc += -div(v2xc * ∇ρ)
     // Scale gradients by v2xc (in place)
@@ -630,6 +647,115 @@ static void gpu_xc_evaluate(double* d_rho, double* d_exc, double* d_Vxc,
     lynx::gpu::halo_exchange_gpu(d_Drho_z, d_x_ex, g_nx, g_ny, g_nz, g_FDn, 1, true, true, true);
     lynx::gpu::gradient_gpu(d_x_ex, d_DDrho, g_nx, g_ny, g_nz, g_FDn, nx_ex, ny_ex, 2, 1);
     divergence_sub_kernel<<<grid_sz, bs>>>(d_Vxc, d_DDrho, Nd);
+}
+
+// ============================================================
+// Local AAR solver (self-contained copy for this test, replaces deleted gpu::aar_gpu)
+// ============================================================
+__global__ static void aar_residual_k(const double* b, const double* Ax, double* r, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) r[i] = b[i] - Ax[i];
+}
+__global__ static void aar_richardson_k(const double* x_old, const double* f, double* x, double omega, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) x[i] = x_old[i] + omega * f[i];
+}
+__global__ static void aar_store_history_k(const double* x, const double* x_old, const double* f, const double* f_old,
+                                            double* X_h, double* F_h, int col, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) { X_h[col*N+i] = x[i]-x_old[i]; F_h[col*N+i] = f[i]-f_old[i]; }
+}
+__global__ static void aar_anderson_k(const double* x_old, const double* f, const double* X_h, const double* F_h,
+                                       const double* gamma, double* x, double beta, int cols, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        double val = x_old[i] + beta * f[i];
+        for (int j = 0; j < cols; ++j)
+            val -= gamma[j] * (X_h[j*N+i] + beta * F_h[j*N+i]);
+        x[i] = val;
+    }
+}
+__global__ static void aar_fused_gram_k(const double* F_h, const double* f, double* d_out,
+                                         const int* d_pi, const int* d_pj, int N, int cols, int n_jobs) {
+    int job = blockIdx.x; if (job >= n_jobs) return;
+    const double* a = F_h + d_pi[job]*N;
+    const double* b_ptr = (d_pj[job]>=0) ? (F_h + d_pj[job]*N) : f;
+    extern __shared__ double sdata[];
+    double sum = 0.0;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) sum += a[i]*b_ptr[i];
+    sdata[threadIdx.x] = sum; __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x+s]; __syncthreads(); }
+    if (threadIdx.x == 0) d_out[job] = sdata[0];
+}
+__global__ static void aar_norm2_k(const double* r, double* d_n2, int N) {
+    extern __shared__ double sdata[];
+    double sum = 0.0;
+    for (int i = threadIdx.x; i < N; i += blockDim.x) sum += r[i]*r[i];
+    sdata[threadIdx.x] = sum; __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) { if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x+s]; __syncthreads(); }
+    if (threadIdx.x == 0) *d_n2 = sdata[0];
+}
+
+static int local_aar_gpu(
+    void (*op_gpu)(const double*, double*), void (*precond_gpu)(const double*, double*),
+    const double* d_b, double* d_x, int N,
+    double omega, double beta, int m, int p, double tol, int max_iter,
+    double* d_r, double* d_f, double* d_Ax, double* d_X_hist, double* d_F_hist,
+    double* d_x_old, double* d_f_old, cudaStream_t stream = 0)
+{
+    int bs=256, grid=lynx::gpu::ceildiv(N,bs);
+    int max_jobs = m*(m+1)/2+m;
+    int* d_pi = reinterpret_cast<int*>(d_Ax);
+    int* d_pj = d_pi + max_jobs;
+    double* d_go = reinterpret_cast<double*>(d_pj + max_jobs);
+    double* d_n2 = d_go + max_jobs;
+    aar_norm2_k<<<1,256,256*sizeof(double),stream>>>(d_b, d_n2, N);
+    double b_norm2; cudaMemcpyAsync(&b_norm2, d_n2, sizeof(double), cudaMemcpyDeviceToHost, stream);
+    double abs_tol = tol * std::sqrt(b_norm2);
+    cudaMemcpyAsync(d_x_old, d_x, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+    op_gpu(d_x, d_Ax);
+    aar_residual_k<<<grid,bs,0,stream>>>(d_b, d_Ax, d_r, N);
+    double r_2norm = abs_tol+1.0; int iter=0;
+    std::vector<double> h_FTF(m*m), h_gamma(m); std::vector<int> h_pi(max_jobs), h_pj(max_jobs); std::vector<double> h_go(max_jobs);
+    while (r_2norm > abs_tol && iter < max_iter) {
+        if (precond_gpu) precond_gpu(d_r, d_f);
+        else cudaMemcpyAsync(d_f, d_r, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        if (iter > 0) { int ih=(iter-1)%m; aar_store_history_k<<<grid,bs,0,stream>>>(d_x,d_x_old,d_f,d_f_old,d_X_hist,d_F_hist,ih,N); }
+        cudaMemcpyAsync(d_x_old, d_x, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(d_f_old, d_f, N*sizeof(double), cudaMemcpyDeviceToDevice, stream);
+        if ((iter+1)%p==0 && iter>0) {
+            int cols=std::min(iter,m); int nj=0;
+            for(int ii=0;ii<cols;ii++) for(int jj=0;jj<=ii;jj++) { h_pi[nj]=ii; h_pj[nj]=jj; nj++; }
+            int ftf_pairs=nj;
+            for(int ii=0;ii<cols;ii++) { h_pi[nj]=ii; h_pj[nj]=-1; nj++; }
+            cudaMemcpyAsync(d_pi,h_pi.data(),nj*sizeof(int),cudaMemcpyHostToDevice,stream);
+            cudaMemcpyAsync(d_pj,h_pj.data(),nj*sizeof(int),cudaMemcpyHostToDevice,stream);
+            int gbs=std::min(256,N);
+            aar_fused_gram_k<<<nj,gbs,gbs*sizeof(double),stream>>>(d_F_hist,d_f,d_go,d_pi,d_pj,N,cols,nj);
+            cudaMemcpyAsync(h_go.data(),d_go,nj*sizeof(double),cudaMemcpyDeviceToHost,stream);
+            int kk=0;
+            for(int ii=0;ii<cols;ii++) for(int jj=0;jj<=ii;jj++) { h_FTF[ii*cols+jj]=h_go[kk]; h_FTF[jj*cols+ii]=h_go[kk]; kk++; }
+            for(int ii=0;ii<cols;ii++) h_gamma[ii]=h_go[ftf_pairs+ii];
+            { std::vector<double> A(h_FTF.begin(),h_FTF.begin()+cols*cols);
+              for(int k2=0;k2<cols;k2++) { int piv=k2; for(int ii=k2+1;ii<cols;ii++) if(std::abs(A[ii*cols+k2])>std::abs(A[piv*cols+k2])) piv=ii;
+                if(piv!=k2){for(int j=0;j<cols;j++) std::swap(A[k2*cols+j],A[piv*cols+j]); std::swap(h_gamma[k2],h_gamma[piv]);}
+                double d2=A[k2*cols+k2]; if(std::abs(d2)<1e-14) continue;
+                for(int ii=k2+1;ii<cols;ii++){double fac=A[ii*cols+k2]/d2; for(int j=k2+1;j<cols;j++) A[ii*cols+j]-=fac*A[k2*cols+j]; h_gamma[ii]-=fac*h_gamma[k2];} }
+              for(int k2=cols-1;k2>=0;k2--){if(std::abs(A[k2*cols+k2])<1e-14)continue; for(int j=k2+1;j<cols;j++) h_gamma[k2]-=A[k2*cols+j]*h_gamma[j]; h_gamma[k2]/=A[k2*cols+k2];} }
+            double* d_gam=d_Ax;
+            cudaMemcpyAsync(d_gam,h_gamma.data(),cols*sizeof(double),cudaMemcpyHostToDevice,stream);
+            aar_anderson_k<<<grid,bs,0,stream>>>(d_x_old,d_f,d_X_hist,d_F_hist,d_gam,d_x,beta,cols,N);
+            op_gpu(d_x,d_Ax);
+            aar_residual_k<<<grid,bs,0,stream>>>(d_b,d_Ax,d_r,N);
+            { aar_norm2_k<<<1,256,256*sizeof(double),stream>>>(d_r,d_n2,N); double rn2; cudaMemcpyAsync(&rn2,d_n2,sizeof(double),cudaMemcpyDeviceToHost,stream); r_2norm=std::sqrt(rn2); }
+        } else {
+            aar_richardson_k<<<grid,bs,0,stream>>>(d_x_old,d_f,d_x,omega,N);
+            op_gpu(d_x,d_Ax);
+            aar_residual_k<<<grid,bs,0,stream>>>(d_b,d_Ax,d_r,N);
+        }
+        iter++;
+    }
+    return iter;
 }
 
 // ============================================================
@@ -659,7 +785,7 @@ static int gpu_poisson_solve(double* d_rho, double* d_phi,
     // Set halo workspace for operator callbacks
     g_aar_x_ex = ctx.buf.aar_x_ex;
 
-    int iters = lynx::gpu::aar_gpu(
+    int iters = local_aar_gpu(
         poisson_op_gpu, poisson_precond_gpu,
         d_rhs, d_phi, Nd,
         0.6, 0.6, 7, 6, tol, 3000,
@@ -800,7 +926,7 @@ static void gpu_pulay_mix(double* d_x, const double* d_g,
         double* d_kxold = sp.alloc<double>(Nd);
         double* d_kfold = sp.alloc<double>(Nd);
 
-        lynx::gpu::aar_gpu(
+        local_aar_gpu(
             kerker_op_gpu, kerker_precond_gpu,
             d_Lf, d_Pf, Nd,
             0.6, 0.6, 7, 6, g_precond_tol, 1000,
@@ -1128,6 +1254,17 @@ int main(int argc, char** argv) {
     EigenSolver eigsolver;
     eigsolver.setup(ctx, hamiltonian);
 
+    // Setup Hamiltonian and EigenSolver for GPU dispatch
+    hamiltonian.setup_gpu(ctx, &vnl, crystal, nloc_influence, Nband);
+    eigsolver.setup_gpu(ctx, Nband, Nband, false, false);
+
+    // Upload initial psi to EigenSolver's device buffer
+    {
+        std::vector<double> h_psi_init(Nd * Nband);
+        CUDA_CHECK(cudaMemcpy(h_psi_init.data(), d_psi, Nd * Nband * sizeof(double), cudaMemcpyDeviceToHost));
+        eigsolver.upload_psi_to_device(h_psi_init.data(), Nd, Nband);
+    }
+
     double eigval_min, eigval_max;
     {
         std::vector<double> h_Veff(Nd);
@@ -1165,22 +1302,18 @@ int main(int argc, char** argv) {
         int nchefsi = (scf_iter == 0) ? rho_trigger : 1;
 
         // Step 1: GPU Eigensolver (nchefsi passes of CheFSI)
-        for (int pass = 0; pass < nchefsi; pass++) {
-            lynx::gpu::eigensolver_solve_gpu(
-                d_psi, d_eigvals, d_Veff,
-                d_Y, d_Xold, d_Xnew,
-                d_Hpsi, d_x_ex,
-                d_Hs, d_Ms,
-                Nd, Nband,
-                lambda_cutoff, eigval_min, eigval_max,
-                cheb_degree, dV,
-                gpu_hamiltonian_apply);
+        // Uses EigenSolver with solve_resident (H->apply called directly, no callbacks)
+        {
+            std::vector<double> h_Veff_copy(Nd);
+            CUDA_CHECK(cudaMemcpy(h_Veff_copy.data(), d_Veff, Nd * sizeof(double), cudaMemcpyDeviceToHost));
+            for (int pass = 0; pass < nchefsi; pass++) {
+                eigsolver.solve_resident(h_eigvals.data(), h_Veff_copy.data(), Nd, Nband,
+                                          lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+            }
         }
-        CUDA_CHECK(cudaDeviceSynchronize());
-
-        // Download eigenvalues for occupation computation (tiny: 29 doubles)
-        CUDA_CHECK(cudaMemcpy(h_eigvals.data(), d_eigvals, Nband * sizeof(double),
-                               cudaMemcpyDeviceToHost));
+        // Copy psi from EigenSolver's device buffer to the test's d_psi
+        CUDA_CHECK(cudaMemcpy(d_psi, eigsolver.gpu_psi(), (size_t)Nd * Nband * sizeof(double),
+                               cudaMemcpyDeviceToDevice));
 
         // Update spectral bounds
         if (scf_iter > 0) eigval_min = h_eigvals[0];
@@ -1345,12 +1478,28 @@ int main(int argc, char** argv) {
             }
         }
 
-        // GPU force/stress computation
+        // GPU force computation (separate from stress)
         std::vector<double> gpu_f_nloc(3 * n_phys, 0.0);
-        std::array<double, 6> gpu_stress_k = {}, gpu_stress_nl = {};
         double gpu_energy_nl = 0.0;
 
-        lynx::gpu::compute_force_stress_gpu(
+        lynx::gpu::compute_nonlocal_force_gpu(
+            d_psi, d_occ,
+            gpu_vnl_data.d_Chi_flat, gpu_vnl_data.d_gpos_flat,
+            gpu_vnl_data.d_gpos_offsets, gpu_vnl_data.d_chi_offsets,
+            gpu_vnl_data.d_ndc_arr, gpu_vnl_data.d_nproj_arr,
+            gpu_vnl_data.d_IP_displ, gpu_vnl_data.d_Gamma,
+            gpu_vnl_data.n_influence, gpu_vnl_data.total_phys_nproj,
+            gpu_vnl_data.max_ndc, gpu_vnl_data.max_nproj,
+            n_phys,
+            IP_displ_phys.data(),
+            nx, ny, nz, FDn, Nd, Nband,
+            dV, 2.0,  // occfac for Nspin=1
+            gpu_f_nloc.data(), &gpu_energy_nl);
+
+        // GPU stress computation (separate from force)
+        std::array<double, 6> gpu_stress_k = {}, gpu_stress_nl = {};
+
+        lynx::gpu::compute_kinetic_nonlocal_stress_gpu(
             d_psi, d_occ,
             gpu_vnl_data.d_Chi_flat, gpu_vnl_data.d_gpos_flat,
             gpu_vnl_data.d_gpos_offsets, gpu_vnl_data.d_chi_offsets,
@@ -1365,7 +1514,7 @@ int main(int argc, char** argv) {
             dV, grid.dx(), grid.dy(), grid.dz(),
             domain.vertices().xs, domain.vertices().ys, domain.vertices().zs,
             2.0,  // occfac for Nspin=1
-            gpu_f_nloc.data(), gpu_stress_k.data(), gpu_stress_nl.data(), &gpu_energy_nl);
+            gpu_stress_k.data(), gpu_stress_nl.data());
 
         // Normalize stress by cell volume
         {

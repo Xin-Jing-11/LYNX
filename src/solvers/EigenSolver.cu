@@ -163,20 +163,18 @@ __global__ void scale_inplace_kernel(double* v, double scale, int N) {
 // ============================================================
 
 // Chebyshev filter: all data on GPU, returns filtered Y in d_Y
+// H->apply() is called directly (no callback).
 void chebyshev_filter_gpu(
     const double* d_X,      // (Nd, Ns) input orbitals
     double* d_Y,            // (Nd, Ns) output filtered orbitals
     double* d_Xold,         // (Nd, Ns) workspace
     double* d_Xnew,         // (Nd, Ns) workspace
     double* d_HX,           // (Nd, Ns) workspace for H*psi
-    double* d_x_ex,         // halo workspace
     const double* d_Veff,   // (Nd) effective potential
     int Nd, int Ns,
     double lambda_cutoff, double eigval_min, double eigval_max,
     int degree,
-    // Hamiltonian apply function pointer (callback):
-    // apply(d_input, d_Veff, d_output, d_x_ex, Ns)
-    void (*apply_H)(const double*, const double*, double*, double*, int),
+    const Hamiltonian* H,
     cudaStream_t stream)
 {
     double e = (eigval_max - lambda_cutoff) / 2.0;
@@ -189,7 +187,7 @@ void chebyshev_filter_gpu(
     int grid = ceildiv(total, bs);
 
     // Step 1: Y = (H*X - c*X) * (sigma/e)
-    apply_H(d_X, d_Veff, d_HX, d_x_ex, Ns);
+    H->apply(d_X, d_Veff, d_HX, Ns, Device::GPU, 0.0);
     double scale = sigma / e;
     chefsi_init_kernel<<<grid, bs, 0, stream>>>(d_HX, d_X, d_Y, scale, c, total);
 
@@ -202,7 +200,7 @@ void chebyshev_filter_gpu(
         double gamma = 2.0 * sigma_new / e;
         double ss = sigma * sigma_new;
 
-        apply_H(d_Y, d_Veff, d_HX, d_x_ex, Ns);
+        H->apply(d_Y, d_Veff, d_HX, Ns, Device::GPU, 0.0);
         chefsi_step_kernel<<<grid, bs, 0, stream>>>(d_HX, d_Y, d_Xold, d_Xnew, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew (pointer swap via memcpy)
@@ -289,16 +287,15 @@ void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV) {
 }
 
 // Project Hamiltonian + diagonalize on GPU:
-// Hs = X^T * HX * dV → symmetrize → dsyevd → eigvals + eigvecs
+// Hs = X^T * HX * dV -> symmetrize -> dsyevd -> eigvals + eigvecs
 void project_and_diag_gpu(
     const double* d_X,
     double* d_HX,
-    double* d_Hs,     // (N,N) — overwritten with eigenvectors
+    double* d_Hs,     // (N,N) -- overwritten with eigenvectors
     double* d_eigvals, // (N)
-    double* d_x_ex,
     const double* d_Veff,
     int Nd, int N, double dV,
-    void (*apply_H)(const double*, const double*, double*, double*, int))
+    const Hamiltonian* H)
 {
     auto& ctx = GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
@@ -306,7 +303,7 @@ void project_and_diag_gpu(
     size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
     // HX = H * X
-    apply_H(d_X, d_Veff, d_HX, d_x_ex, N);
+    H->apply(d_X, d_Veff, d_HX, N, Device::GPU, 0.0);
 
     // Hs = X^T * HX * dV
     compute_atb_gpu(d_X, d_HX, d_Hs, Nd, N, dV, stream);
@@ -350,48 +347,7 @@ void rotate_orbitals_gpu(
                            cudaMemcpyDeviceToDevice, stream));
 }
 
-// ============================================================
-// Full GPU EigenSolver step (single call replaces CPU solve())
-// ============================================================
-void eigensolver_solve_gpu(
-    double* d_psi,      // (Nd, Ns) wavefunctions — updated in place
-    double* d_eigvals,   // (Ns) eigenvalues — updated
-    const double* d_Veff,// (Nd) effective potential
-    // Workspace (from SCFBuffers):
-    double* d_Y,         // (Nd, Ns) filtered result
-    double* d_Xold,      // (Nd, Ns)
-    double* d_Xnew,      // (Nd, Ns)
-    double* d_HX,        // (Nd, Ns) = Hpsi buffer
-    double* d_x_ex,      // halo workspace
-    double* d_Hs,        // (Ns, Ns) subspace Hamiltonian
-    double* d_Ms,        // (Ns, Ns) overlap / temp
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int cheb_degree, double dV,
-    void (*apply_H)(const double*, const double*, double*, double*, int))
-{
-    cudaStream_t stream = GPUContext::instance().compute_stream;
-
-    // Step 1: Chebyshev filter
-    chebyshev_filter_gpu(d_psi, d_Y, d_Xold, d_Xnew, d_HX, d_x_ex,
-                          d_Veff, Nd, Ns,
-                          lambda_cutoff, eigval_min, eigval_max,
-                          cheb_degree, apply_H, stream);
-
-    // Step 2: Orthogonalize filtered vectors (Cholesky QR)
-    orthogonalize_gpu(d_Y, d_Ms, Nd, Ns, dV);
-
-    // Step 3+4: Project Hamiltonian + diagonalize
-    project_and_diag_gpu(d_Y, d_HX, d_Hs, d_eigvals, d_x_ex,
-                          d_Veff, Nd, Ns, dV, apply_H);
-
-    // Step 5: Rotate orbitals: psi = Y * Q (Q stored in Hs after dsyevd)
-    rotate_orbitals_gpu(d_Y, d_Hs, d_psi, Nd, Ns);
-
-    // Copy result back to psi
-    CUDA_CHECK(cudaMemcpyAsync(d_psi, d_Y, (size_t)Nd * Ns * sizeof(double),
-                           cudaMemcpyDeviceToDevice, stream));
-}
+// (eigensolver_solve_gpu deleted — loop logic moved to solve_resident)
 
 // ============================================================
 // Complex (k-point) CheFSI kernels and subspace operations
@@ -480,17 +436,16 @@ __global__ void compute_density_z_kernel(
 // Complex Chebyshev filter (host function)
 // ============================================================
 void chebyshev_filter_z_gpu(
-    const cuDoubleComplex* d_X,      // (Nd, Ns) input orbitals
-    cuDoubleComplex* d_Y,            // (Nd, Ns) output filtered orbitals
-    cuDoubleComplex* d_Xold,         // (Nd, Ns) workspace
-    cuDoubleComplex* d_Xnew,         // (Nd, Ns) workspace
-    cuDoubleComplex* d_HX,           // (Nd, Ns) workspace for H*psi
-    cuDoubleComplex* d_x_ex,         // halo workspace
-    const double* d_Veff,            // (Nd) effective potential (always real)
+    const cuDoubleComplex* d_X,
+    cuDoubleComplex* d_Y,
+    cuDoubleComplex* d_Xold,
+    cuDoubleComplex* d_Xnew,
+    cuDoubleComplex* d_HX,
+    const double* d_Veff,
     int Nd, int Ns,
     double lambda_cutoff, double eigval_min, double eigval_max,
     int degree,
-    void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int),
+    const Hamiltonian* H,
     cudaStream_t stream)
 {
     double e = (eigval_max - lambda_cutoff) / 2.0;
@@ -503,7 +458,11 @@ void chebyshev_filter_z_gpu(
     int grid = ceildiv(total, bs);
 
     // Step 1: Y = (H*X - c*X) * (sigma/e)
-    apply_H_z(d_X, d_Veff, d_HX, d_x_ex, Ns);
+    H->apply_kpt(
+        reinterpret_cast<const std::complex<double>*>(d_X),
+        d_Veff,
+        reinterpret_cast<std::complex<double>*>(d_HX),
+        Ns, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
 
     double scale = sigma / e;
     chefsi_init_kernel_z<<<grid, bs, 0, stream>>>(d_Y, d_HX, d_X, scale, c, total);
@@ -517,7 +476,11 @@ void chebyshev_filter_z_gpu(
         double gamma = 2.0 * sigma_new / e;
         double ss = sigma * sigma_new;
 
-        apply_H_z(d_Y, d_Veff, d_HX, d_x_ex, Ns);
+        H->apply_kpt(
+            reinterpret_cast<const std::complex<double>*>(d_Y),
+            d_Veff,
+            reinterpret_cast<std::complex<double>*>(d_HX),
+            Ns, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
         chefsi_step_kernel_z<<<grid, bs, 0, stream>>>(d_Xnew, d_HX, d_Y, d_Xold, gamma, c, ss, total);
 
         // Rotate: Xold <- Y, Y <- Xnew
@@ -600,12 +563,11 @@ void orthogonalize_z_gpu(cuDoubleComplex* d_X, cuDoubleComplex* d_S,
 void project_and_diag_z_gpu(
     const cuDoubleComplex* d_X,
     cuDoubleComplex* d_HX,
-    cuDoubleComplex* d_Hs,     // (N,N) — overwritten with eigenvectors
-    double* d_eigvals,          // (N) — real eigenvalues
-    cuDoubleComplex* d_x_ex,
+    cuDoubleComplex* d_Hs,     // (N,N) -- overwritten with eigenvectors
+    double* d_eigvals,          // (N) -- real eigenvalues
     const double* d_Veff,
     int Nd, int N, double dV,
-    void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int))
+    const Hamiltonian* H)
 {
     auto& ctx = GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
@@ -613,7 +575,11 @@ void project_and_diag_z_gpu(
     size_t _scratch_cp = ctx.scratch_pool.checkpoint();
 
     // HX = H * X
-    apply_H_z(d_X, d_Veff, d_HX, d_x_ex, N);
+    H->apply_kpt(
+        reinterpret_cast<const std::complex<double>*>(d_X),
+        d_Veff,
+        reinterpret_cast<std::complex<double>*>(d_HX),
+        N, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
 
     // Hs = X^H * HX * dV
     compute_atb_z_gpu(d_X, d_HX, d_Hs, Nd, N, dV);
@@ -659,74 +625,7 @@ void rotate_orbitals_z_gpu(
 }
 
 // ============================================================
-// Full GPU Complex EigenSolver step (k-point variant)
-// ============================================================
-void eigensolver_solve_z_gpu(
-    cuDoubleComplex* d_psi_z,    // (Nd, Ns) wavefunctions — updated in place
-    double* d_eigvals,            // (Ns) eigenvalues — updated (real)
-    const double* d_Veff,         // (Nd) effective potential (always real)
-    // Workspace:
-    cuDoubleComplex* d_Y_z,      // (Nd, Ns) filtered result
-    cuDoubleComplex* d_Xold_z,   // (Nd, Ns)
-    cuDoubleComplex* d_Xnew_z,   // (Nd, Ns)
-    cuDoubleComplex* d_HX_z,     // (Nd, Ns) = Hpsi buffer
-    cuDoubleComplex* d_x_ex_z,   // halo workspace
-    cuDoubleComplex* d_Hs_z,     // (Ns, Ns) subspace Hamiltonian
-    cuDoubleComplex* d_Ms_z,     // (Ns, Ns) overlap / temp
-    int Nd, int Ns,
-    double lambda_cutoff, double eigval_min, double eigval_max,
-    int cheb_degree, double dV,
-    void (*apply_H_z)(const cuDoubleComplex*, const double*, cuDoubleComplex*, cuDoubleComplex*, int))
-{
-    cudaStream_t stream = GPUContext::instance().compute_stream;
-
-    // Step 1: Chebyshev filter
-    chebyshev_filter_z_gpu(d_psi_z, d_Y_z, d_Xold_z, d_Xnew_z, d_HX_z, d_x_ex_z,
-                            d_Veff, Nd, Ns,
-                            lambda_cutoff, eigval_min, eigval_max,
-                            cheb_degree, apply_H_z, stream);
-
-    // Debug: check for NaN after CheFSI
-    {
-        cudaStreamSynchronize(stream);
-        double y0[2];
-        cudaMemcpyAsync(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost, stream);
-        if (std::isnan(y0[0]) || std::isnan(y0[1]))
-            printf("[eigsolver_z] NaN after CheFSI filter! Y[0]=(%.3e,%.3e)\n", y0[0], y0[1]);
-    }
-
-    // Step 2: Orthogonalize filtered vectors (Cholesky QR)
-    orthogonalize_z_gpu(d_Y_z, d_Ms_z, Nd, Ns, dV);
-
-    // Debug: check for NaN after orthogonalization
-    {
-        cudaStreamSynchronize(stream);
-        double y0[2];
-        cudaMemcpyAsync(y0, d_Y_z, 2*sizeof(double), cudaMemcpyDeviceToHost, stream);
-        if (std::isnan(y0[0]) || std::isnan(y0[1]))
-            printf("[eigsolver_z] NaN after orthogonalize! Y[0]=(%.3e,%.3e)\n", y0[0], y0[1]);
-    }
-
-    // Step 3+4: Project Hamiltonian + diagonalize
-    project_and_diag_z_gpu(d_Y_z, d_HX_z, d_Hs_z, d_eigvals, d_x_ex_z,
-                            d_Veff, Nd, Ns, dV, apply_H_z);
-
-    // Debug: check eigenvalues after diag
-    {
-        cudaStreamSynchronize(stream);
-        double eig0;
-        cudaMemcpyAsync(&eig0, d_eigvals, sizeof(double), cudaMemcpyDeviceToHost, stream);
-        if (std::isnan(eig0))
-            printf("[eigsolver_z] NaN eigenvalue after diag! eig[0]=%.3e\n", eig0);
-    }
-
-    // Step 5: Rotate orbitals: psi = Y * Q (Q stored in Hs after zheevd)
-    rotate_orbitals_z_gpu(d_Y_z, d_Hs_z, d_psi_z, Nd, Ns);
-
-    // Copy result back to psi
-    CUDA_CHECK(cudaMemcpyAsync(d_psi_z, d_Y_z, (size_t)Nd * Ns * sizeof(cuDoubleComplex),
-                           cudaMemcpyDeviceToDevice, stream));
-}
+// (eigensolver_solve_z_gpu deleted -- loop logic moved to solve_kpt_resident)
 
 // ============================================================
 // Complex density computation wrapper
@@ -759,7 +658,7 @@ struct GPUEigenState {
 
     // Persistent device buffers (allocated once in setup_gpu, freed in cleanup_gpu).
     // These stay resident across all SCF iterations — no per-call alloc/free.
-    double* d_psi = nullptr;         // (Nd, Nband) real wavefunctions
+    double* d_psi = nullptr;         // Active (Nd, Nband) real wfn (points into d_psi_sk)
     double* d_Veff = nullptr;        // (Nd) effective potential
     double* d_eigvals = nullptr;     // (Nband_global) eigenvalues
     double* d_Y = nullptr;           // (Nd, Nband) CheFSI workspace
@@ -771,7 +670,7 @@ struct GPUEigenState {
 
     // Complex (k-point) persistent buffers
     // For SOC: sized as 2*Nd per band (spinor wavefunctions)
-    cuDoubleComplex* d_psi_z = nullptr;
+    cuDoubleComplex* d_psi_z = nullptr;  // Active complex wfn (points into d_psi_z_sk)
     cuDoubleComplex* d_Y_z = nullptr;
     cuDoubleComplex* d_Xold_z = nullptr;
     cuDoubleComplex* d_Xnew_z = nullptr;
@@ -784,13 +683,22 @@ struct GPUEigenState {
 
     bool buffers_allocated = false;
 
+    // Per-(spin,kpt) psi storage: each (spin,kpt) has its own device psi buffer.
+    // d_psi / d_psi_z are aliases into these arrays for the active (spin,kpt).
+    std::vector<double*> d_psi_sk;              // [Nspin_local * Nkpts] real gamma
+    std::vector<cuDoubleComplex*> d_psi_z_sk;   // [Nspin_local * Nkpts] complex kpt
+    int psi_Nspin_local = 0;
+    int psi_Nkpts = 0;
+
     void allocate_buffers() {
         if (buffers_allocated) return;
         cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
         size_t psi_sz = (size_t)Nd * Nband;
         size_t sub_sz = (size_t)Nband_global * Nband_global;
 
-        // Always allocate real buffers
+        // Allocate ONE default psi buffer (for single-spin gamma case or before
+        // allocate_psi_buffers is called). Per-(spin,kpt) buffers are allocated
+        // separately via allocate_psi_buffers().
         CUDA_CHECK(cudaMallocAsync(&d_psi, psi_sz * sizeof(double), stream));
         CUDA_CHECK(cudaMallocAsync(&d_Veff, Nd * sizeof(double), stream));
         CUDA_CHECK(cudaMallocAsync(&d_eigvals, Nband_global * sizeof(double), stream));
@@ -801,9 +709,8 @@ struct GPUEigenState {
         CUDA_CHECK(cudaMallocAsync(&d_Hs, sub_sz * sizeof(double), stream));
         CUDA_CHECK(cudaMallocAsync(&d_Ms, sub_sz * sizeof(double), stream));
 
-        // Allocate complex buffers if k-point or SOC
+        // Allocate complex workspace if k-point or SOC
         if (is_kpt || is_soc) {
-            // SOC spinor: psi is 2*Nd per band (two spin components)
             size_t psi_sz_z = is_soc ? (size_t)(2 * Nd) * Nband : psi_sz;
             CUDA_CHECK(cudaMallocAsync(&d_psi_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
             CUDA_CHECK(cudaMallocAsync(&d_Y_z, psi_sz_z * sizeof(cuDoubleComplex), stream));
@@ -814,7 +721,6 @@ struct GPUEigenState {
             CUDA_CHECK(cudaMallocAsync(&d_Ms_z, sub_sz * sizeof(cuDoubleComplex), stream));
         }
 
-        // SOC: Veff_spinor buffer (4 * Nd)
         if (is_soc) {
             CUDA_CHECK(cudaMallocAsync(&d_Veff_spinor, 4 * Nd * sizeof(double), stream));
         }
@@ -827,6 +733,21 @@ struct GPUEigenState {
         cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
         auto safe_free = [stream](auto*& p) { if (p) { cudaFreeAsync(p, stream); p = nullptr; } };
 
+        // Free per-(spin,kpt) psi buffers (if allocated)
+        if (!d_psi_sk.empty()) {
+            for (auto*& p : d_psi_sk) safe_free(p);
+            d_psi_sk.clear();
+            d_psi = nullptr;  // Was alias into d_psi_sk — don't double-free
+        }
+        if (!d_psi_z_sk.empty()) {
+            for (auto*& p : d_psi_z_sk) safe_free(p);
+            d_psi_z_sk.clear();
+            d_psi_z = nullptr;  // Was alias into d_psi_z_sk — don't double-free
+        }
+        psi_Nspin_local = 0;
+        psi_Nkpts = 0;
+
+        // Free default single psi buffer (only if not aliased into per-sk arrays)
         safe_free(d_psi); safe_free(d_Veff); safe_free(d_eigvals);
         safe_free(d_Y); safe_free(d_Xold); safe_free(d_Xnew);
         safe_free(d_HX); safe_free(d_Hs); safe_free(d_Ms);
@@ -871,156 +792,93 @@ EigenSolver::~EigenSolver() {
 #endif
 }
 
-// Thread-local trampoline state for gpu::eigensolver_solve_gpu callback.
-static thread_local const Hamiltonian* s_eigen_H_ptr_ = nullptr;
-static thread_local int s_eigen_Nd_d_ = 0;  // original grid size (for spinor: Nd, not 2*Nd)
+// ============================================================
+// GPU sub-step class methods — thin wrappers around gpu:: helpers
+// These access GPUEigenState device pointers and delegate to the
+// gpu:: free functions. Algorithm logic lives in .cpp.
+// ============================================================
 
-static void eigen_apply_H_cb(const double* psi, const double* Veff,
-                               double* Hpsi, double* /*x_ex*/, int ncol)
-{
-    s_eigen_H_ptr_->apply(psi, Veff, Hpsi, ncol, Device::GPU, 0.0);
-}
+// --- Real (gamma-point) GPU sub-steps ---
 
-static void eigen_apply_H_z_cb(const cuDoubleComplex* psi, const double* Veff,
-                                 cuDoubleComplex* Hpsi, cuDoubleComplex* /*x_ex*/, int ncol)
-{
-    s_eigen_H_ptr_->apply_kpt(
-        reinterpret_cast<const std::complex<double>*>(psi),
-        Veff,
-        reinterpret_cast<std::complex<double>*>(Hpsi),
-        ncol, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
-}
-
-// Spinor H*psi callback: eigensolver passes Nd_spinor=2*Nd_d as the effective dimension,
-// but Hamiltonian::apply_spinor_kpt needs the original Nd_d.
-static void eigen_apply_H_spinor_z_cb(const cuDoubleComplex* psi, const double* Veff_spinor,
-                                        cuDoubleComplex* Hpsi, cuDoubleComplex* /*x_ex*/, int ncol)
-{
-    s_eigen_H_ptr_->apply_spinor_kpt(
-        reinterpret_cast<const std::complex<double>*>(psi),
-        Veff_spinor,
-        reinterpret_cast<std::complex<double>*>(Hpsi),
-        ncol, s_eigen_Nd_d_, {0,0,0}, {0,0,0}, Device::GPU, 0.0);
-}
-
-void EigenSolver::solve(double* psi, double* eigvals, const double* Veff,
-                         int Nd_d, int Nband,
-                         double lambda_cutoff, double eigval_min, double eigval_max,
-                         int cheb_degree, int ld, Device dev)
-{
-    if (dev == Device::CPU) {
-        solve(psi, eigvals, Veff, Nd_d, Nband,
-              lambda_cutoff, eigval_min, eigval_max, cheb_degree, ld);
-        return;
-    }
-
-    // GPU path: use persistent device buffers (no per-call alloc/free).
-    // psi and Veff are assumed already on device (GPU-resident SCF flow).
-    // If not yet uploaded, upload them now (backward compatibility).
+void EigenSolver::chebyshev_filter_gpu(int Nd_d, int Nband,
+                                        double lambda_cutoff, double eigval_min, double eigval_max,
+                                        int cheb_degree) {
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    size_t psi_bytes = (size_t)Nd_d * Nband * sizeof(double);
-
-    // Upload psi and Veff to persistent device buffers
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi, psi, psi_bytes, cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice, stream));
-
-    // Set up H*psi callback trampoline
-    s_eigen_H_ptr_ = gs->H;
-
-    gpu::eigensolver_solve_gpu(
-        gs->d_psi,         // d_psi: in/out (persistent)
-        gs->d_eigvals,     // d_eigvals (persistent)
-        gs->d_Veff,        // d_Veff (persistent)
-        gs->d_Y,           // d_Y workspace (persistent)
-        gs->d_Xold,        // d_Xold workspace (persistent)
-        gs->d_Xnew,        // d_Xnew workspace (persistent)
-        gs->d_HX,          // d_HX workspace (persistent)
-        nullptr,           // d_x_ex (ignored by callback)
-        gs->d_Hs,          // d_Hs (persistent)
-        gs->d_Ms,          // d_Ms (persistent)
-        Nd_d, Nband,
-        lambda_cutoff, eigval_min, eigval_max,
-        cheb_degree, gs->dV,
-        eigen_apply_H_cb);
-
-    // Download eigenvalues and psi back to host
-    CUDA_CHECK(cudaMemcpyAsync(eigvals, gs->d_eigvals, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(psi, gs->d_psi, psi_bytes, cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    gpu::chebyshev_filter_gpu(gs->d_psi, gs->d_Y, gs->d_Xold, gs->d_Xnew, gs->d_HX,
+                               gs->d_Veff, Nd_d, Nband,
+                               lambda_cutoff, eigval_min, eigval_max,
+                               cheb_degree, gs->H, stream);
 }
 
-void EigenSolver::solve_kpt(Complex* psi, double* eigvals, const double* Veff,
-                              int Nd_d, int Nband,
-                              double lambda_cutoff, double eigval_min, double eigval_max,
-                              const Vec3& kpt_cart, const Vec3& cell_lengths,
-                              int cheb_degree, int ld, Device dev)
-{
-    if (dev == Device::CPU) {
-        solve_kpt(psi, eigvals, Veff, Nd_d, Nband,
-                  lambda_cutoff, eigval_min, eigval_max,
-                  kpt_cart, cell_lengths, cheb_degree, ld);
-        return;
-    }
+void EigenSolver::orthogonalize_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::orthogonalize_gpu(gs->d_Y, gs->d_Ms, Nd_d, Nband, gs->dV);
+}
 
-    // GPU path: use persistent device buffers (no per-call alloc/free).
+void EigenSolver::project_and_diag_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::project_and_diag_gpu(gs->d_Y, gs->d_HX, gs->d_Hs, gs->d_eigvals,
+                               gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
+}
+
+void EigenSolver::subspace_rotation_gpu(int Nd_d, int Nband) {
     auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    size_t psi_bytes = (size_t)Nd_d * Nband * sizeof(cuDoubleComplex);
-
-    // Upload psi and Veff to persistent device buffers
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, psi, psi_bytes, cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, Veff, Nd_d * sizeof(double), cudaMemcpyHostToDevice, stream));
-
-    s_eigen_H_ptr_ = gs->H;
-
-    gpu::eigensolver_solve_z_gpu(
-        gs->d_psi_z,       // d_psi_z: in/out (persistent)
-        gs->d_eigvals,     // d_eigvals (persistent)
-        gs->d_Veff,        // d_Veff (persistent)
-        gs->d_Y_z,         // d_Y_z workspace (persistent)
-        gs->d_Xold_z,      // d_Xold_z workspace (persistent)
-        gs->d_Xnew_z,      // d_Xnew_z workspace (persistent)
-        gs->d_HX_z,        // d_HX_z workspace (persistent)
-        nullptr,           // d_x_ex_z (ignored by callback)
-        gs->d_Hs_z,        // d_Hs_z (persistent)
-        gs->d_Ms_z,        // d_Ms_z (persistent)
-        Nd_d, Nband,
-        lambda_cutoff, eigval_min, eigval_max,
-        cheb_degree, gs->dV,
-        eigen_apply_H_z_cb);
-
-    // Download eigenvalues and psi back to host
-    CUDA_CHECK(cudaMemcpyAsync(eigvals, gs->d_eigvals, Nband * sizeof(double), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(psi, gs->d_psi_z, psi_bytes, cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    gpu::rotate_orbitals_gpu(gs->d_Y, gs->d_Hs, gs->d_psi, Nd_d, Nband);
+    // Copy Y back to psi
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi, gs->d_Y, (size_t)Nd_d * Nband * sizeof(double),
+                               cudaMemcpyDeviceToDevice, stream));
 }
 
-void EigenSolver::solve_spinor_kpt(Complex* psi, double* eigvals, const double* Veff_spinor,
-                                     int Nd_d, int Nband,
-                                     double lambda_cutoff, double eigval_min, double eigval_max,
-                                     const Vec3& kpt_cart, const Vec3& cell_lengths,
-                                     int cheb_degree, int ld, Device dev)
-{
-    if (dev == Device::CPU) {
-        solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
-                         lambda_cutoff, eigval_min, eigval_max,
-                         kpt_cart, cell_lengths, cheb_degree, ld);
-        return;
-    }
+// --- Complex (k-point) GPU sub-steps ---
 
-    // GPU spinor path: SOC eigensolver is wired but needs further validation.
-    // The spinor H*psi callback and 2*Nd_d buffer sizing are in place, but the
-    // eigensolver produces incorrect results (NaN) — likely a dV scaling or
-    // inner product normalization issue with Nd_spinor=2*Nd_d.
-    // Fall back to CPU until validated.
-    solve_spinor_kpt(psi, eigvals, Veff_spinor, Nd_d, Nband,
-                     lambda_cutoff, eigval_min, eigval_max,
-                     kpt_cart, cell_lengths, cheb_degree, ld);
+void EigenSolver::chebyshev_filter_kpt_gpu(int Nd_d, int Nband,
+                                            double lambda_cutoff, double eigval_min, double eigval_max,
+                                            int cheb_degree) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::chebyshev_filter_z_gpu(gs->d_psi_z, gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
+                                 gs->d_Veff, Nd_d, Nband,
+                                 lambda_cutoff, eigval_min, eigval_max,
+                                 cheb_degree, gs->H, stream);
+}
+
+void EigenSolver::orthogonalize_kpt_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::orthogonalize_z_gpu(gs->d_Y_z, gs->d_Ms_z, Nd_d, Nband, gs->dV);
+}
+
+void EigenSolver::project_and_diag_kpt_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    gpu::project_and_diag_z_gpu(gs->d_Y_z, gs->d_HX_z, gs->d_Hs_z, gs->d_eigvals,
+                                 gs->d_Veff, Nd_d, Nband, gs->dV, gs->H);
+}
+
+void EigenSolver::subspace_rotation_kpt_gpu(int Nd_d, int Nband) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    gpu::rotate_orbitals_z_gpu(gs->d_Y_z, gs->d_Hs_z, gs->d_psi_z, Nd_d, Nband);
+    // Copy Y_z back to psi_z
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, gs->d_Y_z, (size_t)Nd_d * Nband * sizeof(cuDoubleComplex),
+                               cudaMemcpyDeviceToDevice, stream));
+}
+
+// --- GPU workspace pointer accessors ---
+
+double* EigenSolver::gpu_Y() {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    return gs ? gs->d_Y : nullptr;
+}
+
+double* EigenSolver::gpu_Hs() {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    return gs ? gs->d_Hs : nullptr;
 }
 
 // ============================================================
-// GPU-resident solve: psi stays on device, only Veff uploaded, eigvals downloaded
+// GPU-resident solve: algorithm lives in .cpp (solve_resident),
+// called through _gpu() sub-step methods.
 // ============================================================
 void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
                                   int Nd_d, int Nband,
@@ -1033,16 +891,11 @@ void EigenSolver::solve_resident(double* h_eigvals, const double* h_Veff,
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 
-    s_eigen_H_ptr_ = gs->H;
-
-    gpu::eigensolver_solve_gpu(
-        gs->d_psi, gs->d_eigvals, gs->d_Veff,
-        gs->d_Y, gs->d_Xold, gs->d_Xnew, gs->d_HX,
-        nullptr, gs->d_Hs, gs->d_Ms,
-        Nd_d, Nband,
-        lambda_cutoff, eigval_min, eigval_max,
-        cheb_degree, gs->dV,
-        eigen_apply_H_cb);
+    // CheFSI sub-steps via _gpu() class methods
+    chebyshev_filter_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_gpu(Nd_d, Nband);
+    project_and_diag_gpu(Nd_d, Nband);
+    subspace_rotation_gpu(Nd_d, Nband);
 
     // Download only eigenvalues (tiny: Nband doubles)
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
@@ -1061,16 +914,11 @@ void EigenSolver::solve_kpt_resident(double* h_eigvals, const double* h_Veff,
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd_d * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 
-    s_eigen_H_ptr_ = gs->H;
-
-    gpu::eigensolver_solve_z_gpu(
-        gs->d_psi_z, gs->d_eigvals, gs->d_Veff,
-        gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z, gs->d_HX_z,
-        nullptr, gs->d_Hs_z, gs->d_Ms_z,
-        Nd_d, Nband,
-        lambda_cutoff, eigval_min, eigval_max,
-        cheb_degree, gs->dV,
-        eigen_apply_H_z_cb);
+    // CheFSI sub-steps via _gpu() class methods
+    chebyshev_filter_kpt_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_kpt_gpu(Nd_d, Nband);
+    project_and_diag_kpt_gpu(Nd_d, Nband);
+    subspace_rotation_kpt_gpu(Nd_d, Nband);
 
     // Download only eigenvalues (tiny: Nband doubles)
     CUDA_CHECK(cudaMemcpyAsync(h_eigvals, gs->d_eigvals, Nband * sizeof(double),
@@ -1145,6 +993,119 @@ void EigenSolver::upload_Veff(const double* h_Veff, int Nd) {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
+}
+
+// ============================================================
+// Per-(spin,kpt) device psi buffer management
+// ============================================================
+
+void EigenSolver::allocate_psi_buffers(int Nspin_local, int Nkpts) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    int nsk = Nspin_local * Nkpts;
+    gs->psi_Nspin_local = Nspin_local;
+    gs->psi_Nkpts = Nkpts;
+    size_t psi_sz = (size_t)gs->Nd * gs->Nband;
+
+    if (gs->is_kpt || gs->is_soc) {
+        // Complex k-point buffers
+        size_t psi_sz_z = gs->is_soc ? (size_t)(2 * gs->Nd) * gs->Nband : psi_sz;
+
+        // Free the default single buffer (it was allocated in allocate_buffers)
+        if (gs->d_psi_z) { cudaFreeAsync(gs->d_psi_z, stream); gs->d_psi_z = nullptr; }
+
+        gs->d_psi_z_sk.resize(nsk, nullptr);
+        for (int i = 0; i < nsk; ++i) {
+            CUDA_CHECK(cudaMallocAsync(&gs->d_psi_z_sk[i],
+                                       psi_sz_z * sizeof(cuDoubleComplex), stream));
+        }
+        // Active pointer = first buffer
+        gs->d_psi_z = gs->d_psi_z_sk[0];
+    } else {
+        // Real gamma-point buffers
+        // Free the default single buffer
+        if (gs->d_psi) { cudaFreeAsync(gs->d_psi, stream); gs->d_psi = nullptr; }
+
+        gs->d_psi_sk.resize(nsk, nullptr);
+        for (int i = 0; i < nsk; ++i) {
+            CUDA_CHECK(cudaMallocAsync(&gs->d_psi_sk[i],
+                                       psi_sz * sizeof(double), stream));
+        }
+        // Active pointer = first buffer
+        gs->d_psi = gs->d_psi_sk[0];
+    }
+}
+
+void EigenSolver::set_active_psi(int spin, int kpt) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    int idx = spin * gs->psi_Nkpts + kpt;
+
+    if (gs->is_kpt || gs->is_soc) {
+        gs->d_psi_z = gs->d_psi_z_sk[idx];
+    } else {
+        gs->d_psi = gs->d_psi_sk[idx];
+    }
+}
+
+double* EigenSolver::device_psi_real(int spin, int kpt) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_sk.empty()) return gs->d_psi;  // fallback: single buffer
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_sk[idx];
+}
+
+const double* EigenSolver::device_psi_real(int spin, int kpt) const {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_sk.empty()) return gs->d_psi;
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_sk[idx];
+}
+
+void* EigenSolver::device_psi_z(int spin, int kpt) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_z_sk.empty()) return gs->d_psi_z;
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_z_sk[idx];
+}
+
+const void* EigenSolver::device_psi_z(int spin, int kpt) const {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    if (gs->d_psi_z_sk.empty()) return gs->d_psi_z;
+    int idx = spin * gs->psi_Nkpts + kpt;
+    return gs->d_psi_z_sk[idx];
+}
+
+void EigenSolver::randomize_psi_gpu(int Nspin_local, int spin_start, int Nkpts) {
+    auto* gs = static_cast<GPUEigenState*>(gpu_state_raw_);
+    auto& gctx = gpu::GPUContext::instance();
+    cudaStream_t stream = gctx.compute_stream;
+    curandGenerator_t curand = gctx.handles.curand;
+
+    int nsk = Nspin_local * Nkpts;
+    size_t psi_sz = (size_t)gs->Nd * gs->Nband;
+
+    if (gs->is_kpt || gs->is_soc) {
+        size_t psi_sz_z = gs->is_soc ? (size_t)(2 * gs->Nd) * gs->Nband : psi_sz;
+        // Fill complex buffers: generate 2*psi_sz_z doubles (real+imag interleaved)
+        for (int i = 0; i < nsk; ++i) {
+            int s = i / Nkpts;
+            unsigned long long seed = (unsigned long long)(spin_start + s) * 1000 + i * 13 + 1;
+            curandSetPseudoRandomGeneratorSeed(curand, seed);
+            curandGenerateUniformDouble(curand, reinterpret_cast<double*>(gs->d_psi_z_sk[i]),
+                                        2 * psi_sz_z);
+        }
+    } else {
+        // Fill real buffers
+        for (int i = 0; i < nsk; ++i) {
+            int s = i / Nkpts;
+            unsigned long long seed = (unsigned long long)(spin_start + s) * 1000 + i * 13 + 1;
+            curandSetPseudoRandomGeneratorSeed(curand, seed);
+            curandGenerateUniformDouble(curand, gs->d_psi_sk[i], psi_sz);
+        }
+    }
+
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 } // namespace lynx

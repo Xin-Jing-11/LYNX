@@ -73,7 +73,6 @@ void Mixer::apply_density_constraint(double* x, int ncol) {
 
     if (ncol == 2) {
         // Spin-polarized: x = [total | magnetization]
-        // Unpack to up/dn, clamp, repack
         for (int i = 0; i < Nd_d_; ++i) {
             double rho_tot = x[i];
             double mag = x[Nd_d_ + i];
@@ -84,14 +83,12 @@ void Mixer::apply_density_constraint(double* x, int ncol) {
             x[i] = rho_up + rho_dn;
             x[Nd_d_ + i] = rho_up - rho_dn;
         }
-        // Renormalize total density (column 0)
         double rho_sum = 0.0;
         for (int i = 0; i < Nd_d_; ++i) rho_sum += x[i];
         double Ne_current = rho_sum * dV_;
         if (Ne_current > 1e-10) {
             double scale = static_cast<double>(Nelectron_) / Ne_current;
             for (int i = 0; i < Nd_d_; ++i) {
-                // Scale both total and magnetization consistently
                 double rho_tot = x[i];
                 double mag = x[Nd_d_ + i];
                 double rho_up = 0.5 * (rho_tot + mag);
@@ -103,7 +100,6 @@ void Mixer::apply_density_constraint(double* x, int ncol) {
             }
         }
     } else {
-        // ncol==1 (non-spin) or ncol==4 (SOC): clamp and renormalize column 0
         for (int i = 0; i < Nd_d_; ++i) {
             if (x[i] < 0.0) x[i] = 0.0;
         }
@@ -118,25 +114,25 @@ void Mixer::apply_density_constraint(double* x, int ncol) {
 }
 
 void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
-    // Reference: Mixing_periodic_pulay
-    // x_k = current input density (x^{in}_k)
-    // g_k = output density from SCF (g(x_k) = x^{out}_k)
-    // After this call, x_k is updated to x_{k+1}
-    // ncol: number of density columns (1 for non-spin, 3 for spin [total,up,down])
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU && gpu_state_raw_) {
+        mix_gpu(x_k, g_k, Nd_d, ncol);
+        return;
+    }
+#endif
 
-    int N = Nd_d * ncol;  // total vector length
+    // ---- CPU path: Pulay mixing algorithm ----
 
-    // For potential mixing with mean-shift: work with zero-mean x_k and g_k,
-    // then restore g_k's mean to the result. Matches SPARC's flow exactly.
+    int N = Nd_d * ncol;
+
+    // For potential mixing with mean-shift
     std::vector<double> g_k_shifted;
     std::vector<double> xk_mean;
     if (potential_mean_shift_ && var_ == MixingVariable::Potential) {
-        // Remove mean from x_k (saves to veff_mean_ temporarily)
         remove_mean(x_k, ncol);
-        // Make a zero-mean copy of g_k, saving g_k's mean as the authoritative mean
         g_k_shifted.resize(N);
         std::memcpy(g_k_shifted.data(), g_k, N * sizeof(double));
-        remove_mean(g_k_shifted.data(), ncol);  // veff_mean_ now holds g_k's mean
+        remove_mean(g_k_shifted.data(), ncol);
         g_k = g_k_shifted.data();
     }
 
@@ -149,7 +145,7 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
         F_.resize(N * m_, 0.0);
     }
 
-    // Save old residual: f_{k-1} = f_k
+    // Save old residual
     if (iter_ > 0) {
         std::memcpy(f_km1_.data(), f_k_.data(), N * sizeof(double));
     }
@@ -159,7 +155,7 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
         f_k_[i] = g_k[i] - x_k[i];
     }
 
-    // Store history: R(:,i_hist) = x_k - x_{k-1}, F(:,i_hist) = f_k - f_{k-1}
+    // Store history
     if (iter_ > 0) {
         int i_hist = (iter_ - 1) % m_;
         for (int i = 0; i < N; ++i) {
@@ -168,35 +164,25 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
         }
     }
 
-    // Pulay mixing flag: reference uses PulayFrequency=1
-    // Pulay_mixing_flag = ((iter_count+1) % p == 0 && iter_count > 0)
-    // With p=1: true for all iter > 0
     bool pulay_flag = (iter_ > 0);
-
-    // amix = beta for Pulay, omega for simple
-    // Reference: omega defaults to same as beta
     double amix = beta_;
 
     std::vector<double> x_wavg(N);
     std::vector<double> f_wavg(N);
 
     if (pulay_flag) {
-        // Anderson extrapolation: find Gamma = inv(F^T * F) * F^T * f_k
         int cols = std::min(iter_, m_);
 
-        // Build F^T * F and F^T * f_k
         std::vector<double> FtF(cols * cols, 0.0);
         std::vector<double> Ftf(cols, 0.0);
 
         for (int i = 0; i < cols; ++i) {
             double* Fi = F_.data() + i * N;
-            // F^T * f_k
             double dot_ff = 0.0;
             for (int j = 0; j < N; ++j)
                 dot_ff += Fi[j] * f_k_[j];
             Ftf[i] = dot_ff;
 
-            // F^T * F (lower triangle, then symmetrize)
             for (int k = 0; k <= i; ++k) {
                 double* Fk = F_.data() + k * N;
                 double dot_FiFk = 0.0;
@@ -207,11 +193,9 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
             }
         }
 
-        // Solve FtF * Gamma = Ftf via Gaussian elimination with partial pivoting
         std::vector<double> Gamma(cols, 0.0);
         gauss_solve(FtF.data(), Ftf.data(), Gamma.data(), cols);
 
-        // x_wavg = x_k - R * Gamma
         std::memcpy(x_wavg.data(), x_k, N * sizeof(double));
         for (int j = 0; j < cols; ++j) {
             double* Rj = R_.data() + j * N;
@@ -221,7 +205,6 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
             }
         }
 
-        // f_wavg = f_k - F * Gamma
         std::memcpy(f_wavg.data(), f_k_.data(), N * sizeof(double));
         for (int j = 0; j < cols; ++j) {
             double* Fj = F_.data() + j * N;
@@ -231,50 +214,41 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
             }
         }
     } else {
-        // Simple mixing: x_wavg = x_k, f_wavg = f_k
         std::memcpy(x_wavg.data(), x_k, N * sizeof(double));
         std::memcpy(f_wavg.data(), f_k_.data(), N * sizeof(double));
     }
 
-    // Apply preconditioner to f_wavg -> Pf
-    // For potential mixing: precondition ALL columns (each spin channel independently)
-    // For density mixing: precondition column 0 (total density), identity on magnetization
+    // Apply preconditioner
     std::vector<double> Pf(N);
     if (precond_type_ == MixingPrecond::Kerker && preconditioner_) {
         if (var_ == MixingVariable::Potential) {
-            // Potential mixing: apply Kerker to each spin channel independently
             for (int c = 0; c < ncol; ++c) {
                 preconditioner_->apply(f_wavg.data() + c * Nd_d_, Pf.data() + c * Nd_d_, Nd_d_, amix);
             }
         } else {
-            // Density mixing: Kerker on column 0 (total density) only
             preconditioner_->apply(f_wavg.data(), Pf.data(), Nd_d_, amix);
-            // Columns 1+: no preconditioner (MixingPrecondMag default = none)
             for (int c = 1; c < ncol; ++c) {
                 for (int i = 0; i < Nd_d_; ++i)
                     Pf[c * Nd_d_ + i] = amix * f_wavg[c * Nd_d_ + i];
             }
         }
     } else {
-        // No preconditioner: Pf = amix * f_wavg
         for (int i = 0; i < N; ++i)
             Pf[i] = amix * f_wavg[i];
     }
 
-    // x_{k+1} = x_wavg + Pf (amix is already in Pf)
-    // Save x_km1 = x_k before overwriting
+    // x_{k+1} = x_wavg + Pf
     std::memcpy(x_km1_.data(), x_k, N * sizeof(double));
 
     for (int i = 0; i < N; ++i) {
         x_k[i] = x_wavg[i] + Pf[i];
     }
 
-    // For potential mixing with mean-shift: restore mean to x_k
+    // Post-processing
     if (potential_mean_shift_ && var_ == MixingVariable::Potential) {
         restore_mean(x_k, ncol);
     }
 
-    // For density mixing: apply clamping + renormalization
     if (density_constraint_ && var_ != MixingVariable::Potential) {
         apply_density_constraint(x_k, ncol);
     }
@@ -282,18 +256,9 @@ void Mixer::mix(double* x_k, const double* g_k, int Nd_d, int ncol) {
     iter_++;
 }
 
-// ---------------------------------------------------------------------------
-// Device-dispatching overload (CPU-only fallback when USE_CUDA is off)
-// GPU implementation lives in Mixer.cu.
-// ---------------------------------------------------------------------------
-#ifndef USE_CUDA
-
-void Mixer::mix(double* x_k_inout, const double* g_k, int Nd_d, int ncol, Device dev) {
-    if (dev == Device::GPU)
-        throw std::runtime_error("Mixer::mix(GPU) called but USE_CUDA is off");
-    mix(x_k_inout, g_k, Nd_d, ncol);
-}
-
-#endif // !USE_CUDA
+// ============================================================
+// GPU Pulay mixing algorithm — lives in .cpp
+// Kernel launches via _gpu() wrappers in .cu
+// ============================================================
 
 } // namespace lynx

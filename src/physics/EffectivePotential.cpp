@@ -79,6 +79,13 @@ void EffectivePotential::compute(const ElectronDensity& density,
                                   VeffArrays& arrays,
                                   const double* tau,
                                   bool tau_valid) {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        compute_gpu(density, rho_b, rho_core, xc_type, exx_frac_scale,
+                    poisson_tol, arrays, tau, tau_valid);
+        return;
+    }
+#endif
     int Nd_d = domain_->Nd_d();
     int Nspin = Nspin_global_;
 
@@ -174,6 +181,12 @@ void EffectivePotential::compute_spinor(const ElectronDensity& density,
                                          XCType xc_type,
                                          double poisson_tol,
                                          VeffArrays& arrays) {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        compute_spinor_gpu(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
+        return;
+    }
+#endif
     int Nd_d = domain_->Nd_d();
 
     // Convert noncollinear (rho, mx, my, mz) to (rho_up_xc, rho_dn_xc) for XC
@@ -253,36 +266,5 @@ void EffectivePotential::compute_spinor(const ElectronDensity& density,
         arrays.Veff.data()[i] = V_uu[i];
     }
 }
-
-// ============================================================
-// Device-dispatching methods (non-CUDA build: always CPU)
-// ============================================================
-#ifndef USE_CUDA
-void EffectivePotential::compute(const ElectronDensity& density,
-                                  const double* rho_b,
-                                  const double* rho_core,
-                                  XCType xc_type,
-                                  double exx_frac_scale,
-                                  double poisson_tol,
-                                  VeffArrays& arrays,
-                                  Device /*dev*/,
-                                  const double* tau,
-                                  bool tau_valid)
-{
-    compute(density, rho_b, rho_core, xc_type, exx_frac_scale,
-            poisson_tol, arrays, tau, tau_valid);
-}
-
-void EffectivePotential::compute_spinor(const ElectronDensity& density,
-                                         const double* rho_b,
-                                         const double* rho_core,
-                                         XCType xc_type,
-                                         double poisson_tol,
-                                         VeffArrays& arrays,
-                                         Device /*dev*/)
-{
-    compute_spinor(density, rho_b, rho_core, xc_type, poisson_tol, arrays);
-}
-#endif // !USE_CUDA
 
 } // namespace lynx

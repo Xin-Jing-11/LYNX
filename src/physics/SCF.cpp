@@ -22,6 +22,14 @@ static bool is_mgga_type(XCType t) {
     return t == XCType::MGGA_SCAN || t == XCType::MGGA_RSCAN || t == XCType::MGGA_R2SCAN;
 }
 
+SCF::~SCF() {
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        cleanup_gpu();
+    }
+#endif
+}
+
 SCFParams SCFParams::from_config(const SystemConfig& config) {
     SCFParams p;
     p.max_iter = config.max_scf_iter;
@@ -150,15 +158,16 @@ double SCF::run(Wavefunction& wfn,
         mixer.set_density_constraint(Nelectron, grid_->Nd(), grid_->dV());
     }
 
-    EigenSolver eigsolver;
-    eigsolver.setup(*ctx_, *hamiltonian_);
+    eigsolver_.setup(*ctx_, *hamiltonian_);
 
     SCFState state = SCF::initialize_scf(
         *ctx_, wfn, density_, arrays_, veff_builder_, params_,
-        *hamiltonian_, vnl_, eigsolver, mixer,
+        *hamiltonian_, vnl_, eigsolver_, mixer,
         Nelectron, xc_type, rho_b, rho_core);
 
     state.Nelectron = Nelectron;
+    Nband_loc_ = state.Nband_loc;
+    Nkpts_ = state.Nkpts;
 
     // Allocate kinetic energy density for mGGA
     if (is_mgga_type(xc_type)) {
@@ -196,7 +205,21 @@ double SCF::run(Wavefunction& wfn,
         hamiltonian_->setup_gpu(*ctx_, vnl_, *crystal_, *nloc_influence_, Nband_loc);
 
         // EigenSolver: allocate CheFSI workspace buffers (real + complex)
-        eigsolver.setup_gpu(*ctx_, Nband_loc, Nband_g, is_kpt_, is_soc_);
+        eigsolver_.setup_gpu(*ctx_, Nband_loc, Nband_g, is_kpt_, is_soc_);
+
+        // Allocate per-(spin,kpt) device psi buffers.
+        // Each (spin,kpt) gets its own GPU buffer — psi stays resident for
+        // entire SCF + forces/stress pipeline. No upload/download during SCF.
+        int Nspin_local = state.Nspin_local;
+        int Nkpts = state.Nkpts;
+        eigsolver_.allocate_psi_buffers(Nspin_local, Nkpts);
+
+        // Randomize psi directly on GPU via cuRAND — psi is born on device.
+        // No CPU randomization, no H2D transfer. Psi stays on GPU until cleanup.
+        if (!is_soc_) {
+            eigsolver_.randomize_psi_gpu(Nspin_local, spin_start_, Nkpts);
+            eigsolver_.set_active_psi(0, 0);
+        }
 
         // ElectronDensity: lightweight (no persistent device buffers)
         density_.setup_gpu(*ctx_, Nspin_global_);
@@ -209,34 +232,22 @@ double SCF::run(Wavefunction& wfn,
             tau_.setup_gpu(*ctx_, Nspin_global_);
         }
 
-        // Upload initial wavefunctions to device.
-        // For single-spin gamma: psi stays resident for entire SCF loop (upload once).
-        // For multi-spin/kpt: psi is uploaded before each solve_resident call,
-        // so we just upload the first spin/kpt here for the first CheFSI pass.
-        if (!is_soc_) {
-            if (is_kpt_) {
-                eigsolver.upload_psi_z_to_device(wfn.psi_kpt(0, 0).data(), Nd_d, Nband_loc);
-            } else {
-                eigsolver.upload_psi_to_device(wfn.psi(0, 0).data(), Nd_d, Nband_loc);
-            }
-        }
-
         // Upload initial Veff to device EigenSolver buffer
-        eigsolver.upload_Veff(arrays_.Veff.data(), Nd_d);
+        eigsolver_.upload_Veff(arrays_.Veff.data(), Nd_d);
 
         if (rank_world == 0)
-            std::printf("GPU-resident SCF: psi+Veff uploaded to device (stay resident)\n");
+            std::printf("GPU-resident SCF: per-(spin,kpt) psi buffers on device (stay resident)\n");
     }
 #endif
 
     // ===== 2. SCF Iteration Loop =====
     ElectronDensity rho_new;
     for (int scf_iter = 0; scf_iter < params_.max_iter; ++scf_iter) {
-        solve_eigenproblem(wfn, eigsolver, state, scf_iter);
-        compute_new_density(wfn, state, rho_new, &eigsolver);
+        solve_eigenproblem(wfn, state, scf_iter);
+        compute_new_density(wfn, state, rho_new);
         compute_scf_energy(wfn, rho_new, rho_b, Eself, Ec, state);
         if (check_convergence(wfn, rho_new, state, scf_iter)) break;
-        mix_and_update(rho_new, mixer, rho_b, rho_core, Nelectron, state, &eigsolver);
+        mix_and_update(rho_new, mixer, rho_b, rho_core, Nelectron, state);
     }
 
     if (!converged_ && rank_world == 0)
@@ -248,50 +259,43 @@ double SCF::run(Wavefunction& wfn,
         hybrid.run(*ctx_, wfn, density_, arrays_, veff_builder_,
                    energy_, Ef_, converged_,
                    exx_, hamiltonian_, vnl_,
-                   eigsolver, mixer, params_,
+                   eigsolver_, mixer, params_,
                    Nelectron, Natom,
                    rho_b, rho_core, xc_type,
                    Eself, Ec, state.kpt_weights, state);
     }
 
-    // ===== 4. GPU cleanup: download final data, free device buffers =====
-#ifdef USE_CUDA
-    if (dev_ == Device::GPU) {
-        // Download psi from device to host (needed for forces/stress post-SCF).
-        // This is the only psi D2H transfer in the entire SCF — psi stayed GPU-resident.
-        if (!is_soc_) {
-            int Nband_loc = state.Nband_loc;
-            for (int s = 0; s < state.Nspin_local; ++s) {
-                for (int k = 0; k < state.Nkpts; ++k) {
-                    if (is_kpt_) {
-                        eigsolver.download_psi_z(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
-                    } else {
-                        eigsolver.download_psi(wfn.psi(s, k).data(), Nd_d, Nband_loc);
-                    }
-                }
-            }
-        }
+    // ===== 4. GPU cleanup (after Forces/Stress use device psi via their own dispatch) =====
+    // Note: Forces/Stress::compute() call their own _gpu() methods which read
+    // device psi directly via eigsolver()/hamiltonian_ptr(). GPU state must stay
+    // alive until after Forces/Stress have run. cleanup_gpu() is called from
+    // run_calculation() after Forces/Stress complete.
+    // SOC excluded: spinor eigensolver falls back to CPU.
 
-        if (rank_world == 0)
-            std::printf("GPU-resident SCF complete: psi downloaded to host for forces/stress\n");
-
-        hamiltonian_->cleanup_gpu();
-        eigsolver.cleanup_gpu();
-        density_.cleanup_gpu();
-        veff_builder_.cleanup_gpu();
-        if (is_mgga_type(xc_type)) {
-            tau_.cleanup_gpu();
-        }
-    }
-#endif
 
     return energy_.Etotal;
 }
 
+#ifdef USE_CUDA
+void SCF::cleanup_gpu() {
+    if (dev_ != Device::GPU) return;
+    hamiltonian_->cleanup_gpu();
+    eigsolver_.cleanup_gpu();
+    density_.cleanup_gpu();
+    veff_builder_.cleanup_gpu();
+    if (is_mgga_type(xc_type_)) {
+        tau_.cleanup_gpu();
+    }
+    dev_ = Device::CPU;  // prevent double-cleanup from destructor
+}
+
+#endif
+
 // ===== Extracted SCF sub-steps =====
 
-void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
+void SCF::solve_eigenproblem(Wavefunction& wfn,
                               SCFState& state, int scf_iter) {
+    EigenSolver& eigsolver = eigsolver_;
     int Nd_d = domain_->Nd_d();
     int Nband = state.Nband;
     int Nband_loc = state.Nband_loc;
@@ -329,7 +333,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                                             state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
                                             kpt, cell_lengths,
                                             params_.cheb_degree,
-                                            wfn.psi_kpt(0, k).ld(), dev_);
+                                            wfn.psi_kpt(0, k).ld());
             }
         } else {
             for (int s = 0; s < Nspin_local; ++s) {
@@ -352,18 +356,11 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
 #ifdef USE_CUDA
                         if (dev_ == Device::GPU) {
                             hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
-                            if (Nspin_local > 1 || Nkpts > 1) {
-                                // Multi-kpt/spin: upload this spin/kpt's psi_z (shared device buffer).
-                                eigsolver.upload_psi_z_to_device(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
-                            }
-                            // GPU-resident: psi_z stays on device, only upload Veff, download eigvals
+                            // Activate this (spin,kpt)'s device psi buffer — no upload/download
+                            eigsolver.set_active_psi(s, k);
                             eigsolver.solve_kpt_resident(eig, Veff_s, Nd_d, Nband_loc,
                                                           state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                                           params_.cheb_degree);
-                            if (Nspin_local > 1 || Nkpts > 1) {
-                                // Multi-kpt/spin: download psi so density and next kpt can proceed.
-                                eigsolver.download_psi_z(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
-                            }
                         } else
 #endif
                         {
@@ -372,24 +369,16 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                                                 state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                                 kpt, cell_lengths,
                                                 params_.cheb_degree,
-                                                wfn.psi_kpt(s, k).ld(), dev_);
+                                                wfn.psi_kpt(s, k).ld());
                         }
                     } else {
 #ifdef USE_CUDA
                         if (dev_ == Device::GPU) {
-                            if (Nspin_local > 1) {
-                                // Multi-spin: upload this spin's psi before solving (shared device buffer).
-                                eigsolver.upload_psi_to_device(wfn.psi(s, k).data(), Nd_d, Nband_loc);
-                            }
-                            // GPU-resident: psi stays on device, only upload Veff, download eigvals.
+                            // Activate this (spin,kpt)'s device psi buffer — no upload/download
+                            eigsolver.set_active_psi(s, k);
                             eigsolver.solve_resident(eig, Veff_s, Nd_d, Nband_loc,
                                                       state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                                       params_.cheb_degree);
-                            if (Nspin_local > 1) {
-                                // Multi-spin: download psi after each spin so density and next
-                                // iteration can read all spins from host.
-                                eigsolver.download_psi(wfn.psi(s, k).data(), Nd_d, Nband_loc);
-                            }
                         } else
 #endif
                         {
@@ -397,7 +386,7 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
                             eigsolver.solve(psi, eig, Veff_s, Nd_d, Nband_loc,
                                             state.lambda_cutoff, state.eigval_min[s], state.eigval_max[s],
                                             params_.cheb_degree,
-                                            wfn.psi(s, k).ld(), dev_);
+                                            wfn.psi(s, k).ld());
                         }
                     }
                 }
@@ -426,57 +415,72 @@ void SCF::solve_eigenproblem(Wavefunction& wfn, EigenSolver& eigsolver,
 
     // Compute tau for mGGA after CheFSI solve
     if (is_mgga_type(xc_type_)) {
+        tau_.set_device(dev_);
 #ifdef USE_CUDA
-        // mGGA tau computation reads wfn from host (CPU fallback).
-        // Download psi from device to host for tau computation.
         if (dev_ == Device::GPU && !is_soc_) {
-            for (int s = 0; s < Nspin_local; ++s) {
-                for (int k = 0; k < Nkpts; ++k) {
-                    if (is_kpt_) {
-                        eigsolver.download_psi_z(wfn.psi_kpt(s, k).data(), Nd_d, Nband_loc);
-                    } else {
-                        eigsolver.download_psi(wfn.psi(s, k).data(), Nd_d, Nband_loc);
-                    }
-                }
+            // Build device psi pointer vectors — tau reads directly from device psi
+            std::vector<const double*> d_psi_real_ptrs;
+            std::vector<const void*> d_psi_z_ptrs;
+            if (is_kpt_) {
+                d_psi_z_ptrs.resize(Nspin_local * Nkpts);
+                for (int s = 0; s < Nspin_local; ++s)
+                    for (int k = 0; k < Nkpts; ++k)
+                        d_psi_z_ptrs[s * Nkpts + k] = eigsolver.device_psi_z(s, k);
+            } else {
+                d_psi_real_ptrs.resize(Nspin_local * Nkpts);
+                for (int s = 0; s < Nspin_local; ++s)
+                    for (int k = 0; k < Nkpts; ++k)
+                        d_psi_real_ptrs[s * Nkpts + k] = eigsolver.device_psi_real(s, k);
             }
-        }
-#endif
-        tau_.compute(*ctx_, wfn, state.kpt_weights, dev_);
-#ifdef USE_CUDA
-        // Wire device tau → EffectivePotential for GPU mGGA XC pipeline
-        if (dev_ == Device::GPU) {
+            tau_.compute_gpu_from_device(*ctx_, wfn, state.kpt_weights,
+                                          d_psi_real_ptrs, d_psi_z_ptrs);
+            // Wire device tau → EffectivePotential for GPU mGGA XC pipeline
             veff_builder_.set_device_tau(tau_.d_tau(), tau_.d_vtau());
-        }
+        } else
 #endif
+        {
+            tau_.compute(*ctx_, wfn, state.kpt_weights);
+        }
     }
 }
 
 void SCF::compute_new_density(const Wavefunction& wfn, const SCFState& state,
-                               ElectronDensity& rho_new, EigenSolver* eigsolver) {
+                               ElectronDensity& rho_new) {
     int Nd_d = domain_->Nd_d();
     int Nspin = Nspin_global_;
 
     if (is_soc_) {
         rho_new.allocate_noncollinear(Nd_d);
-        rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights, dev_);
+        rho_new.set_device(dev_);
+        rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights);
     } else {
         rho_new.allocate(Nd_d, Nspin);
+        rho_new.set_device(dev_);
 #ifdef USE_CUDA
-        if (dev_ == Device::GPU && eigsolver) {
-            bool single_spin_gamma = (Nspin_local_ == 1 && !is_kpt_);
-            if (single_spin_gamma) {
-                // Fully GPU-resident: read psi directly from device (no host upload).
-                rho_new.compute_from_device(*ctx_, wfn, state.kpt_weights,
-                                             eigsolver->gpu_psi(), nullptr, nullptr);
+        if (dev_ == Device::GPU) {
+            // Build per-(spin,kpt) device psi pointer vectors.
+            // Density reads directly from device — no psi H2D transfer.
+            int Nspin_local = state.Nspin_local;
+            int Nkpts = state.Nkpts;
+            std::vector<const double*> d_psi_real_ptrs;
+            std::vector<const void*> d_psi_z_ptrs;
+            if (is_kpt_) {
+                d_psi_z_ptrs.resize(Nspin_local * Nkpts);
+                for (int s = 0; s < Nspin_local; ++s)
+                    for (int k = 0; k < Nkpts; ++k)
+                        d_psi_z_ptrs[s * Nkpts + k] = eigsolver_.device_psi_z(s, k);
             } else {
-                // Multi-spin/kpt: psi was downloaded to host after each solve_resident.
-                // Use normal GPU compute path (uploads psi per spin/kpt).
-                rho_new.compute(*ctx_, wfn, state.kpt_weights, dev_);
+                d_psi_real_ptrs.resize(Nspin_local * Nkpts);
+                for (int s = 0; s < Nspin_local; ++s)
+                    for (int k = 0; k < Nkpts; ++k)
+                        d_psi_real_ptrs[s * Nkpts + k] = eigsolver_.device_psi_real(s, k);
             }
+            rho_new.compute_from_device_ptrs(*ctx_, wfn, state.kpt_weights,
+                                              d_psi_real_ptrs, d_psi_z_ptrs);
         } else
 #endif
         {
-            rho_new.compute(*ctx_, wfn, state.kpt_weights, dev_);
+            rho_new.compute(*ctx_, wfn, state.kpt_weights);
         }
     }
 }
@@ -495,8 +499,9 @@ void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho
         for (int s = 0; s < Nspin; ++s)
             std::memcpy(density_.rho(s).data(), rho_new.rho(s).data(), Nd_d * sizeof(double));
 
+        veff_builder_.set_device(dev_);
         veff_builder_.compute(density_, rho_b, rho_core_, xc_type_, 0.0, params_.poisson_tol, arrays_,
-                              dev_, tau_.valid() ? tau_.data() : nullptr, tau_.valid());
+                              tau_.valid() ? tau_.data() : nullptr, tau_.valid());
         state.Veff_out = DeviceArray<double>(Nd_d * Nspin);
         std::memcpy(state.Veff_out.data(), arrays_.Veff.data(), Nd_d * Nspin * sizeof(double));
 
@@ -590,14 +595,13 @@ bool SCF::check_convergence(const Wavefunction& wfn, const ElectronDensity& rho_
 
 void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
                           const double* rho_b, const double* rho_core,
-                          int Nelectron, SCFState& state,
-                          EigenSolver* eigsolver) {
+                          int Nelectron, SCFState& state) {
     int Nd_d = domain_->Nd_d();
     int Nspin = Nspin_global_;
 
     if (state.use_potential_mixing) {
         // Mixer handles mean-shift internally via set_potential_mean_shift
-        mixer.mix(state.Veff_mixed.data(), state.Veff_out.data(), Nd_d, Nspin, dev_);
+        mixer.mix(state.Veff_mixed.data(), state.Veff_out.data(), Nd_d, Nspin);
 
         // Copy mixed potential to arrays_.Veff for Hamiltonian
         std::memcpy(arrays_.Veff.data(), state.Veff_mixed.data(), Nd_d * Nspin * sizeof(double));
@@ -615,7 +619,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         std::memcpy(dens_out.data() + 3*Nd_d, rho_new.mag_z().data(), Nd_d * sizeof(double));
 
         // Mixer handles clamping+renormalization of column 0 (density constraint)
-        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4, dev_);
+        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 4);
 
         // Unpack back into density structure
         std::memcpy(density_.rho_total().data(), dens_in.data(), Nd_d * sizeof(double));
@@ -625,7 +629,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         std::memcpy(density_.mag_z().data(), dens_in.data() + 3*Nd_d, Nd_d * sizeof(double));
     } else if (Nspin == 1) {
         // Mixer handles clamping+renormalization (density constraint)
-        mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d, 1, dev_);
+        mixer.mix(density_.rho_total().data(), rho_new.rho_total().data(), Nd_d, 1);
         std::memcpy(density_.rho(0).data(), density_.rho_total().data(), Nd_d * sizeof(double));
     } else {
         // Spin-polarized: mix packed array [total | magnetization] (2*Nd_d)
@@ -646,7 +650,7 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
         }
 
         // Mixer handles clamping+renormalization (density constraint for ncol==2)
-        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2, dev_);
+        mixer.mix(dens_in.data(), dens_out.data(), Nd_d, 2);
 
         // Unpack [total | magnetization] back to [up | down]
         double* rho_tot = density_.rho_total().data();
@@ -662,17 +666,17 @@ void SCF::mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
 
     // For density mixing: recompute Veff from mixed density
     if (!state.use_potential_mixing) {
+        veff_builder_.set_device(dev_);
         if (is_soc_) {
-            veff_builder_.compute_spinor(density_, rho_b, rho_core, xc_type_, params_.poisson_tol, arrays_, dev_);
+            veff_builder_.compute_spinor(density_, rho_b, rho_core, xc_type_, params_.poisson_tol, arrays_);
         } else {
             veff_builder_.compute(density_, rho_b, rho_core, xc_type_, 0.0, params_.poisson_tol, arrays_,
-                                  dev_, tau_.valid() ? tau_.data() : nullptr, tau_.valid());
+                                  tau_.valid() ? tau_.data() : nullptr, tau_.valid());
         }
     }
 
     // Note: Veff is on host after recomputation. For GPU-resident SCF,
     // solve_resident() uploads Veff to device at the start of each call.
-    (void)eigsolver;  // suppress unused parameter warning on non-CUDA builds
 }
 
 

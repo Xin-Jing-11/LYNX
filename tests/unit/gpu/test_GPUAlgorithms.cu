@@ -11,6 +11,8 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cusolverDn.h>
+#include <xc.h>
+#include <xc_funcs.h>
 #include "core/GPUContext.cuh"
 #include "core/gpu_common.cuh"
 
@@ -24,20 +26,6 @@ void symmetrize_gpu(double* d_Hs, int N, cudaStream_t stream = 0);
 void orthogonalize_gpu(double* d_X, double* d_S, int Nd, int N, double dV);
 void rotate_orbitals_gpu(double* d_X, const double* d_Q, double* d_temp, int Nd, int N);
 void compute_density_gpu(const double* d_psi, const double* d_occ, double* d_rho, int Nd, int Ns, double weight, cudaStream_t stream = 0);
-void lda_pw_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
-void lda_pz_gpu(const double* d_rho, double* d_exc, double* d_vxc, int N, cudaStream_t stream = 0);
-
-int aar_gpu(
-    void (*op_gpu)(const double* d_x, double* d_Ax),
-    void (*precond_gpu)(const double* d_r, double* d_f),
-    const double* d_b,
-    double* d_x,
-    int N,
-    double omega, double beta, int m, int p,
-    double tol, int max_iter,
-    double* d_r, double* d_f, double* d_Ax,
-    double* d_X_hist, double* d_F_hist,
-    double* d_x_old, double* d_f_old, cudaStream_t stream = 0);
 }} // namespace
 
 // CPU reference BLAS
@@ -269,43 +257,48 @@ void test_density() {
 // Test 5: GPU LDA XC (PW92 and PZ81)
 // ============================================================
 void test_xc_lda() {
-    printf("=== Test: GPU LDA XC vs CPU reference ===\n");
+    printf("=== Test: GPU LDA XC (libxc CUDA) vs CPU reference ===\n");
 
     int N = 10000;
     std::vector<double> h_rho(N);
     for (int i = 0; i < N; i++) h_rho[i] = 0.001 + 0.1 * ((double)i / N);
 
-    // CPU reference for LDA_PW (Slater + PW92)
-    auto cpu_lda_pw = [](double rho, double& exc, double& vxc) {
-        double rho_cbrt = cbrt(rho);
-        double ex = -0.738558766382022 * rho_cbrt;
-        double vx = -0.9847450218426965 * rho_cbrt;
-
-        double rs = 0.6203504908993999 / rho_cbrt;
-        double rs_sqrt = sqrt(rs);
-        double G2 = 2.0*0.031091*(7.5957*rs_sqrt + 3.5876*rs + 1.6382*rs*rs_sqrt + 0.49294*rs*rs);
-        double G1 = log(1.0 + 1.0/G2);
-        double ec = -2.0*0.031091*(1.0 + 0.21370*rs)*G1;
-        double vc = ec - (rs/3.0)*(-2.0*0.031091*0.21370*G1
-            + (2.0*0.031091*(1.0+0.21370*rs)
-               *(0.031091*(7.5957/rs_sqrt + 2.0*3.5876 + 3.0*1.6382*rs_sqrt + 2.0*2.0*0.49294*rs)))
-              /(G2*(G2+1.0)));
-        exc = ex + ec;
-        vxc = vx + vc;
-    };
-
+    // CPU reference using libxc (host mode)
+    xc_func_type cpu_x, cpu_c;
+    xc_func_init_flags(&cpu_x, XC_LDA_X, XC_UNPOLARIZED, XC_FLAGS_ON_HOST);
+    xc_func_init_flags(&cpu_c, XC_LDA_C_PW, XC_UNPOLARIZED, XC_FLAGS_ON_HOST);
+    std::vector<double> h_zk_x(N), h_zk_c(N), h_vr_x(N), h_vr_c(N);
+    xc_lda_exc_vxc(&cpu_x, N, h_rho.data(), h_zk_x.data(), h_vr_x.data());
+    xc_lda_exc_vxc(&cpu_c, N, h_rho.data(), h_zk_c.data(), h_vr_c.data());
     std::vector<double> h_exc_cpu(N), h_vxc_cpu(N);
-    for (int i = 0; i < N; i++)
-        cpu_lda_pw(h_rho[i], h_exc_cpu[i], h_vxc_cpu[i]);
+    for (int i = 0; i < N; i++) {
+        h_exc_cpu[i] = h_zk_x[i] + h_zk_c[i];
+        h_vxc_cpu[i] = h_vr_x[i] + h_vr_c[i];
+    }
+    xc_func_end(&cpu_x);
+    xc_func_end(&cpu_c);
 
-    // GPU
-    double *d_rho, *d_exc, *d_vxc;
+    // GPU: libxc with device pointers
+    double *d_rho, *d_exc, *d_vxc, *d_exc_c, *d_vxc_c;
     CUDA_CHECK(cudaMalloc(&d_rho, N * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_exc, N * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_vxc, N * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_exc_c, N * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_vxc_c, N * sizeof(double)));
     CUDA_CHECK(cudaMemcpy(d_rho, h_rho.data(), N * sizeof(double), cudaMemcpyHostToDevice));
 
-    lda_pw_gpu(d_rho, d_exc, d_vxc, N);
+    xc_func_type gpu_x, gpu_c;
+    xc_func_init_flags(&gpu_x, XC_LDA_X, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+    xc_func_init_flags(&gpu_c, XC_LDA_C_PW, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+    xc_lda_exc_vxc(&gpu_x, N, d_rho, d_exc, d_vxc);
+    xc_lda_exc_vxc(&gpu_c, N, d_rho, d_exc_c, d_vxc_c);
+    // Accumulate on GPU
+    auto& ctx = lynx::gpu::GPUContext::instance();
+    double one = 1.0;
+    cublasDaxpy(ctx.cublas, N, &one, d_exc_c, 1, d_exc, 1);
+    cublasDaxpy(ctx.cublas, N, &one, d_vxc_c, 1, d_vxc, 1);
+    xc_func_end(&gpu_x);
+    xc_func_end(&gpu_c);
     CUDA_CHECK(cudaDeviceSynchronize());
 
     std::vector<double> h_exc_gpu(N), h_vxc_gpu(N);
@@ -320,97 +313,35 @@ void test_xc_lda() {
 
     printf("  LDA_PW: exc_err=%.2e vxc_err=%.2e %s\n",
            max_err_exc, max_err_vxc,
-           (max_err_exc < 1e-14 && max_err_vxc < 1e-14) ? "OK" : "FAIL");
-    assert(max_err_exc < 1e-14);
-    assert(max_err_vxc < 1e-14);
+           (max_err_exc < 1e-12 && max_err_vxc < 1e-12) ? "OK" : "FAIL");
+    assert(max_err_exc < 1e-12);
+    assert(max_err_vxc < 1e-12);
 
-    // Also test PZ81
-    lda_pz_gpu(d_rho, d_exc, d_vxc, N);
+    // Also test PZ81 via libxc
+    xc_func_type gpu_pz_x, gpu_pz_c;
+    xc_func_init_flags(&gpu_pz_x, XC_LDA_X, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+    xc_func_init_flags(&gpu_pz_c, XC_LDA_C_PZ, XC_UNPOLARIZED, XC_FLAGS_ON_DEVICE);
+    xc_lda_exc_vxc(&gpu_pz_x, N, d_rho, d_exc, d_vxc);
+    xc_lda_exc_vxc(&gpu_pz_c, N, d_rho, d_exc_c, d_vxc_c);
+    cublasDaxpy(ctx.cublas, N, &one, d_exc_c, 1, d_exc, 1);
+    xc_func_end(&gpu_pz_x);
+    xc_func_end(&gpu_pz_c);
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(h_exc_gpu.data(), d_exc, N * sizeof(double), cudaMemcpyDeviceToHost));
 
-    // Just verify it produces reasonable values
     for (int i = 0; i < N; i++) {
-        assert(h_exc_gpu[i] < 0);  // XC energy should be negative
+        assert(h_exc_gpu[i] < 0);
         assert(h_exc_gpu[i] > -10);
     }
     printf("  LDA_PZ: values reasonable (all negative, bounded): OK\n");
 
-    cudaFree(d_rho); cudaFree(d_exc); cudaFree(d_vxc);
+    cudaFree(d_rho); cudaFree(d_exc); cudaFree(d_vxc); cudaFree(d_exc_c); cudaFree(d_vxc_c);
     printf("  PASSED\n\n");
 }
 
 // ============================================================
 // Test 6: GPU AAR Solver (solve -Lap*x = b)
 // ============================================================
-
-// Global GPU workspace for AAR test operator
-static double* g_d_Ax_tmp = nullptr;
-static double* g_d_x_ex_tmp = nullptr;
-static int g_aar_N = 0;
-
-// Simple test operator: A*x = diagonal * x (just to test AAR framework)
-__global__ void diag_op_kernel(const double* x, double* Ax, double diag, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < N) Ax[idx] = diag * x[idx];
-}
-
-static void test_op_gpu(const double* d_x, double* d_Ax) {
-    int bs = 256;
-    diag_op_kernel<<<ceildiv(g_aar_N, bs), bs>>>(d_x, d_Ax, 4.0, g_aar_N);
-}
-
-void test_aar_solver() {
-    printf("=== Test: GPU AAR Solver ===\n");
-
-    int N = 1000;
-    g_aar_N = N;
-    int m = 7, p = 6;
-    double omega = 0.2, beta = 0.2, tol = 1e-10;
-    int max_iter = 500;
-
-    // Solve 4*x = b, solution: x = b/4
-    std::vector<double> h_b(N);
-    for (int i = 0; i < N; i++) h_b[i] = 4.0 * (1.0 + sin(0.01 * i));
-
-    // GPU buffers
-    double *d_b, *d_x, *d_r, *d_f, *d_Ax, *d_X_hist, *d_F_hist, *d_x_old, *d_f_old;
-    CUDA_CHECK(cudaMalloc(&d_b, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_x, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_r, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_f, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_Ax, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_X_hist, N * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_F_hist, N * m * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_x_old, N * sizeof(double)));
-    CUDA_CHECK(cudaMalloc(&d_f_old, N * sizeof(double)));
-
-    CUDA_CHECK(cudaMemcpy(d_b, h_b.data(), N * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemset(d_x, 0, N * sizeof(double)));  // initial guess = 0
-
-    int iters = aar_gpu(test_op_gpu, nullptr, d_b, d_x, N,
-                         omega, beta, m, p, tol, max_iter,
-                         d_r, d_f, d_Ax, d_X_hist, d_F_hist,
-                         d_x_old, d_f_old);
-
-    std::vector<double> h_x(N);
-    CUDA_CHECK(cudaMemcpy(h_x.data(), d_x, N * sizeof(double), cudaMemcpyDeviceToHost));
-
-    double max_err = 0;
-    for (int i = 0; i < N; i++) {
-        double expected = h_b[i] / 4.0;
-        max_err = std::max(max_err, std::abs(h_x[i] - expected));
-    }
-
-    printf("  N=%d: %d iterations, max_err=%.2e %s\n",
-           N, iters, max_err, max_err < 1e-8 ? "OK" : "FAIL");
-    assert(max_err < 1e-8);
-
-    cudaFree(d_b); cudaFree(d_x); cudaFree(d_r); cudaFree(d_f);
-    cudaFree(d_Ax); cudaFree(d_X_hist); cudaFree(d_F_hist);
-    cudaFree(d_x_old); cudaFree(d_f_old);
-    printf("  PASSED\n\n");
-}
 
 // ============================================================
 // Performance benchmark: GPU subspace ops
@@ -497,7 +428,7 @@ int main() {
     test_rotate_orbitals();
     test_density();
     test_xc_lda();
-    test_aar_solver();
+    // test_aar_solver removed: standalone gpu::aar_gpu deleted (AAR loop now in Mixer/PoissonSolver .cpp)
     bench_subspace_ops();
 
     printf("All tests PASSED.\n");

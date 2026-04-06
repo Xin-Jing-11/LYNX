@@ -62,6 +62,16 @@ void Stress::compute(
     const AtomSetup& atoms,
     const NonlocalProjector& vnl) {
 
+    // Set device for internal dispatch
+    dev_ = Device::CPU;
+#ifdef USE_CUDA
+    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()) {
+        dev_ = Device::GPU;
+        hamiltonian_ = scf.hamiltonian_ptr();
+        eigsolver_ = &scf.eigsolver();
+    }
+#endif
+
     int Nspin_calc = (config.spin_type == SpinType::Collinear) ? 2 :
                      (config.spin_type == SpinType::NonCollinear) ? 1 : 1;
     const double* rho_up_ptr = (Nspin_calc == 2) ? scf.density().rho(0).data() : nullptr;
@@ -161,8 +171,8 @@ std::array<double, 6> Stress::compute_impl(
     // 2. Electrostatic (local) stress
     compute_electrostatic(crystal, influence, phi, rho, Vloc, b, b_ref, Esc);
 
-    // 3. Nonlocal + kinetic stress
-    compute_nonlocal_kinetic(ctx, wfn, crystal, nloc_influence, vnl, kpt_weights);
+    // 3. Nonlocal + kinetic stress (dispatches to CPU or GPU)
+    compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl, kpt_weights);
 
     // 4. mGGA psi stress term: σ_ij += -occfac · Σ_n g_n · ∫ vtau · ∇_i ψ · ∇_j ψ dV
     if (gpu_mgga_psi_stress && is_mgga_type(xc_type)) {
@@ -892,23 +902,40 @@ void Stress::compute_electrostatic(
 }
 
 // ---------------------------------------------------------------------------
-// Nonlocal + kinetic stress (matching reference Calculate_nonlocal_kinetic_stress_linear)
+// Dispatcher: routes to CPU or GPU path based on dev_.
 // ---------------------------------------------------------------------------
 void Stress::compute_nonlocal_kinetic(
-    const LynxContext& ctx,
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,
     const NonlocalProjector& vnl,
     const std::vector<double>& kpt_weights) {
-    compute_nonlocal_kinetic(wfn, crystal, nloc_influence, vnl,
-                             ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
-                             kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(),
-                             ctx.spin_bridge(), &ctx.kpoints(),
-                             ctx.kpt_start(), ctx.band_start());
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        compute_nonlocal_kinetic_gpu(wfn, crystal, nloc_influence, vnl, kpt_weights);
+        return;
+    }
+#endif
+    compute_nonlocal_kinetic_cpu(wfn, crystal, nloc_influence, vnl, kpt_weights);
 }
 
-void Stress::compute_nonlocal_kinetic(
+// ---------------------------------------------------------------------------
+// CPU nonlocal+kinetic stress (matching reference Calculate_nonlocal_kinetic_stress_linear)
+// ---------------------------------------------------------------------------
+void Stress::compute_nonlocal_kinetic_cpu(
+    const Wavefunction& wfn,
+    const Crystal& crystal,
+    const std::vector<AtomNlocInfluence>& nloc_influence,
+    const NonlocalProjector& vnl,
+    const std::vector<double>& kpt_weights) {
+    compute_nonlocal_kinetic_cpu(wfn, crystal, nloc_influence, vnl,
+                             ctx_->gradient(), ctx_->halo(), ctx_->domain(), ctx_->grid(),
+                             kpt_weights, ctx_->scf_bandcomm(), ctx_->kpt_bridge(),
+                             ctx_->spin_bridge(), &ctx_->kpoints(),
+                             ctx_->kpt_start(), ctx_->band_start());
+}
+
+void Stress::compute_nonlocal_kinetic_cpu(
     const Wavefunction& wfn,
     const Crystal& crystal,
     const std::vector<AtomNlocInfluence>& nloc_influence,

@@ -257,21 +257,23 @@ void ElectronDensity::compute_spinor(const Wavefunction& wfn,
     std::memcpy(rho_[0].data(), rho_total_.data(), Nd_d * sizeof(double));
 }
 
-void ElectronDensity::compute(const LynxContext& ctx,
-                               const Wavefunction& wfn,
-                               const std::vector<double>& kpt_weights) {
-    compute(wfn, kpt_weights, ctx.dV(),
-            ctx.scf_bandcomm(), ctx.kpt_bridge(),
-            ctx.Nspin(), ctx.spin_start(),
-            &ctx.spin_bridge(), ctx.kpt_start(), ctx.band_start());
+// CPU compute implementation (private helper)
+static void compute_cpu_impl(ElectronDensity& self, const LynxContext& ctx,
+                              const Wavefunction& wfn,
+                              const std::vector<double>& kpt_weights) {
+    self.compute(wfn, kpt_weights, ctx.dV(),
+                 ctx.scf_bandcomm(), ctx.kpt_bridge(),
+                 ctx.Nspin(), ctx.spin_start(),
+                 &ctx.spin_bridge(), ctx.kpt_start(), ctx.band_start());
 }
 
-void ElectronDensity::compute_spinor(const LynxContext& ctx,
-                                      const Wavefunction& wfn,
-                                      const std::vector<double>& kpt_weights) {
-    compute_spinor(wfn, kpt_weights, ctx.dV(),
-                   ctx.scf_bandcomm(), ctx.kpt_bridge(),
-                   ctx.kpt_start(), ctx.band_start());
+// CPU spinor compute implementation (private helper)
+static void compute_spinor_cpu_impl(ElectronDensity& self, const LynxContext& ctx,
+                                     const Wavefunction& wfn,
+                                     const std::vector<double>& kpt_weights) {
+    self.compute_spinor(wfn, kpt_weights, ctx.dV(),
+                        ctx.scf_bandcomm(), ctx.kpt_bridge(),
+                        ctx.kpt_start(), ctx.band_start());
 }
 
 double ElectronDensity::integrate(double dV) const {
@@ -284,25 +286,33 @@ double ElectronDensity::integrate(double dV) const {
 }
 
 // ============================================================
-// Device-dispatching methods (non-CUDA build: always CPU)
+// Dispatching compute — checks dev_ member
 // ============================================================
-#ifndef USE_CUDA
+
 void ElectronDensity::compute(const LynxContext& ctx,
                                const Wavefunction& wfn,
-                               const std::vector<double>& kpt_weights,
-                               Device /*dev*/)
+                               const std::vector<double>& kpt_weights)
 {
-    // Non-CUDA build: ignore Device, call CPU implementation
-    compute(ctx, wfn, kpt_weights);
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        compute_gpu(ctx, wfn, kpt_weights);
+        return;
+    }
+#endif
+    compute_cpu_impl(*this, ctx, wfn, kpt_weights);
 }
 
 void ElectronDensity::compute_spinor(const LynxContext& ctx,
                                       const Wavefunction& wfn,
-                                      const std::vector<double>& kpt_weights,
-                                      Device /*dev*/)
+                                      const std::vector<double>& kpt_weights)
 {
-    compute_spinor(ctx, wfn, kpt_weights);
+#ifdef USE_CUDA
+    if (dev_ == Device::GPU) {
+        compute_spinor_gpu(ctx, wfn, kpt_weights);
+        return;
+    }
+#endif
+    compute_spinor_cpu_impl(*this, ctx, wfn, kpt_weights);
 }
-#endif // !USE_CUDA
 
 } // namespace lynx

@@ -81,7 +81,6 @@ if(USE_CUDA)
         electronic/ElectronDensity.cu
         electronic/KineticEnergyDensity.cu
         solvers/EigenSolver.cu
-        solvers/LinearSolver.cu
         solvers/PoissonSolver.cu
         solvers/Mixer.cu
         xc/XCFunctional.cu
@@ -90,6 +89,8 @@ if(USE_CUDA)
         physics/EffectivePotential.cu
         physics/GPUForce.cu
         physics/GPUStress.cu
+        physics/Forces.cu
+        physics/StressGPU.cu
     )
     target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand CUDA::cufft CUDA::cufftw)
     target_compile_definitions(lynx_core PUBLIC USE_CUDA)

@@ -7,8 +7,23 @@
 namespace lynx {
 namespace gpu {
 
-// Compute nonlocal forces and kinetic+nonlocal stress on GPU (real, gamma-point)
-void compute_force_stress_gpu(
+// Real gamma-point: nonlocal force + energy only
+void compute_nonlocal_force_gpu(
+    const double* d_psi, const double* d_occ,
+    const double* d_Chi_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets, const int* d_chi_offsets,
+    const int* d_ndc_arr, const int* d_nproj_arr,
+    const int* d_IP_displ, const double* d_Gamma,
+    int n_influence, int total_nproj, int max_ndc, int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double occfac,
+    double* h_f_nloc, double* h_energy_nl,
+    cudaStream_t stream = 0);
+
+// Real gamma-point: kinetic + nonlocal stress only
+void compute_kinetic_nonlocal_stress_gpu(
     const double* d_psi, const double* d_occ,
     const double* d_Chi_flat, const int* d_gpos_flat,
     const int* d_gpos_offsets, const int* d_chi_offsets,
@@ -20,7 +35,44 @@ void compute_force_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs, double occfac,
-    double* h_f_nloc, double* h_stress_k, double* h_stress_nl, double* h_energy_nl,
+    double* h_stress_k, double* h_stress_nl,
+    cudaStream_t stream = 0);
+
+// Complex k-point: nonlocal force + energy only
+void compute_nonlocal_force_kpt_gpu(
+    const cuDoubleComplex* d_psi_z, const double* d_occ,
+    const double* d_Chi_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets, const int* d_chi_offsets,
+    const int* d_ndc_arr, const int* d_nproj_arr,
+    const int* d_IP_displ, const double* d_Gamma,
+    const double* d_bloch_fac,
+    int n_influence, int total_nproj, int max_ndc, int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV,
+    double kxLx, double kyLy, double kzLz,
+    double spn_fac_wk,
+    double* h_f_nloc, double* h_energy_nl,
+    cudaStream_t stream = 0);
+
+// Complex k-point: kinetic + nonlocal stress only
+void compute_kinetic_nonlocal_stress_kpt_gpu(
+    const cuDoubleComplex* d_psi_z, const double* d_occ,
+    const double* d_Chi_flat, const int* d_gpos_flat,
+    const int* d_gpos_offsets, const int* d_chi_offsets,
+    const int* d_ndc_arr, const int* d_nproj_arr,
+    const int* d_IP_displ, const double* d_Gamma,
+    const double* d_bloch_fac,
+    int n_influence, int total_nproj, int max_ndc, int max_nproj,
+    int n_phys_atoms,
+    const int* h_IP_displ_phys, const double* h_atom_pos,
+    int nx, int ny, int nz, int FDn, int Nd, int Nband,
+    double dV, double dx, double dy, double dz,
+    int xs, int ys, int zs,
+    double kxLx, double kyLy, double kzLz,
+    double spn_fac_wk,
+    double* h_stress_k, double* h_stress_nl,
     cudaStream_t stream = 0);
 
 // Compute SOC nonlocal forces on GPU (complex spinor, k-point)
