@@ -62,10 +62,12 @@ void Stress::compute(
     const AtomSetup& atoms,
     const NonlocalProjector& vnl) {
 
-    // Set device for internal dispatch
+    // Set device for internal dispatch.
+    // SOC stress stays on CPU: the GPU kernel doesn't handle spinor layout.
     dev_ = Device::CPU;
 #ifdef USE_CUDA
-    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()) {
+    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()
+        && wfn.Nspinor() == 1) {
         dev_ = Device::GPU;
         hamiltonian_ = scf.hamiltonian_ptr();
         eigsolver_ = &scf.eigsolver();

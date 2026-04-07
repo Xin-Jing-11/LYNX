@@ -27,10 +27,13 @@ void Forces::compute(
     const AtomSetup& atoms,
     const NonlocalProjector& vnl) {
 
-    // Set device for internal dispatch
+    // Set device for internal dispatch.
+    // SOC forces stay on CPU: the GPU nonlocal force kernel doesn't handle
+    // spinor layout, and SPARC also computes SOC forces on CPU.
     dev_ = Device::CPU;
 #ifdef USE_CUDA
-    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()) {
+    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()
+        && wfn.Nspinor() == 1) {
         dev_ = Device::GPU;
         hamiltonian_ = scf.hamiltonian_ptr();
         eigsolver_ = &scf.eigsolver();
@@ -451,7 +454,9 @@ void Forces::compute_nonlocal_cpu(
     if (!spincomm.is_null() && spincomm.size() > 1) {
         MPI_Allreduce(MPI_IN_PLACE, &Nspin, 1, MPI_INT, MPI_SUM, spincomm.comm());
     }
-    double occfac = (Nspin == 1) ? 2.0 : 1.0;
+    int Nspinor = wfn.Nspinor();
+    // For SOC spinor: both spin components in one wfn, so occfac = 1.0
+    double occfac = (Nspinor == 2) ? 1.0 : ((Nspin == 1) ? 2.0 : 1.0);
     double spn_fac = occfac * 2.0;
     f_nloc_.assign(3 * n_atom, 0.0);
 
@@ -512,45 +517,17 @@ void Forces::compute_nonlocal_cpu(
 
                     const Complex* psi_n = psi_sk.col(n);
 
-                    // Compute complex alpha = e^{-ik·R_img} * dV * Chi^T * psi
-                    std::vector<Complex> alpha(total_nproj, Complex(0.0, 0.0));
-                    for (int it = 0; it < ntypes; ++it) {
-                        const auto& inf = nloc_influence[it];
-                        int nproj = crystal.types()[it].psd().nproj_per_atom();
-                        if (nproj == 0) continue;
+                    // For SOC spinor: psi_n = [psi_up(Nd_d) | psi_dn(Nd_d)].
+                    // Scalar-relativistic KB projectors apply to each spinor
+                    // component separately (same Chi, same Gamma).
+                    int n_spinor_comp = (Nspinor == 2) ? 2 : 1;
 
-                        for (int iat = 0; iat < inf.n_atom; ++iat) {
-                            int ndc = inf.ndc[iat];
-                            if (ndc == 0) continue;
-                            int orig_atom = inf.atom_index[iat];
-                            int offset = IP_displ[orig_atom];
-                            const auto& gpos = inf.grid_pos[iat];
-                            const auto& chi_iat = Chi[it][iat];
+                    // Compute complex alpha per spinor component
+                    std::vector<std::vector<Complex>> alpha_sp(n_spinor_comp,
+                        std::vector<Complex>(total_nproj, Complex(0.0, 0.0)));
 
-                            // Bloch phase: e^{-ik·R_image}
-                            const Vec3& shift = inf.image_shift[iat];
-                            double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
-                            Complex bloch_fac(std::cos(theta), std::sin(theta));
-                            Complex alpha_scale = bloch_fac * dV;
-
-                            for (int jp = 0; jp < nproj; ++jp) {
-                                Complex dot(0.0, 0.0);
-                                for (int ig = 0; ig < ndc; ++ig) {
-                                    dot += chi_iat(ig, jp) * psi_n[gpos[ig]];
-                                }
-                                alpha[offset + jp] += alpha_scale * dot;
-                            }
-                        }
-                    }
-
-                    // For each direction, compute complex beta and accumulate force
-                    for (int dim = 0; dim < 3; ++dim) {
-                        std::vector<Complex> psi_ex(Nd_ex, Complex(0.0, 0.0));
-                        halo.execute_kpt(psi_n, psi_ex.data(), 1, kpt_cart, cell_lengths);
-                        std::vector<Complex> Dpsi(Nd_d, Complex(0.0, 0.0));
-                        gradient.apply(psi_ex.data(), Dpsi.data(), dim);
-
-                        std::vector<Complex> beta(total_nproj, Complex(0.0, 0.0));
+                    for (int sp = 0; sp < n_spinor_comp; ++sp) {
+                        const Complex* psi_sp = psi_n + sp * Nd_d;
                         for (int it = 0; it < ntypes; ++it) {
                             const auto& inf = nloc_influence[it];
                             int nproj = crystal.types()[it].psd().nproj_per_atom();
@@ -567,26 +544,69 @@ void Forces::compute_nonlocal_cpu(
                                 const Vec3& shift = inf.image_shift[iat];
                                 double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
                                 Complex bloch_fac(std::cos(theta), std::sin(theta));
-                                Complex beta_scale = bloch_fac * dV;
+                                Complex alpha_scale = bloch_fac * dV;
 
                                 for (int jp = 0; jp < nproj; ++jp) {
                                     Complex dot(0.0, 0.0);
-                                    for (int ig = 0; ig < ndc; ++ig) {
-                                        dot += chi_iat(ig, jp) * Dpsi[gpos[ig]];
+                                    for (int ig = 0; ig < ndc; ++ig)
+                                        dot += chi_iat(ig, jp) * psi_sp[gpos[ig]];
+                                    alpha_sp[sp][offset + jp] += alpha_scale * dot;
+                                }
+                            }
+                        }
+                    }
+
+                    // For each direction, compute complex beta and accumulate force
+                    for (int dim = 0; dim < 3; ++dim) {
+                        std::vector<std::vector<Complex>> beta_sp(n_spinor_comp,
+                            std::vector<Complex>(total_nproj, Complex(0.0, 0.0)));
+
+                        for (int sp = 0; sp < n_spinor_comp; ++sp) {
+                            const Complex* psi_sp = psi_n + sp * Nd_d;
+                            std::vector<Complex> psi_ex(Nd_ex, Complex(0.0, 0.0));
+                            halo.execute_kpt(psi_sp, psi_ex.data(), 1, kpt_cart, cell_lengths);
+                            std::vector<Complex> Dpsi(Nd_d, Complex(0.0, 0.0));
+                            gradient.apply(psi_ex.data(), Dpsi.data(), dim);
+
+                            for (int it = 0; it < ntypes; ++it) {
+                                const auto& inf = nloc_influence[it];
+                                int nproj = crystal.types()[it].psd().nproj_per_atom();
+                                if (nproj == 0) continue;
+
+                                for (int iat = 0; iat < inf.n_atom; ++iat) {
+                                    int ndc = inf.ndc[iat];
+                                    if (ndc == 0) continue;
+                                    int orig_atom = inf.atom_index[iat];
+                                    int offset = IP_displ[orig_atom];
+                                    const auto& gpos = inf.grid_pos[iat];
+                                    const auto& chi_iat = Chi[it][iat];
+
+                                    const Vec3& shift = inf.image_shift[iat];
+                                    double theta = -(kpt_cart.x * shift.x + kpt_cart.y * shift.y + kpt_cart.z * shift.z);
+                                    Complex bloch_fac(std::cos(theta), std::sin(theta));
+                                    Complex beta_scale = bloch_fac * dV;
+
+                                    for (int jp = 0; jp < nproj; ++jp) {
+                                        Complex dot(0.0, 0.0);
+                                        for (int ig = 0; ig < ndc; ++ig)
+                                            dot += chi_iat(ig, jp) * Dpsi[gpos[ig]];
+                                        beta_sp[sp][offset + jp] += beta_scale * dot;
                                     }
-                                    beta[offset + jp] += beta_scale * dot;
                                 }
                             }
                         }
 
                         // Force: -spn_fac * wk * g_n * Re(Σ Gamma * conj(alpha) * beta)
+                        // Sum over spinor components
                         for (int ia = 0; ia < n_atom; ++ia) {
                             int offset = IP_displ[ia];
                             int nproj = IP_displ[ia + 1] - offset;
                             double fJ = 0.0;
-                            for (int jp = 0; jp < nproj; ++jp) {
-                                fJ += Gamma_flat[offset + jp] *
-                                      std::real(std::conj(alpha[offset + jp]) * beta[offset + jp]);
+                            for (int sp = 0; sp < n_spinor_comp; ++sp) {
+                                for (int jp = 0; jp < nproj; ++jp) {
+                                    fJ += Gamma_flat[offset + jp] *
+                                          std::real(std::conj(alpha_sp[sp][offset + jp]) * beta_sp[sp][offset + jp]);
+                                }
                             }
                             f_nloc_[ia * 3 + dim] -= spn_fac * wk * g_n * fJ;
                         }
