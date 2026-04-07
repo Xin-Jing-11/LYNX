@@ -140,6 +140,21 @@ private:
                             const int* d_pair_j, int N, int cols, int n_jobs);
     double aar_norm2_gpu(const double* d_r, int N);
     void aar_copy_gpu(double* dst, const double* src, int N);
+
+    // cuBLAS / CUDA runtime wrappers (thin, in Mixer.cu)
+    double mixer_dot_gpu(const double* d_a, const double* d_b, int N);
+    void mixer_axpy_gpu(double alpha, const double* d_x, double* d_y, int N);
+    void mixer_scal_gpu(double alpha, double* d_x, int N);
+    void mixer_sync_gpu();
+    void mixer_get_buffers_gpu(double*& d_fk, double*& d_xkm1, double*& d_R, double*& d_F);
+    double* mixer_scratch_alloc_gpu(size_t count);
+    size_t mixer_scratch_checkpoint_gpu();
+    void mixer_scratch_restore_gpu(size_t cp);
+    void mixer_alloc_fkm1_gpu(int N);
+    void mixer_memset_gpu(double* d_ptr, int N);
+    void mixer_upload_gpu(double* d_dst, const double* h_src, int count);
+    void mixer_download_gpu(double* h_dst, const double* d_src, int count);
+    void mixer_upload_int_gpu(int* d_dst, const int* h_src, int count);
 #endif
 };
 
