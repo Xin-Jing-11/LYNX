@@ -1,99 +1,92 @@
+"""LYNX — Real-space DFT with PyTorch-style Python interface.
+
+Quick start:
+    import lynx
+
+    atoms = lynx.Atoms(
+        cell=[[10.26, 0, 0], [0, 10.26, 0], [0, 0, 10.26]],
+        positions=[[0, 0, 0], [2.565, 2.565, 2.565]],
+        symbols=["Si", "Si"],
+        units="bohr",
+    )
+
+    result = lynx.calculate(atoms, xc="PBE")
+    print(result.energy)
 """
-LYNX — Real-space DFT simulator with Python bindings.
 
-Three granularity levels:
-  Level 1 (High-level):  lynx.Calculator("input.json")
-                          lynx.DFTConfig(...).create_calculator()
-  Level 2 (Mid-level):   calc.setup(); access internal operators
-  Level 3 (Low-level):   lynx.Laplacian, lynx.Gradient, etc. on numpy arrays
+__version__ = "0.2.0"
 
-Units:
-  LYNX internal: Bohr (length), Hartree (energy)
-  ASE interface: Angstrom (length), eV (energy) — converted automatically
-"""
+# Core classes
+from lynx.atoms import Atoms
+from lynx.dft import DFT
+from lynx.result import DFTResult, EnergyDecomposition
+from lynx.grid import Grid
+from lynx.device import device, cuda_available
 
-__version__ = "0.1.0"
+# Sub-packages
+from lynx import xc
+from lynx import solvers
+from lynx import ops
+from lynx import io
 
-from ._core import (
-    # Enums
-    CellType,
-    BCType,
-    SpinType,
-    MixingVariable,
-    MixingPrecond,
-    PoissonSolverType,
-    SmearingType,
-    XCType,
-    # Core types
-    Vec3,
-    Mat3,
-    # Geometry
-    Lattice,
-    FDGrid,
-    FDStencil,
-    Domain,
-    DomainVertices,
-    KPoints,
-    # Parallel
-    HaloExchange,
-    ParallelParams,
-    # Operators
-    Laplacian,
-    Gradient,
-    Hamiltonian,
-    NonlocalProjector,
-    # Solvers
-    AARParams,
-    PoissonSolver,
-    EigenSolver,
-    Mixer,
-    # Electronic
-    Wavefunction,
-    ElectronDensity,
-    Occupation,
-    # XC
-    XCFunctional,
-    # Physics
-    SCFParams,
-    SCF,
-    EnergyComponents,
-    Energy,
-    Electrostatics,
-    Forces,
-    Stress,
-    # Atoms
-    Pseudopotential,
-    AtomType,
-    AtomInfluence,
-    AtomNlocInfluence,
-    Crystal,
-    # Config
-    SystemConfig,
-    AtomTypeInput,
-    # High-level
-    Calculator,
-    # Helpers
-    make_lattice,
-    full_domain,
-)
+# Units
+from lynx import units
 
-from ._core import _ensure_mpi
-from .config import DFTConfig, find_psp
-from . import units
+# Serialization (top-level convenience)
+from lynx.io import save, load
 
-# Modular DFT framework
-from . import abc
-from .operators import FDHamiltonian, FDKinetic, FDNonlocal, FDGradient
-from .solvers import (
-    CheFSIEigenSolver, AARPoissonSolver, AndersonMixer,
-    FermiDiracOccupation, GaussianOccupation,
-)
-from .xc import LibxcFunctional
-from .scf import SCFDriver, SCFResult
-from .system import SystemSetup
-from . import postprocessing
+
+def calculate(atoms, **kwargs):
+    """One-liner DFT calculation.
+
+    Args:
+        atoms: lynx.Atoms instance
+        **kwargs: passed to lynx.DFT constructor
+
+    Returns:
+        DFTResult
+
+    Example:
+        result = lynx.calculate(atoms, xc="PBE", kpts=[2,2,2])
+    """
+    return DFT(**kwargs)(atoms)
 
 
 def init():
-    """Initialize MPI if not already done. Call before any LYNX operations."""
-    _ensure_mpi()
+    """Initialize MPI (if needed). Called automatically."""
+    try:
+        from mpi4py import MPI
+        return
+    except ImportError:
+        pass
+    # Fallback: initialize MPI via ctypes if mpi4py is not available
+    try:
+        import ctypes
+        import ctypes.util
+        libmpi = ctypes.util.find_library("mpi")
+        if libmpi:
+            lib = ctypes.CDLL(libmpi)
+            initialized = ctypes.c_int(0)
+            lib.MPI_Initialized(ctypes.byref(initialized))
+            if not initialized.value:
+                lib.MPI_Init(None, None)
+    except Exception:
+        pass
+
+
+# Auto-init
+init()
+
+
+__all__ = [
+    # Core
+    "Atoms", "DFT", "DFTResult", "EnergyDecomposition", "Grid",
+    # Device
+    "device", "cuda_available",
+    # I/O
+    "save", "load",
+    # Convenience
+    "calculate",
+    # Sub-packages
+    "xc", "solvers", "ops", "io", "units",
+]

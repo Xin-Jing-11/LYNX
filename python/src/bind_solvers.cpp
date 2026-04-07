@@ -6,6 +6,8 @@
 #include "solvers/PoissonSolver.hpp"
 #include "solvers/Mixer.hpp"
 #include "solvers/LinearSolver.hpp"
+#include "solvers/Preconditioner.hpp"
+#include "core/LynxContext.hpp"
 #include "parallel/MPIComm.hpp"
 
 namespace py = pybind11;
@@ -48,22 +50,12 @@ void bind_solvers(py::module_& m) {
            "Solve Poisson equation. Returns (phi, n_iterations).")
         .def("set_aar_params", &PoissonSolver::set_aar_params);
 
-    // EigenSolver
+    // EigenSolver — new API: setup(LynxContext&, Hamiltonian&)
     py::class_<EigenSolver>(m, "EigenSolver")
         .def(py::init<>())
         .def("setup", &EigenSolver::setup,
-             py::arg("H"), py::arg("halo"), py::arg("domain"),
-             py::arg("bandcomm"), py::arg("Nband_global") = 0)
-        .def("setup_serial", [](EigenSolver& es,
-                                Hamiltonian& H,
-                                const HaloExchange& halo,
-                                const Domain& domain,
-                                int Nband_global) {
-            MPIComm comm(MPI_COMM_SELF);
-            es.setup(H, halo, domain, comm, Nband_global);
-        }, py::arg("H"), py::arg("halo"), py::arg("domain"),
-           py::arg("Nband_global") = 0,
-           "Set up EigenSolver in single-process mode (no MPI band parallelism).")
+             py::arg("ctx"), py::arg("H"),
+             "Set up EigenSolver using LynxContext for all infrastructure.")
         .def("solve", [](EigenSolver& es,
                          py::array_t<double, py::array::f_style | py::array::forcecast> psi_np,
                          py::array_t<double, py::array::c_style | py::array::forcecast> Veff_np,
@@ -76,7 +68,7 @@ void bind_solvers(py::module_& m) {
             int Nd_d = static_cast<int>(pbuf.shape[0]);
             int Nband = static_cast<int>(pbuf.shape[1]);
 
-            // Copy psi in Fortran order (C++ expects column-major: each band contiguous)
+            // Copy psi in Fortran order (C++ expects column-major)
             std::vector<ssize_t> shape = {Nd_d, Nband};
             std::vector<ssize_t> strides = {
                 static_cast<ssize_t>(sizeof(double)),
@@ -101,8 +93,7 @@ void bind_solvers(py::module_& m) {
         }, py::arg("psi"), py::arg("Veff"),
            py::arg("lambda_cutoff"), py::arg("eigval_min"), py::arg("eigval_max"),
            py::arg("cheb_degree") = 20,
-           "Solve eigenvalue problem via CheFSI. Returns (psi_updated, eigenvalues).\n"
-           "psi must be 2D (Nd_d, Nband) in Fortran (column-major) order.")
+           "Solve eigenvalue problem via CheFSI. Returns (psi_updated, eigenvalues).")
         .def("lanczos_bounds", [](EigenSolver& es,
                                   py::array_t<double, py::array::c_style | py::array::forcecast> Veff_np,
                                   double tol, int max_iter) {
@@ -122,13 +113,13 @@ void bind_solvers(py::module_& m) {
         .def("Nband_global", &EigenSolver::Nband_global)
         .def("is_band_parallel", &EigenSolver::is_band_parallel);
 
-    // Mixer
+    // Mixer — new API: setup(Nd_d, var, precond, history, beta, Preconditioner*)
     py::class_<Mixer>(m, "Mixer")
         .def(py::init<>())
         .def("setup", &Mixer::setup,
              py::arg("Nd_d"), py::arg("var"), py::arg("precond_type"),
              py::arg("history_depth"), py::arg("mixing_param"),
-             py::arg("laplacian") = nullptr, py::arg("halo") = nullptr,
-             py::arg("grid") = nullptr)
+             py::arg("preconditioner") = nullptr,
+             "Set up density/potential mixer.")
         .def("reset", &Mixer::reset);
 }
