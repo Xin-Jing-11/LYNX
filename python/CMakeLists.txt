@@ -7,8 +7,14 @@ FetchContent_Declare(pybind11
 )
 FetchContent_MakeAvailable(pybind11)
 
+# Disable LTO for CUDA builds — it breaks fatbin symbol resolution
+if(USE_CUDA)
+    set(PYBIND11_LTO_CXX_FLAGS "")
+    set(PYBIND11_LTO_LINKER_FLAGS "")
+endif()
+
 # The pybind11 module
-pybind11_add_module(_core
+pybind11_add_module(_core NO_EXTRAS
     src/bindings.cpp
     src/bind_types.cpp
     src/bind_core.cpp
@@ -28,6 +34,17 @@ target_include_directories(_core PRIVATE
 )
 
 target_link_libraries(_core PRIVATE lynx_core)
+
+# When CUDA is enabled, enable separable compilation and device linking
+# so that device code from lynx_core (static lib) is properly linked
+# into the _core shared library.
+if(USE_CUDA)
+    set_target_properties(_core PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        INTERPROCEDURAL_OPTIMIZATION OFF
+    )
+endif()
 
 # Put the .so in the lynx package directory for development use
 set_target_properties(_core PROPERTIES

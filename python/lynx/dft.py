@@ -327,7 +327,9 @@ class DFT:
         if compute_stress:
             s = calc.compute_stress()
             stress_arr = np.array(s)
-            pressure = calc.compute_pressure()
+            # Pressure = -1/3 * Tr(sigma), convert from Ha/Bohr^3 to GPa
+            HA_BOHR3_TO_GPA = 29421.01569650548
+            pressure = -(stress_arr[0] + stress_arr[3] + stress_arr[5]) / 3.0 * HA_BOHR3_TO_GPA
 
         # Eigenvalues and occupations (all spins x k-points)
         wfn = calc.get_wavefunction()
