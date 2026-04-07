@@ -313,6 +313,15 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
 
     for (int chefsi_pass = 0; chefsi_pass < nchefsi; ++chefsi_pass) {
         if (is_soc_) {
+            // SOC spinor solver currently runs on CPU (solve_spinor_kpt allocates
+            // host vectors).  Force Hamiltonian to CPU dispatch so
+            // apply_spinor_kpt routes to the CPU kernel.  A future GPU-resident
+            // spinor solver will remove this workaround.
+            Device saved_dev = hamiltonian_->device();
+#ifdef USE_CUDA
+            if (saved_dev == Device::GPU)
+                hamiltonian_->set_device(Device::CPU);
+#endif
             for (int k = 0; k < Nkpts; ++k) {
                 double* eig = wfn.eigenvalues(0, k).data();
                 Complex* psi_c = wfn.psi_kpt(0, k).data();
@@ -324,7 +333,6 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
                     hamiltonian_->set_vnl_kpt(vnl_);
                 }
 
-                hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
                 eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
                                             Nd_d, Nband_loc,
                                             state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
@@ -332,6 +340,9 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
                                             params_.cheb_degree,
                                             wfn.psi_kpt(0, k).ld());
             }
+#ifdef USE_CUDA
+            hamiltonian_->set_device(saved_dev);
+#endif
         } else {
             for (int s = 0; s < Nspin_local; ++s) {
                 int s_glob = spin_start_ + s;

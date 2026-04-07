@@ -7,11 +7,12 @@ option(BUILD_TESTS "Build tests" ON)
 option(BUILD_PYTHON "Build Python bindings (pybind11)" OFF)
 
 # Set CUDA architectures before project() so compiler identification uses valid arch.
-# Use "native" to auto-detect the GPU on the build machine (CMake 3.24+),
-# or fall back to a safe baseline that works across CUDA 12.x and 13.x.
+# Use "native" to auto-detect the GPU on the build machine (CMake 3.24+).
+# Force-set into CACHE so stale cache entries (e.g. UNINITIALIZED type) never
+# override the intended value.  Users can still override via -DCMAKE_CUDA_ARCHITECTURES=...
 if(USE_CUDA)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "native")
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+        set(CMAKE_CUDA_ARCHITECTURES "native" CACHE STRING "CUDA architectures" FORCE)
     endif()
     # Prefer /usr/local/cuda/bin/nvcc when no explicit compiler is set,
     # because /usr/bin/nvcc may be an older system-installed version.
