@@ -57,6 +57,18 @@ public:
     void compute_spinor_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                             const std::vector<double>& kpt_weights);
 
+    // Spinor density from device-resident psi pointers — no psi H2D transfers.
+    void compute_spinor_from_device_ptrs(
+        const LynxContext& ctx,
+        const Wavefunction& wfn,
+        const std::vector<double>& kpt_weights,
+        const std::vector<const void*>& d_psi_z_ptrs);  // [k] spinor psi on device
+
+    // GPU kernel wrapper for spinor density accumulation
+    void accumulate_spinor_band_gpu(const void* d_psi_z, const double* d_occ,
+                                     double* d_rho, double* d_mx, double* d_my, double* d_mz,
+                                     int Nd, int Nband, double weight);
+
     // GPU kernel wrappers for per-band density accumulation (defined in .cu)
     void accumulate_band_gpu(const double* d_psi, const double* d_occ,
                              double* d_rho, int Nd, int Nband, double weight);

@@ -862,6 +862,154 @@ void EigenSolver::subspace_rotation_kpt_gpu(int Nd_d, int Nband) {
                                cudaMemcpyDeviceToDevice, stream));
 }
 
+// ============================================================
+// SOC spinor GPU sub-steps (2*Nd_d rows per band)
+// ============================================================
+
+// Normalize columns of a complex matrix: col[j] /= ||col[j]||
+// One block per column, reduces within block to compute norm
+__global__ static void normalize_columns_z_kernel(
+    cuDoubleComplex* __restrict__ X,
+    int Nd, int Nband)
+{
+    int j = blockIdx.x;  // column index
+    if (j >= Nband) return;
+
+    cuDoubleComplex* col = X + (size_t)j * Nd;
+
+    // Compute norm^2 via block reduction
+    double local_sum = 0.0;
+    for (int i = threadIdx.x; i < Nd; i += blockDim.x) {
+        double re = col[i].x, im = col[i].y;
+        local_sum += re * re + im * im;
+    }
+
+    // Warp reduction
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+
+    // Block reduction via shared memory
+    __shared__ double sdata[32];
+    int lane = threadIdx.x % warpSize;
+    int wid  = threadIdx.x / warpSize;
+    if (lane == 0) sdata[wid] = local_sum;
+    __syncthreads();
+
+    if (wid == 0) {
+        local_sum = (lane < (blockDim.x + warpSize - 1) / warpSize) ? sdata[lane] : 0.0;
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+            local_sum += __shfl_down_sync(0xFFFFFFFF, local_sum, offset);
+    }
+
+    __shared__ double s_inv_norm;
+    if (threadIdx.x == 0) {
+        s_inv_norm = (local_sum > 0.0) ? rsqrt(local_sum) : 0.0;
+    }
+    __syncthreads();
+
+    double inv = s_inv_norm;
+    for (int i = threadIdx.x; i < Nd; i += blockDim.x) {
+        col[i].x *= inv;
+        col[i].y *= inv;
+    }
+}
+
+void EigenSolver::chebyshev_filter_spinor_gpu(int Nd_d, int Nband,
+                                               double lambda_cutoff, double eigval_min, double eigval_max,
+                                               int cheb_degree) {
+    auto* gs = gpu_state_.as<GPUEigenState>();
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    int Nd_d_spinor = 2 * Nd_d;
+    double e = (eigval_max - lambda_cutoff) / 2.0;
+    double c = (eigval_max + lambda_cutoff) / 2.0;
+    double sigma_1 = e / (eigval_min - c);
+    double sigma = sigma_1;
+    int total = Nd_d_spinor * Nband;
+
+    // Step 1: HX = H_spinor * psi_z, Y = (HX - c*X) * (sigma/e), Xold = X
+    gs->H->apply_spinor_kpt(
+        reinterpret_cast<const std::complex<double>*>(gs->d_psi_z),
+        gs->d_Veff_spinor,
+        reinterpret_cast<std::complex<double>*>(gs->d_HX_z),
+        Nband, Nd_d, {0,0,0}, {0,0,0}, 0.0);
+
+    gpu::chefsi_init_z_gpu(gs->d_HX_z, gs->d_psi_z, gs->d_Y_z, gs->d_Xold_z,
+                            sigma / e, c, total, stream);
+
+    // Steps 2..degree
+    for (int k = 2; k <= cheb_degree; ++k) {
+        double sigma_new = 1.0 / (2.0 / sigma_1 - sigma);
+        double gamma = 2.0 * sigma_new / e;
+        double ss = sigma * sigma_new;
+
+        gs->H->apply_spinor_kpt(
+            reinterpret_cast<const std::complex<double>*>(gs->d_Y_z),
+            gs->d_Veff_spinor,
+            reinterpret_cast<std::complex<double>*>(gs->d_HX_z),
+            Nband, Nd_d, {0,0,0}, {0,0,0});
+        gpu::chefsi_step_z_gpu(gs->d_HX_z, gs->d_Y_z, gs->d_Xold_z, gs->d_Xnew_z,
+                                gs->d_Y_z, gs->d_Xold_z, gamma, c, ss, total, stream);
+        sigma = sigma_new;
+    }
+
+    // Normalize columns of Y to prevent overflow in overlap matrix
+    // (Chebyshev filter can amplify norms by 10^30+)
+    normalize_columns_z_kernel<<<Nband, 256, 0, stream>>>(gs->d_Y_z, Nd_d_spinor, Nband);
+}
+
+void EigenSolver::orthogonalize_spinor_gpu(int Nd_d, int Nband) {
+    auto* gs = gpu_state_.as<GPUEigenState>();
+    int Nd_d_spinor = 2 * Nd_d;
+    gpu::orthogonalize_z_gpu(gs->d_Y_z, gs->d_Ms_z, Nd_d_spinor, Nband, gs->dV);
+}
+
+void EigenSolver::project_and_diag_spinor_gpu(int Nd_d, int Nband) {
+    auto* gs = gpu_state_.as<GPUEigenState>();
+    int Nd_d_spinor = 2 * Nd_d;
+    auto& ctx = gpu::GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
+
+    size_t _scratch_cp = ctx.scratch_pool.checkpoint();
+
+    // HX = H_spinor * Y (spinor Hamiltonian, not regular kpt)
+    gs->H->apply_spinor_kpt(
+        reinterpret_cast<const std::complex<double>*>(gs->d_Y_z),
+        gs->d_Veff_spinor,
+        reinterpret_cast<std::complex<double>*>(gs->d_HX_z),
+        Nband, Nd_d, {0,0,0}, {0,0,0});
+
+    // Hs = Y^H * HX * dV
+    gpu::compute_atb_z_gpu(gs->d_Y_z, gs->d_HX_z, gs->d_Hs_z, Nd_d_spinor, Nband, gs->dV);
+
+    // Hermitianize
+    gpu::hermitianize_z_gpu(gs->d_Hs_z, Nband, stream);
+
+    // Diagonalize with cuSOLVER zheevd
+    int lwork = 0;
+    cusolverDnZheevd_bufferSize(ctx.cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                                  CUBLAS_FILL_MODE_UPPER,
+                                  Nband, gs->d_Hs_z, Nband, gs->d_eigvals, &lwork);
+    cuDoubleComplex* d_work = ctx.scratch_pool.alloc<cuDoubleComplex>(lwork);
+    cusolverDnZheevd(ctx.cusolver, CUSOLVER_EIG_MODE_VECTOR,
+                      CUBLAS_FILL_MODE_UPPER,
+                      Nband, gs->d_Hs_z, Nband, gs->d_eigvals, d_work, lwork,
+                      ctx.buf.cusolver_devinfo);
+
+    ctx.scratch_pool.restore(_scratch_cp);
+}
+
+void EigenSolver::subspace_rotation_spinor_gpu(int Nd_d, int Nband) {
+    auto* gs = gpu_state_.as<GPUEigenState>();
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int Nd_d_spinor = 2 * Nd_d;
+    gpu::rotate_orbitals_z_gpu(gs->d_Y_z, gs->d_Hs_z, gs->d_psi_z, Nd_d_spinor, Nband);
+    // Copy result back to psi_z
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_psi_z, gs->d_Y_z,
+                               (size_t)Nd_d_spinor * Nband * sizeof(cuDoubleComplex),
+                               cudaMemcpyDeviceToDevice, stream));
+}
+
 // --- GPU workspace pointer accessors ---
 
 double* EigenSolver::gpu_Y() {
@@ -881,6 +1029,13 @@ void EigenSolver::upload_Veff_sync(const double* h_Veff, int Nd) {
     auto* gs = gpu_state_.as<GPUEigenState>();
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff, h_Veff, Nd * sizeof(double),
+                               cudaMemcpyHostToDevice, stream));
+}
+
+void EigenSolver::upload_Veff_spinor_sync(const double* h_Veff_spinor, int Nd) {
+    auto* gs = gpu_state_.as<GPUEigenState>();
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    CUDA_CHECK(cudaMemcpyAsync(gs->d_Veff_spinor, h_Veff_spinor, 4 * Nd * sizeof(double),
                                cudaMemcpyHostToDevice, stream));
 }
 

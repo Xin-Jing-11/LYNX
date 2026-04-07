@@ -109,8 +109,15 @@ public:
                             double lambda_cutoff, double eigval_min, double eigval_max,
                             int cheb_degree);
 
+    // GPU-resident solve for SOC spinor: psi_z (2*Nd_d per band) on device.
+    void solve_spinor_kpt_resident(double* h_eigvals, const double* h_Veff_spinor,
+                                    int Nd_d, int Nband,
+                                    double lambda_cutoff, double eigval_min, double eigval_max,
+                                    int cheb_degree);
+
     // GPU transfer helpers (defined in EigenSolver.cu, called from .cpp algorithm)
     void upload_Veff_sync(const double* h_Veff, int Nd);
+    void upload_Veff_spinor_sync(const double* h_Veff_spinor, int Nd);
     void download_eigvals_sync(double* h_eigvals, int Nband);
 
     // --- GPU sub-step methods (defined in EigenSolver.cu) ---
@@ -129,6 +136,14 @@ public:
     void orthogonalize_kpt_gpu(int Nd_d, int Nband);
     void project_and_diag_kpt_gpu(int Nd_d, int Nband);
     void subspace_rotation_kpt_gpu(int Nd_d, int Nband);
+
+    // SOC spinor GPU sub-steps (2*Nd_d rows per band, uses apply_spinor_kpt)
+    void chebyshev_filter_spinor_gpu(int Nd_d, int Nband,
+                                      double lambda_cutoff, double eigval_min, double eigval_max,
+                                      int cheb_degree);
+    void orthogonalize_spinor_gpu(int Nd_d, int Nband);
+    void project_and_diag_spinor_gpu(int Nd_d, int Nband);
+    void subspace_rotation_spinor_gpu(int Nd_d, int Nband);
 
     // GPU workspace pointer accessors (for use in .cpp algorithm)
     double* gpu_Y();

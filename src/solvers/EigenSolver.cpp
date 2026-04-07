@@ -227,6 +227,23 @@ void EigenSolver::solve_kpt_resident(double* h_eigvals, const double* h_Veff,
     download_eigvals_sync(h_eigvals, Nband);
 }
 
+void EigenSolver::solve_spinor_kpt_resident(double* h_eigvals, const double* h_Veff_spinor,
+                                              int Nd_d, int Nband,
+                                              double lambda_cutoff, double eigval_min, double eigval_max,
+                                              int cheb_degree) {
+    // Upload Veff_spinor (4*Nd_d doubles) only — psi_z stays resident on device
+    upload_Veff_spinor_sync(h_Veff_spinor, Nd_d);
+
+    // CheFSI sub-steps for spinor (2*Nd_d rows per band, uses apply_spinor_kpt)
+    chebyshev_filter_spinor_gpu(Nd_d, Nband, lambda_cutoff, eigval_min, eigval_max, cheb_degree);
+    orthogonalize_spinor_gpu(Nd_d, Nband);
+    project_and_diag_spinor_gpu(Nd_d, Nband);
+    subspace_rotation_spinor_gpu(Nd_d, Nband);
+
+    // Download only eigenvalues (tiny: Nband doubles)
+    download_eigvals_sync(h_eigvals, Nband);
+}
+
 #endif // USE_CUDA
 
 void EigenSolver::orthogonalize_scalapack(double* X, int Nd_d, int Nband_loc, double dV) {
