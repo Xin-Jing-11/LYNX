@@ -925,7 +925,7 @@ void compute_soc_force_gpu(
 
 // Constants for complex force/stress kernels (same tile sizes as ComplexOperators.cu)
 static constexpr int NL_TILE_Z_FS = 256;
-static constexpr int NL_MAX_NP_Z_FS = 32;
+static constexpr int NL_MAX_NP_Z_FS = 64;  // FR pseudopotentials can have up to ~62 projectors/atom
 
 // Warp reduce for real scalar (reused from ComplexOperators pattern)
 __device__ __forceinline__ double warpReduceSum_z_fs(double val) {

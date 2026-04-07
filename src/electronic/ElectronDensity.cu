@@ -94,6 +94,146 @@ void ElectronDensity::accumulate_band_kpt_gpu(const void* d_psi_z, const double*
         d_occ, d_rho, Nd, Nband, weight, stream);
 }
 
+// ============================================================
+// Spinor density accumulation kernel (SOC/noncollinear)
+// psi layout: [psi_up(Nd) | psi_dn(Nd)] per band, Nband bands
+// rho[i] += w * (|up|^2 + |dn|^2)
+// mx[i]  += w * 2*Re(conj(up)*dn)
+// my[i]  -= w * 2*Im(conj(up)*dn)
+// mz[i]  += w * (|up|^2 - |dn|^2)
+// ============================================================
+__global__ static void compute_spinor_density_kernel(
+    const cuDoubleComplex* __restrict__ psi,
+    const double* __restrict__ occ,
+    double* __restrict__ rho,
+    double* __restrict__ mx,
+    double* __restrict__ my,
+    double* __restrict__ mz,
+    int Nd, int Nband, double weight)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < Nd) {
+        double sum_rho = 0.0, sum_mx = 0.0, sum_my = 0.0, sum_mz = 0.0;
+        int Nd_spinor = 2 * Nd;
+        for (int n = 0; n < Nband; ++n) {
+            double fn = occ[n];
+            if (fn < 1e-16) continue;
+            const cuDoubleComplex* col = psi + n * Nd_spinor;
+            cuDoubleComplex up = col[i];
+            cuDoubleComplex dn = col[i + Nd];
+            double up2 = up.x * up.x + up.y * up.y;
+            double dn2 = dn.x * dn.x + dn.y * dn.y;
+            // conj(up)*dn = (up.x - i*up.y)*(dn.x + i*dn.y)
+            //             = (up.x*dn.x + up.y*dn.y) + i*(up.x*dn.y - up.y*dn.x)
+            double cross_re = up.x * dn.x + up.y * dn.y;
+            double cross_im = up.x * dn.y - up.y * dn.x;
+            double w = fn;
+            sum_rho += w * (up2 + dn2);
+            sum_mx  += w * 2.0 * cross_re;
+            sum_my  -= w * 2.0 * cross_im;
+            sum_mz  += w * (up2 - dn2);
+        }
+        rho[i] += weight * sum_rho;
+        mx[i]  += weight * sum_mx;
+        my[i]  += weight * sum_my;
+        mz[i]  += weight * sum_mz;
+    }
+}
+
+void ElectronDensity::accumulate_spinor_band_gpu(const void* d_psi_z, const double* d_occ,
+                                                   double* d_rho, double* d_mx, double* d_my, double* d_mz,
+                                                   int Nd, int Nband, double weight) {
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int bs = 256;
+    int grid = gpu::ceildiv(Nd, bs);
+    compute_spinor_density_kernel<<<grid, bs, 0, stream>>>(
+        static_cast<const cuDoubleComplex*>(d_psi_z), d_occ,
+        d_rho, d_mx, d_my, d_mz, Nd, Nband, weight);
+}
+
+// ============================================================
+// Spinor density from device-resident psi — zero psi H2D transfers
+// ============================================================
+void ElectronDensity::compute_spinor_from_device_ptrs(
+    const LynxContext& ctx,
+    const Wavefunction& wfn,
+    const std::vector<double>& kpt_weights,
+    const std::vector<const void*>& d_psi_z_ptrs)
+{
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+    int Nd = ctx.domain().Nd_d();
+    int Nband = wfn.Nband();
+    int kpt_start = ctx.kpt_start();
+    int Nkpts = wfn.Nkpts();
+
+    allocate_noncollinear(Nd);
+
+    // Allocate device rho/mag arrays
+    double *d_rho = nullptr, *d_mx = nullptr, *d_my = nullptr, *d_mz = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_rho, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_mx, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_my, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMallocAsync(&d_mz, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_rho, 0, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_mx, 0, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_my, 0, Nd * sizeof(double), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_mz, 0, Nd * sizeof(double), stream));
+
+    for (int k = 0; k < Nkpts; ++k) {
+        int k_glob = kpt_start + k;
+        double wk = kpt_weights[k_glob];
+
+        // Upload occupations (tiny: Nband doubles)
+        const double* occ_h = wfn.occupations(0, k).data();
+        double* d_occ = nullptr;
+        CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_occ, occ_h, Nband * sizeof(double),
+                                   cudaMemcpyHostToDevice, stream));
+
+        accumulate_spinor_band_gpu(d_psi_z_ptrs[k], d_occ,
+                                    d_rho, d_mx, d_my, d_mz,
+                                    Nd, Nband, wk);
+        cudaFreeAsync(d_occ, stream);
+    }
+
+    // Download results to host
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaMemcpyAsync(rho_total_.data(), d_rho, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(mag_x_.data(), d_mx, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(mag_y_.data(), d_my, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(mag_z_.data(), d_mz, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    // Keep rho_[0] in sync
+    std::memcpy(rho_[0].data(), rho_total_.data(), Nd * sizeof(double));
+
+    // Free device arrays
+    cudaFreeAsync(d_rho, stream);
+    cudaFreeAsync(d_mx, stream);
+    cudaFreeAsync(d_my, stream);
+    cudaFreeAsync(d_mz, stream);
+
+    // MPI reductions
+    const auto& bandcomm = ctx.scf_bandcomm();
+    const auto& kptcomm = ctx.kpt_bridge();
+
+    if (!bandcomm.is_null() && bandcomm.size() > 1) {
+        bandcomm.allreduce_sum(rho_total_.data(), Nd);
+        bandcomm.allreduce_sum(mag_x_.data(), Nd);
+        bandcomm.allreduce_sum(mag_y_.data(), Nd);
+        bandcomm.allreduce_sum(mag_z_.data(), Nd);
+    }
+
+    if (!kptcomm.is_null() && kptcomm.size() > 1) {
+        kptcomm.allreduce_sum(rho_total_.data(), Nd);
+        kptcomm.allreduce_sum(mag_x_.data(), Nd);
+        kptcomm.allreduce_sum(mag_y_.data(), Nd);
+        kptcomm.allreduce_sum(mag_z_.data(), Nd);
+    }
+
+    std::memcpy(rho_[0].data(), rho_total_.data(), Nd * sizeof(double));
+}
+
 // NOTE: Legacy compute_gpu() that uploaded psi from host has been removed.
 // Production code uses compute_from_device_ptrs() with device-resident psi pointers.
 

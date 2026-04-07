@@ -164,6 +164,12 @@ public:
         double spn_fac_wk,
         double* h_f_nloc, double* h_energy_nl) const;
 
+    // SOC force from spinor wavefunctions (device-resident)
+    void compute_soc_force_kpt_gpu(
+        const void* d_psi_spinor, const double* h_occ, int Nband,
+        double spn_fac, double wk,
+        double* h_f_soc) const;
+
     // Complex k-point: kinetic + nonlocal stress
     void compute_kinetic_nonlocal_stress_kpt_gpu(
         const void* d_psi_z, const double* h_occ, int Nband,

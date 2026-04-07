@@ -216,10 +216,8 @@ double SCF::run(Wavefunction& wfn,
 
         // Randomize psi directly on GPU via cuRAND — psi is born on device.
         // No CPU randomization, no H2D transfer. Psi stays on GPU until cleanup.
-        if (!is_soc_) {
-            eigsolver_.randomize_psi_gpu(Nspin_local, spin_start_, Nkpts);
-            eigsolver_.set_active_psi(0, 0);
-        }
+        eigsolver_.randomize_psi_gpu(Nspin_local, spin_start_, Nkpts);
+        eigsolver_.set_active_psi(0, 0);
 
         // ElectronDensity: lightweight (no persistent device buffers)
         density_.setup_gpu(*ctx_, Nspin_global_);
@@ -315,7 +313,6 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
         if (is_soc_) {
             for (int k = 0; k < Nkpts; ++k) {
                 double* eig = wfn.eigenvalues(0, k).data();
-                Complex* psi_c = wfn.psi_kpt(0, k).data();
                 int k_glob = kpt_start_ + k;
                 Vec3 kpt = kpoints_->kpts_cart()[k_glob];
 
@@ -324,13 +321,25 @@ void SCF::solve_eigenproblem(Wavefunction& wfn,
                     hamiltonian_->set_vnl_kpt(vnl_);
                 }
 
-                hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
-                eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
-                                            Nd_d, Nband_loc,
-                                            state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
-                                            kpt, cell_lengths,
-                                            params_.cheb_degree,
-                                            wfn.psi_kpt(0, k).ld());
+#ifdef USE_CUDA
+                if (dev_ == Device::GPU) {
+                    hamiltonian_->set_kpoint_gpu(kpt, cell_lengths);
+                    eigsolver.set_active_psi(0, k);
+                    eigsolver.solve_spinor_kpt_resident(eig, arrays_.Veff_spinor.data(),
+                                                         Nd_d, Nband_loc,
+                                                         state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
+                                                         params_.cheb_degree);
+                } else
+#endif
+                {
+                    Complex* psi_c = wfn.psi_kpt(0, k).data();
+                    eigsolver.solve_spinor_kpt(psi_c, eig, arrays_.Veff_spinor.data(),
+                                                Nd_d, Nband_loc,
+                                                state.lambda_cutoff, state.eigval_min[0], state.eigval_max[0],
+                                                kpt, cell_lengths,
+                                                params_.cheb_degree,
+                                                wfn.psi_kpt(0, k).ld());
+                }
             }
         } else {
             for (int s = 0; s < Nspin_local; ++s) {
@@ -449,7 +458,19 @@ void SCF::compute_new_density(const Wavefunction& wfn, const SCFState& state,
     if (is_soc_) {
         rho_new.allocate_noncollinear(Nd_d);
         rho_new.set_device(dev_);
-        rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights);
+#ifdef USE_CUDA
+        if (dev_ == Device::GPU) {
+            int Nkpts = state.Nkpts;
+            std::vector<const void*> d_psi_z_ptrs(Nkpts);
+            for (int k = 0; k < Nkpts; ++k)
+                d_psi_z_ptrs[k] = eigsolver_.device_psi_z(0, k);
+            rho_new.compute_spinor_from_device_ptrs(*ctx_, wfn, state.kpt_weights,
+                                                      d_psi_z_ptrs);
+        } else
+#endif
+        {
+            rho_new.compute_spinor(*ctx_, wfn, state.kpt_weights);
+        }
     } else {
         rho_new.allocate(Nd_d, Nspin);
         rho_new.set_device(dev_);

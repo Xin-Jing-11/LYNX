@@ -7,7 +7,7 @@ namespace lynx {
 namespace gpu {
 
 static constexpr int NL_TILE_FS = 256;
-static constexpr int NL_MAX_NP_FS = 32;
+static constexpr int NL_MAX_NP_FS = 64;  // FR pseudopotentials can have up to ~62 projectors/atom
 
 __device__ __forceinline__ double warpReduceSum_fs(double val) {
     for (int offset = 16; offset > 0; offset >>= 1)

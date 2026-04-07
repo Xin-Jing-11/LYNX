@@ -620,7 +620,7 @@ void hamiltonian_apply_local_z_gpu(
 // Shared memory: (NL_TILE_Z * sizeof(cuDoubleComplex) + nwarps * 2 * sizeof(double)) ≈ 4 KB
 // O(1) w.r.t. system size — no fallback paths needed.
 static constexpr int NL_TILE_Z = 256;
-static constexpr int NL_MAX_NP_Z = 32;
+static constexpr int NL_MAX_NP_Z = 64;  // FR pseudopotentials can have up to ~62 projectors/atom
 
 __device__ __forceinline__ double warpReduceSum_z_re(double val) {
     for (int offset = 16; offset > 0; offset >>= 1)

@@ -30,15 +30,29 @@ void Forces::compute(
     const NonlocalProjector& vnl) {
 
     // Set device for internal dispatch.
-    // SOC forces stay on CPU: the GPU nonlocal force kernel doesn't handle
-    // spinor layout, and SPARC also computes SOC forces on CPU.
     dev_ = Device::CPU;
 #ifdef USE_CUDA
-    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()
-        && wfn.Nspinor() == 1) {
-        dev_ = Device::GPU;
+    if (scf.hamiltonian_ptr() && scf.hamiltonian_ptr()->gpu_state_ptr()) {
         hamiltonian_ = scf.hamiltonian_ptr();
         eigsolver_ = &scf.eigsolver();
+        if (wfn.Nspinor() == 1) {
+            // Non-SOC: full GPU path for scalar-relativistic nonlocal force
+            dev_ = Device::GPU;
+        } else {
+            // SOC: scalar NL force uses CPU (needs spinor psi on host).
+            // SOC force uses GPU (reads device-resident psi directly).
+            // Download spinor psi from GPU to host wavefunction (one-time, post-SCF).
+            int Nkpts = wfn.Nkpts();
+            int Nd_spinor = 2 * wfn.Nd_d();
+            int Nband = wfn.Nband();
+            for (int k = 0; k < Nkpts; ++k) {
+                auto* es = const_cast<EigenSolver*>(eigsolver_);
+                es->set_active_psi(0, k);
+                auto& psi_k = const_cast<DeviceArray<Complex>&>(wfn.psi_kpt(0, k));
+                es->download_psi_z(psi_k.data(), Nd_spinor, Nband);
+            }
+            // dev_ stays CPU for scalar NL; SOC force checks hamiltonian_ directly
+        }
     }
 #endif
 
@@ -792,6 +806,46 @@ void Forces::compute_nonlocal_soc(
     const std::vector<AtomNlocInfluence>& nloc_influence,
     const NonlocalProjector& vnl,
     const std::vector<double>& kpt_weights) {
+#ifdef USE_CUDA
+    if (hamiltonian_ && eigsolver_ && hamiltonian_->gpu_state_ptr()) {
+        // GPU path: psi is device-resident, use GPU SOC force kernel
+        int n_atom = crystal.n_atom_total();
+        int Nkpts = wfn.Nkpts();
+        int Nband = wfn.Nband();
+        double spn_fac = 2.0;  // SOC spinor: occfac=1, spn_fac = occfac * 2
+        int kpt_start = ctx.kpt_start();
+        Vec3 cell_lengths = ctx.grid().lattice().lengths();
+
+        f_soc_.assign(3 * n_atom, 0.0);
+
+        for (int k = 0; k < Nkpts; ++k) {
+            int k_glob = kpt_start + k;
+            double wk = kpt_weights[k_glob];
+            const double* h_occ = wfn.occupations(0, k).data();
+
+            const_cast<Hamiltonian*>(hamiltonian_)->set_kpoint_gpu(
+                ctx.kpoints().kpts_cart()[k_glob], cell_lengths);
+
+            std::vector<double> h_f_tmp(3 * n_atom, 0.0);
+            hamiltonian_->compute_soc_force_kpt_gpu(
+                eigsolver_->device_psi_z(0, k), h_occ, Nband,
+                spn_fac, wk,
+                h_f_tmp.data());
+
+            for (int i = 0; i < 3 * n_atom; ++i)
+                f_soc_[i] += h_f_tmp[i];
+        }
+
+        // Allreduce across band and kpt comms
+        const auto& bandcomm = ctx.scf_bandcomm();
+        const auto& kptcomm = ctx.kpt_bridge();
+        if (!bandcomm.is_null() && bandcomm.size() > 1)
+            bandcomm.allreduce_sum(f_soc_.data(), 3 * n_atom);
+        if (!kptcomm.is_null() && kptcomm.size() > 1)
+            kptcomm.allreduce_sum(f_soc_.data(), 3 * n_atom);
+        return;
+    }
+#endif
     compute_nonlocal_soc(wfn, crystal, nloc_influence, vnl,
                          ctx.gradient(), ctx.halo(), ctx.domain(), ctx.grid(),
                          kpt_weights, ctx.scf_bandcomm(), ctx.kpt_bridge(),

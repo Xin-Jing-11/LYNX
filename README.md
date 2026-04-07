@@ -9,6 +9,13 @@ LYNX solves the Kohn-Sham equations on a finite-difference grid using Chebyshev-
 ### Build
 
 ```bash
+# Clone with submodules (pseudopotentials + libxc)
+git clone --recurse-submodules https://github.com/Xin-Jing-11/LYNX.git
+cd LYNX
+
+# Or if already cloned without submodules:
+git submodule update --init
+
 # CPU only
 mkdir build && cd build
 cmake ..
@@ -21,9 +28,14 @@ make -j
 # With Python bindings
 cmake -DBUILD_PYTHON=ON ..
 make -j
+
+# Run tests (all 118 must pass)
+ctest --output-on-failure
 ```
 
 Dependencies: MPI, BLAS/LAPACK (OpenBLAS or MKL), C++17 compiler. Optional: CUDA toolkit, ScaLAPACK, pybind11 (fetched automatically).
+
+> **Note:** Submodules must be initialized before building or testing. Without them, pseudopotential files and libxc are missing, causing build or test failures.
 
 ### Pseudopotentials
 
