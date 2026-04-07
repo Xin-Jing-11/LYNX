@@ -10,9 +10,6 @@
 using namespace lynx;
 
 TEST(XCFunctional, LDA_UniformElectronGas) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     XCFunctional xc;
     Domain domain;
     FDGrid grid;
@@ -35,9 +32,6 @@ TEST(XCFunctional, LDA_UniformElectronGas) {
 }
 
 TEST(XCFunctional, LDA_ZeroDensity) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     XCFunctional xc;
     Domain domain;
     FDGrid grid;
@@ -52,9 +46,6 @@ TEST(XCFunctional, LDA_ZeroDensity) {
 }
 
 TEST(XCFunctional, LDA_SlaterExchange_KnownValue) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     // Verify Slater exchange matches reference LYNX exactly
     // ex = -C2 * rho^(1/3), vx = -C3 * rho^(1/3)
     // C2 = 0.738558766382022, C3 = 0.9847450218426965
@@ -80,9 +71,6 @@ TEST(XCFunctional, LDA_SlaterExchange_KnownValue) {
 }
 
 TEST(XCFunctional, LDA_PW92Correlation_KnownValue) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     // At rs=2: known PW92 correlation value
     // ec ≈ -0.04479 Ha (from published tables)
     double C31 = 0.6203504908993999;
@@ -106,9 +94,6 @@ TEST(XCFunctional, LDA_PW92Correlation_KnownValue) {
 }
 
 TEST(XCFunctional, LDA_ExchangeScaling) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     // Exchange scales as rho^(1/3)
     XCFunctional xc;
     Domain domain;
@@ -127,9 +112,6 @@ TEST(XCFunctional, LDA_ExchangeScaling) {
 }
 
 TEST(XCFunctional, GGA_FallbackToLDAWithoutGradient) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     XCFunctional xc;
     Domain domain;
     FDGrid grid;
@@ -144,9 +126,6 @@ TEST(XCFunctional, GGA_FallbackToLDAWithoutGradient) {
 }
 
 TEST(XCFunctional, GGA_PBE_UniformDensity) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     // For uniform density, sigma=0, PBE reduces to LDA
     // (enhancement factor Fx=1 when s=0)
     XCFunctional xc;
@@ -171,9 +150,6 @@ TEST(XCFunctional, GGA_PBE_UniformDensity) {
 }
 
 TEST(XCFunctional, LDA_PZ_vs_PW) {
-#ifdef USE_CUDA
-    GTEST_SKIP() << "libxc CUDA rejects host pointers — tested in CPU-only build";
-#endif
     // PZ and PW should give similar but not identical correlation
     XCFunctional xc_pz, xc_pw;
     Domain domain;

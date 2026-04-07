@@ -94,8 +94,8 @@
 - [x] GPU k-point support (complex CheFSI, Bloch phases, complex operators)
 - [x] GPU spin-polarized support (spin-resolved XC, per-spin eigensolver loop)
 - [x] GPU forces/stress kernels (nonlocal force, kinetic stress, nonlocal stress)
-- [ ] **GPU SOC spinor eigensolver** — `solve_spinor_kpt` uses host buffers passed to GPU kernels via `apply_spinor_kpt`, causing illegal memory access. Need GPU-resident spinor CheFSI (E2E_PtAu_SOC crashes). Also: SOC projector data (Chi_soc, Gamma_soc) never uploaded in `setup_gpu()`, `d_bloch_fac` not sized for SOC influence count.
-- [ ] **GPU standalone SCF test (test_GPUSCF.cu)** — legacy test reimplements entire SCF loop (mixer, Poisson, XC, AAR) from scratch; does not converge (SCF error ~2.6e-2 after 100 iters). Needs rewrite to use actual LYNX SCF classes or deletion.
+- [ ] **GPU SOC spinor eigensolver** — SOC eigensolver runs on CPU (host buffers), forces/stress also CPU for SOC. GPU-resident spinor CheFSI + SOC projector upload needed for full GPU SOC pipeline.
+- [x] **GPU standalone SCF test (test_GPUSCF.cu)** — rewritten to use real LYNX SCF classes with GPU dispatch
 - [ ] GPU-aware MPI / NCCL for multi-GPU
 
 ### Other
