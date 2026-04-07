@@ -43,17 +43,9 @@ public:
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
-    // Legacy GPU compute: uploads psi from host — for testing only.
-    // Production code must use compute_from_device_ptrs (psi stays GPU-resident).
-    void compute_from_device(const LynxContext& ctx,
-                             const Wavefunction& wfn,
-                             const std::vector<double>& kpt_weights,
-                             const double* d_psi_real,      // device psi (gamma, may be null)
-                             const void* d_psi_z,           // device psi (kpt, cuDoubleComplex*, may be null)
-                             const double* d_occ);          // device occupations
-
     // Compute density from per-(spin,kpt) device-resident psi pointers.
-    // No psi host→device transfers — all psi already on GPU.
+    // No psi host->device transfers -- all psi already on GPU.
+    // This is the only GPU density path used in production SCF.
     void compute_from_device_ptrs(
         const LynxContext& ctx,
         const Wavefunction& wfn,
@@ -61,10 +53,7 @@ public:
         const std::vector<const double*>& d_psi_real_ptrs,  // [s * Nkpts + k] for gamma
         const std::vector<const void*>& d_psi_z_ptrs);      // [s * Nkpts + k] for kpt
 
-    // Legacy GPU compute paths — upload psi from host (for testing only).
-    // Production SCF uses compute_from_device_ptrs instead.
-    void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
-                     const std::vector<double>& kpt_weights);
+    // Spinor density GPU path (SOC/noncollinear).
     void compute_spinor_gpu(const LynxContext& ctx, const Wavefunction& wfn,
                             const std::vector<double>& kpt_weights);
 

@@ -293,12 +293,9 @@ void ElectronDensity::compute(const LynxContext& ctx,
                                const Wavefunction& wfn,
                                const std::vector<double>& kpt_weights)
 {
-#ifdef USE_CUDA
-    if (dev_ == Device::GPU) {
-        compute_gpu(ctx, wfn, kpt_weights);
-        return;
-    }
-#endif
+    // GPU density computation requires device-resident psi pointers.
+    // Use compute_from_device_ptrs() for GPU builds (called directly by SCF).
+    // This dispatcher only handles the CPU path.
     compute_cpu_impl(*this, ctx, wfn, kpt_weights);
 }
 

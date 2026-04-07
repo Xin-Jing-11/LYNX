@@ -65,12 +65,8 @@ public:
     void setup_gpu(const LynxContext& ctx, int Nspin);
     void cleanup_gpu();
 
-    // Legacy GPU compute — uploads psi from host (for testing only).
-    // Production SCF uses compute_gpu_from_device instead.
-    void compute_gpu(const LynxContext& ctx, const Wavefunction& wfn,
-                     const std::vector<double>& kpt_weights);
-
-    // GPU compute from per-(spin,kpt) device-resident psi — no psi H2D transfers
+    // GPU compute from per-(spin,kpt) device-resident psi -- no psi H2D transfers.
+    // This is the only GPU tau path used in production SCF.
     void compute_gpu_from_device(
         const LynxContext& ctx,
         const Wavefunction& wfn,
