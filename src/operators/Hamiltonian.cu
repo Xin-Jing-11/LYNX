@@ -255,6 +255,11 @@ struct GPUHamiltonianState {
     } gpu_soc;
 
     bool has_soc = false;
+    // Host-side SOC data needed by compute_soc_force_gpu
+    std::vector<int> h_IP_displ_phys_soc;
+    std::vector<int> h_proj_l_soc;
+    std::vector<int> h_proj_m_soc;
+    std::vector<double> h_Gamma_soc;
 
     // K-point info
     const class KPoints* kpoints = nullptr;
@@ -643,6 +648,12 @@ void Hamiltonian::setup_gpu(const LynxContext& ctx,
                 CUDA_CHECK(cudaMemcpyAsync(sc.d_proj_l, h_proj_l.data(), sc.total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice, stream));
                 CUDA_CHECK(cudaMemcpyAsync(sc.d_proj_m, h_proj_m.data(), sc.total_soc_nproj * sizeof(int), cudaMemcpyHostToDevice, stream));
             }
+
+            // Store host-side SOC data for force/stress kernels
+            gs->h_IP_displ_phys_soc = IP_displ_soc_global;
+            gs->h_proj_l_soc = h_proj_l;
+            gs->h_proj_m_soc = h_proj_m;
+            gs->h_Gamma_soc = h_Gamma_soc;
 
             printf("Hamiltonian::setup_gpu SOC: %d SOC projectors, max_nproj_soc=%d\n",
                    sc.total_soc_nproj, sc.max_nproj_soc);
@@ -1297,6 +1308,47 @@ void Hamiltonian::compute_nonlocal_force_kpt_gpu(
         gs->kxLx, gs->kyLy, gs->kzLz,
         spn_fac_wk,
         h_f_nloc, h_energy_nl,
+        stream);
+
+    cudaFreeAsync(d_occ, stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+}
+
+void Hamiltonian::compute_soc_force_kpt_gpu(
+    const void* d_psi_spinor, const double* h_occ, int Nband,
+    double spn_fac, double wk,
+    double* h_f_soc) const
+{
+    auto* gs = gpu_state_.as<GPUHamiltonianState>();
+    if (!gs || !gs->has_soc) return;
+
+    auto& sc = gs->gpu_soc;
+    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
+
+    double* d_occ = nullptr;
+    CUDA_CHECK(cudaMallocAsync(&d_occ, Nband * sizeof(double), stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_occ, h_occ, Nband * sizeof(double),
+                          cudaMemcpyHostToDevice, stream));
+
+    gpu::compute_soc_force_gpu(
+        static_cast<const cuDoubleComplex*>(d_psi_spinor), d_occ,
+        sc.d_Chi_soc_flat, gs->gpu_vnl.d_gpos_flat,
+        sc.d_gpos_offsets_soc, sc.d_chi_soc_offsets,
+        sc.d_ndc_arr_soc, sc.d_nproj_soc_arr,
+        sc.d_IP_displ_soc,
+        sc.d_Gamma_soc,
+        sc.d_proj_l, sc.d_proj_m,
+        gs->d_bloch_fac,
+        sc.n_influence_soc, sc.total_soc_nproj,
+        sc.max_ndc_soc, sc.max_nproj_soc,
+        gs->n_phys_atoms, gs->h_IP_displ_phys_soc.data(),
+        gs->h_proj_l_soc.data(), gs->h_proj_m_soc.data(),
+        gs->h_Gamma_soc.data(),
+        gs->nx, gs->ny, gs->nz, gs->FDn, gs->Nd, Nband,
+        gs->dV,
+        gs->kxLx, gs->kyLy, gs->kzLz,
+        spn_fac, wk,
+        h_f_soc,
         stream);
 
     cudaFreeAsync(d_occ, stream);
