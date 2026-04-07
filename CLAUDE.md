@@ -116,6 +116,9 @@ Agents create temporary worktrees at `.worktrees/<name>` on `feature/<name>` bra
 
 ## Build & Test
 ```bash
+# IMPORTANT: initialize submodules first (pseudopotentials + libxc)
+git submodule update --init
+
 # CPU build
 cd build && cmake .. && make -j$(nproc)
 
