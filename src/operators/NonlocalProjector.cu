@@ -42,7 +42,7 @@ __device__ double blockReduceSum_d(double val, double* smem) {
 //   much better GPU occupancy (18.6x speedup on gather).
 // ============================================================
 static constexpr int NL_TILE = 256;
-static constexpr int NL_MAX_NP = 32;
+static constexpr int NL_MAX_NP = 64;  // FR pseudopotentials can have up to ~62 projectors/atom
 
 // V0 (legacy): One block per atom, inner loop over columns
 __global__ void fused_gather_chitpsi_kernel_v0(
