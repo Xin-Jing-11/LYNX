@@ -98,7 +98,7 @@ __global__ void norm2_kernel(
     if (threadIdx.x == 0) *d_norm2 = sdata[0];
 }
 
-// Fused Gram matrix kernel (same as was in LinearSolver.cu)
+// Fused Gram matrix kernel
 __global__ void fused_gram_kernel(
     const double* __restrict__ F_hist,
     const double* __restrict__ f,
@@ -159,6 +159,8 @@ struct GPUPoissonState {
     bool has_mixed_deriv = false;
     double poisson_diag = 0.0;
     double jacobi_m_inv = 0.0;
+    // Scratch pool checkpoint for per-solve allocations
+    mutable size_t solve_sp_cp = 0;
 };
 
 // ============================================================
@@ -200,7 +202,36 @@ PoissonSolver::~PoissonSolver() {
 }
 
 // ============================================================
-// GPU method implementations (_gpu suffix)
+// GPU workspace allocation for a single solve call
+// ============================================================
+
+void PoissonSolver::alloc_gpu_scratch(AARWorkspace& ws, int Nd) const {
+    auto& ctx = gpu::GPUContext::instance();
+    auto& sp = ctx.scratch_pool;
+    auto* gs = gpu_state_.as<GPUPoissonState>();
+    gs->solve_sp_cp = sp.checkpoint();
+
+    // Use pre-allocated AAR buffers from GPUContext for main arrays
+    ws.r      = ctx.buf.aar_r;
+    ws.f      = ctx.buf.aar_f;
+    ws.Ax     = ctx.buf.aar_Ax;
+    ws.X_hist = ctx.buf.aar_X;
+    ws.F_hist = ctx.buf.aar_F;
+
+    // Allocate per-solve temporaries from scratch pool
+    ws.x_old  = sp.alloc<double>(Nd);
+    ws.f_old  = sp.alloc<double>(Nd);
+    ws.rhs_ms = sp.alloc<double>(Nd);
+}
+
+void PoissonSolver::free_gpu_scratch() const {
+    auto& sp = gpu::GPUContext::instance().scratch_pool;
+    auto* gs = gpu_state_.as<GPUPoissonState>();
+    sp.restore(gs->solve_sp_cp);
+}
+
+// ============================================================
+// GPU method implementations — thin kernel wrappers only
 // ============================================================
 
 void PoissonSolver::apply_laplacian_gpu(const double* d_x, double* d_Ax) const {
@@ -231,41 +262,30 @@ void PoissonSolver::apply_preconditioner_gpu(const double* d_r, double* d_f, int
         d_r, d_f, gs->jacobi_m_inv, N);
 }
 
-void PoissonSolver::aar_residual_gpu(const double* d_b, const double* d_Ax, double* d_r, int N) const {
+void PoissonSolver::compute_residual_gpu(const double* d_b, const double* d_Ax, double* d_r, int N) const {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
     residual_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(d_b, d_Ax, d_r, N);
 }
 
-void PoissonSolver::aar_richardson_gpu(const double* d_x_old, const double* d_f, double* d_x, double omega, int N) const {
+void PoissonSolver::richardson_update_gpu(const double* d_x_old, const double* d_f, double* d_x, double omega, int N) const {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
     richardson_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(d_x_old, d_f, d_x, omega, N);
 }
 
-void PoissonSolver::aar_store_history_gpu(const double* d_x, const double* d_x_old,
-                                           const double* d_f, const double* d_f_old,
-                                           double* d_X_hist, double* d_F_hist, int col, int N) const {
+void PoissonSolver::store_history_gpu(const double* d_x, const double* d_x_old,
+                                       const double* d_f, const double* d_f_old,
+                                       double* d_X_hist, double* d_F_hist, int col, int N) const {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
     store_history_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(
         d_x, d_x_old, d_f, d_f_old, d_X_hist, d_F_hist, col, N);
 }
 
-void PoissonSolver::aar_anderson_gpu(const double* d_x_old, const double* d_f,
-                                      const double* d_X_hist, const double* d_F_hist,
-                                      const double* d_gamma, double* d_x,
-                                      double beta, int cols, int N) const {
-    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    int bs = 256;
-    anderson_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(
-        d_x_old, d_f, d_X_hist, d_F_hist, d_gamma, d_x, beta, cols, N);
-}
-
-double PoissonSolver::aar_norm2_gpu(const double* d_r, int N) const {
+double PoissonSolver::compute_norm2_gpu(const double* d_r, int N) const {
     auto& ctx = gpu::GPUContext::instance();
     cudaStream_t stream = ctx.compute_stream;
-    // Use a small scratch area for the single output value
     auto& sp = ctx.scratch_pool;
     size_t cp = sp.checkpoint();
     double* d_norm2 = sp.alloc<double>(1);
@@ -278,166 +298,96 @@ double PoissonSolver::aar_norm2_gpu(const double* d_r, int N) const {
     return result;
 }
 
-void PoissonSolver::aar_copy_gpu(double* dst, const double* src, int N) const {
+void PoissonSolver::vec_copy_gpu(double* dst, const double* src, int N) const {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     cudaMemcpyAsync(dst, src, N * sizeof(double), cudaMemcpyDeviceToDevice, stream);
 }
 
-void PoissonSolver::mean_subtract_gpu(double* d_x, double mean, int N) const {
+void PoissonSolver::subtract_mean_gpu(double* d_x, double mean, int N) const {
     cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
     int bs = 256;
     mean_subtract_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(d_x, mean, N);
 }
 
-void PoissonSolver::aar_fused_gram_gpu(const double* d_F_hist, const double* d_f,
-                                        double* d_gram_out, const int* d_pair_i,
-                                        const int* d_pair_j, int N, int cols, int n_jobs) const {
-    cudaStream_t stream = gpu::GPUContext::instance().compute_stream;
-    int gram_bs = std::min(256, N);
-    fused_gram_kernel<<<n_jobs, gram_bs, gram_bs * sizeof(double), stream>>>(
-        d_F_hist, d_f, d_gram_out, d_pair_i, d_pair_j, N, cols, n_jobs);
+double PoissonSolver::compute_mean_gpu(const double* d_x, int N) const {
+    auto& ctx = gpu::GPUContext::instance();
+    cudaStream_t stream = ctx.compute_stream;
+    std::vector<double> h(N);
+    cudaMemcpyAsync(h.data(), d_x, N * sizeof(double), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    double sum = 0.0;
+    for (int i = 0; i < N; i++) sum += h[i];
+    return sum / N;
 }
 
-// ============================================================
-// GPU AAR solve — full iteration loop with _gpu() kernel wrappers
-// ============================================================
-int PoissonSolver::solve_gpu(const double* rhs, double* phi, double tol) const {
-    int Nd = domain_->Nd_d();
-    int m = aar_params_.m;
-    int p = aar_params_.p;
-    double omega = aar_params_.omega;
-    double beta = aar_params_.beta;
-    int max_iter = aar_params_.max_iter;
-
+// Full Anderson step on GPU: fused Gram matrix computation, CPU solve, extrapolation.
+// d_Ax_scratch is reused for Gram pair indices and gamma upload (it will be
+// recomputed after the Anderson step in the main loop).
+void PoissonSolver::anderson_step_gpu(const double* d_x_old, const double* d_f,
+                                       const double* d_X_hist, const double* d_F_hist,
+                                       double* d_Ax_scratch, double* d_x,
+                                       double beta, int cols, int N) const {
     auto& ctx = gpu::GPUContext::instance();
-    auto& sp = ctx.scratch_pool;
-    size_t sp_cp = sp.checkpoint();
+    cudaStream_t stream = ctx.compute_stream;
+    int m = aar_params_.m;
 
-    // Mean-subtract rhs (work on copy)
-    double* d_rhs_ms = sp.alloc<double>(Nd);
-    aar_copy_gpu(d_rhs_ms, rhs, Nd);
-    {
-        double rhs_mean = 0.0;
-        {
-            std::vector<double> h(Nd);
-            cudaStream_t stream = ctx.compute_stream;
-            cudaMemcpyAsync(h.data(), rhs, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream);
-            cudaStreamSynchronize(stream);
-            for (int i = 0; i < Nd; i++) rhs_mean += h[i];
-            rhs_mean /= Nd;
-        }
-        mean_subtract_gpu(d_rhs_ms, rhs_mean, Nd);
-    }
+    // Reuse d_Ax_scratch for pair indices and gram output
+    int max_jobs = m * (m + 1) / 2 + m;
+    int* d_pair_i     = reinterpret_cast<int*>(d_Ax_scratch);
+    int* d_pair_j     = d_pair_i + max_jobs;
+    double* d_gram_out = reinterpret_cast<double*>(d_pair_j + max_jobs);
 
-    double* d_r      = ctx.buf.aar_r;
-    double* d_f      = ctx.buf.aar_f;
-    double* d_Ax     = ctx.buf.aar_Ax;
-    double* d_X_hist = ctx.buf.aar_X;
-    double* d_F_hist = ctx.buf.aar_F;
-
-    double* d_x_old  = sp.alloc<double>(Nd);
-    double* d_f_old  = sp.alloc<double>(Nd);
-
-    aar_copy_gpu(d_x_old, phi, Nd);
-
-    double b_norm2 = aar_norm2_gpu(d_rhs_ms, Nd);
-    double abs_tol = tol * std::sqrt(b_norm2);
-
-    apply_laplacian_gpu(phi, d_Ax);
-    aar_residual_gpu(d_rhs_ms, d_Ax, d_r, Nd);
-
-    double r_2norm = abs_tol + 1.0;
-    int iter_count = 0;
-
+    std::vector<int> h_pair_i(max_jobs), h_pair_j(max_jobs);
+    std::vector<double> h_gram_out(max_jobs);
     std::vector<double> h_FTF(m * m);
     std::vector<double> h_gamma(m);
 
-    while (r_2norm > abs_tol && iter_count < max_iter) {
-        apply_preconditioner_gpu(d_r, d_f, Nd);
-
-        if (iter_count > 0) {
-            int i_hist = (iter_count - 1) % m;
-            aar_store_history_gpu(phi, d_x_old, d_f, d_f_old,
-                                  d_X_hist, d_F_hist, i_hist, Nd);
+    // Build pair list for fused Gram kernel
+    int n_jobs = 0;
+    for (int ii = 0; ii < cols; ++ii)
+        for (int jj = 0; jj <= ii; ++jj) {
+            h_pair_i[n_jobs] = ii; h_pair_j[n_jobs] = jj; n_jobs++;
         }
-
-        aar_copy_gpu(d_x_old, phi, Nd);
-        aar_copy_gpu(d_f_old, d_f, Nd);
-
-        if ((iter_count + 1) % p == 0 && iter_count > 0) {
-            int cols = std::min(iter_count, m);
-
-            int max_jobs = m * (m + 1) / 2 + m;
-            int* d_pair_i     = reinterpret_cast<int*>(d_Ax);
-            int* d_pair_j     = d_pair_i + max_jobs;
-            double* d_gram_out = reinterpret_cast<double*>(d_pair_j + max_jobs);
-
-            std::vector<int> h_pair_i(max_jobs), h_pair_j(max_jobs);
-            std::vector<double> h_gram_out(max_jobs);
-
-            int n_jobs = 0;
-            for (int ii = 0; ii < cols; ++ii)
-                for (int jj = 0; jj <= ii; ++jj) {
-                    h_pair_i[n_jobs] = ii; h_pair_j[n_jobs] = jj; n_jobs++;
-                }
-            int ftf_pairs = n_jobs;
-            for (int ii = 0; ii < cols; ++ii) {
-                h_pair_i[n_jobs] = ii; h_pair_j[n_jobs] = -1; n_jobs++;
-            }
-
-            cudaStream_t stream = ctx.compute_stream;
-            cudaMemcpyAsync(d_pair_i, h_pair_i.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream);
-            cudaMemcpyAsync(d_pair_j, h_pair_j.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream);
-
-            aar_fused_gram_gpu(d_F_hist, d_f, d_gram_out, d_pair_i, d_pair_j, Nd, cols, n_jobs);
-
-            cudaMemcpyAsync(h_gram_out.data(), d_gram_out, n_jobs * sizeof(double), cudaMemcpyDeviceToHost, stream);
-
-            int k = 0;
-            for (int ii = 0; ii < cols; ++ii)
-                for (int jj = 0; jj <= ii; ++jj) {
-                    h_FTF[ii * cols + jj] = h_gram_out[k];
-                    h_FTF[jj * cols + ii] = h_gram_out[k];
-                    k++;
-                }
-            for (int ii = 0; ii < cols; ++ii)
-                h_gamma[ii] = h_gram_out[ftf_pairs + ii];
-
-            gauss_solve(h_FTF.data(), h_gamma.data(), h_gamma.data(), cols);
-
-            double* d_gamma = d_Ax;
-            cudaMemcpyAsync(d_gamma, h_gamma.data(), cols * sizeof(double), cudaMemcpyHostToDevice, stream);
-
-            aar_anderson_gpu(d_x_old, d_f, d_X_hist, d_F_hist,
-                             d_gamma, phi, beta, cols, Nd);
-
-            apply_laplacian_gpu(phi, d_Ax);
-            aar_residual_gpu(d_rhs_ms, d_Ax, d_r, Nd);
-            r_2norm = std::sqrt(aar_norm2_gpu(d_r, Nd));
-        } else {
-            aar_richardson_gpu(d_x_old, d_f, phi, omega, Nd);
-            apply_laplacian_gpu(phi, d_Ax);
-            aar_residual_gpu(d_rhs_ms, d_Ax, d_r, Nd);
-        }
-
-        iter_count++;
+    int ftf_pairs = n_jobs;
+    for (int ii = 0; ii < cols; ++ii) {
+        h_pair_i[n_jobs] = ii; h_pair_j[n_jobs] = -1; n_jobs++;
     }
 
-    // Mean-subtract phi
-    {
-        std::vector<double> h(Nd);
-        cudaStream_t stream = ctx.compute_stream;
-        cudaStreamSynchronize(stream);
-        cudaMemcpyAsync(h.data(), phi, Nd * sizeof(double), cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        double phi_mean = 0.0;
-        for (int i = 0; i < Nd; i++) phi_mean += h[i];
-        phi_mean /= Nd;
-        mean_subtract_gpu(phi, phi_mean, Nd);
-    }
+    // Upload pair indices
+    cudaMemcpyAsync(d_pair_i, h_pair_i.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_pair_j, h_pair_j.data(), n_jobs * sizeof(int), cudaMemcpyHostToDevice, stream);
 
-    sp.restore(sp_cp);
-    return iter_count;
+    // Launch fused Gram kernel
+    int gram_bs = std::min(256, N);
+    fused_gram_kernel<<<n_jobs, gram_bs, gram_bs * sizeof(double), stream>>>(
+        d_F_hist, d_f, d_gram_out, d_pair_i, d_pair_j, N, cols, n_jobs);
+
+    // Download Gram results
+    cudaMemcpyAsync(h_gram_out.data(), d_gram_out, n_jobs * sizeof(double), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    // Build symmetric FTF and RHS on CPU
+    int k = 0;
+    for (int ii = 0; ii < cols; ++ii)
+        for (int jj = 0; jj <= ii; ++jj) {
+            h_FTF[ii * cols + jj] = h_gram_out[k];
+            h_FTF[jj * cols + ii] = h_gram_out[k];
+            k++;
+        }
+    for (int ii = 0; ii < cols; ++ii)
+        h_gamma[ii] = h_gram_out[ftf_pairs + ii];
+
+    // Solve (F^T F) gamma = F^T f on CPU
+    gauss_solve(h_FTF.data(), h_gamma.data(), h_gamma.data(), cols);
+
+    // Upload gamma to device (reuse d_Ax_scratch)
+    double* d_gamma = d_Ax_scratch;
+    cudaMemcpyAsync(d_gamma, h_gamma.data(), cols * sizeof(double), cudaMemcpyHostToDevice, stream);
+
+    // Launch Anderson extrapolation kernel
+    int bs = 256;
+    anderson_kernel<<<gpu::ceildiv(N, bs), bs, 0, stream>>>(
+        d_x_old, d_f, d_X_hist, d_F_hist, d_gamma, d_x, beta, cols, N);
 }
 
 } // namespace lynx
