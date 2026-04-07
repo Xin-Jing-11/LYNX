@@ -89,8 +89,8 @@ if(USE_CUDA)
         physics/EffectivePotential.cu
         physics/GPUForce.cu
         physics/GPUStress.cu
-        physics/Forces.cu
-        physics/StressGPU.cu
+        # Forces.cu and StressGPU.cu removed: spin/k-point loops moved to .cpp,
+        # per-k-point GPU kernels live in Hamiltonian.cu
     )
     target_link_libraries(lynx_core PUBLIC CUDA::cudart CUDA::cublas CUDA::cusolver CUDA::cusparse CUDA::curand CUDA::cufft CUDA::cufftw)
     target_compile_definitions(lynx_core PUBLIC USE_CUDA)
