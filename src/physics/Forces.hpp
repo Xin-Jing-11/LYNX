@@ -131,15 +131,8 @@ private:
         const NonlocalProjector& vnl,
         const std::vector<double>& kpt_weights);
 
-#ifdef USE_CUDA
-    // GPU path: compute from device-resident psi via EigenSolver+Hamiltonian
-    void compute_nonlocal_gpu(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const std::vector<double>& kpt_weights);
-#endif
+    // Note: GPU nonlocal force logic (spin/k-point loop) is in compute_nonlocal()
+    // in Forces.cpp. Per-k-point GPU kernels live in Hamiltonian.cu.
 
     // NLCC XC force: F = ∫ Vxc · ∇ρ_core_J dV
     void compute_xc_nlcc(

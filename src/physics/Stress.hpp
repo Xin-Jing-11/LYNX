@@ -92,15 +92,9 @@ public:
         int kpt_start = 0,
         int band_start = 0);
 
-#ifdef USE_CUDA
-    // GPU path: compute from device-resident psi via EigenSolver+Hamiltonian
-    void compute_nonlocal_kinetic_gpu(
-        const Wavefunction& wfn,
-        const Crystal& crystal,
-        const std::vector<AtomNlocInfluence>& nloc_influence,
-        const NonlocalProjector& vnl,
-        const std::vector<double>& kpt_weights);
-#endif
+    // Note: GPU nonlocal+kinetic stress logic (spin/k-point loop) is in
+    // compute_nonlocal_kinetic() in Stress.cpp. Per-k-point GPU kernels
+    // live in Hamiltonian.cu.
 
 private:
     const LynxContext* ctx_ = nullptr;
