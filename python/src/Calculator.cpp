@@ -13,154 +13,43 @@ void Calculator::load_config(const std::string& json_file) {
 
 void Calculator::set_config(const lynx::SystemConfig& config) {
     config_ = config;
-    // Skip validation of Nstates here — setup() will auto-compute if <= 0
+    // Skip validation of Nstates here -- setup() will auto-compute if <= 0
 }
 
 void Calculator::setup(MPI_Comm comm) {
-    // Lattice & grid
-    lattice_ = lynx::Lattice(config_.latvec, config_.cell_type);
-    grid_ = lynx::FDGrid(config_.Nx, config_.Ny, config_.Nz, lattice_,
-                          config_.bcx, config_.bcy, config_.bcz);
-    stencil_ = lynx::FDStencil(config_.fd_order, grid_, lattice_);
+    // 1. Reset LynxContext (allows re-use across multiple setup() calls)
+    auto& ctx = lynx::LynxContext::instance();
+    ctx.reset();
 
-    // K-points
-    kpoints_.generate(config_.Kx, config_.Ky, config_.Kz,
-                      config_.kpt_shift, lattice_);
-    int Nkpts = kpoints_.Nkpts();
-    bool is_kpt = !kpoints_.is_gamma_only();
-    Nspin_ = (config_.spin_type == lynx::SpinType::None) ? 1 : 2;
+    // 2. Initialize infrastructure (lattice, grid, stencil, parallelization, etc.)
+    ctx.initialize(config_, comm);
 
-    // Parallelization
-    int nproc;
-    MPI_Comm_size(comm, &nproc);
+    // 3. Build crystal + electrostatics via Crystal::setup factory
+    atoms_ = lynx::Crystal::setup(config_, ctx);
 
-    if (config_.parallel.npspin <= 1 && Nspin_ == 2 && nproc >= 2)
-        config_.parallel.npspin = 2;
-    int nproc_after_spin = nproc / config_.parallel.npspin;
-    if (config_.parallel.npkpt <= 1 && Nkpts > 1 && nproc_after_spin > 1)
-        config_.parallel.npkpt = std::min(nproc_after_spin, Nkpts);
-    int nproc_after_kpt = nproc_after_spin / std::max(1, config_.parallel.npkpt);
-    if (config_.parallel.npband <= 1 && nproc_after_kpt > 1)
-        config_.parallel.npband = nproc_after_kpt;
+    // 4. Register atom/electron counts with context.
+    //    Crystal::setup updates config_.Nstates via ParameterDefaults.
+    //    We must re-initialize the context so Parallelization picks up
+    //    the resolved Nstates, Nelectron, etc.
+    ctx.reset();
+    ctx.initialize(config_, comm);
+    ctx.set_atom_info(atoms_.Natom, atoms_.Nelectron);
 
-    Nstates_ = config_.Nstates;
+    // 5. Create nonlocal projector
+    vnl_ = lynx::NonlocalProjector::create(ctx, atoms_.crystal, atoms_.nloc_influence);
 
-    parallel_ = std::make_unique<lynx::Parallelization>(
-        comm, config_.parallel, grid_, Nspin_, Nkpts, Nstates_);
+    // 6. Set up Hamiltonian
+    hamiltonian_.setup(ctx.stencil(), ctx.domain(), ctx.grid(), ctx.halo(), &vnl_);
 
-    const auto& domain = parallel_->domain();
-    const auto& bandcomm = parallel_->bandcomm();
-    const auto& kptcomm = parallel_->kptcomm();
-    const auto& kpt_bridge = parallel_->kpt_bridge();
-    const auto& spincomm = parallel_->spincomm();
-    const auto& spin_bridge = parallel_->spin_bridge();
-    int Nkpts_local = parallel_->Nkpts_local();
-    int Nspin_local = parallel_->Nspin_local();
-    int kpt_start = parallel_->kpt_start();
-    int spin_start = parallel_->spin_start();
-    int Nband_local = parallel_->Nband_local();
-    int band_start = parallel_->band_start();
+    // 7. Set up SCF solver
+    lynx::SCFParams params = lynx::SCFParams::from_config(config_);
+    scf_.setup(ctx, hamiltonian_, &vnl_, params);
 
-    // Load pseudopotentials & create crystal
-    std::vector<lynx::AtomType> atom_types;
-    std::vector<lynx::Vec3> all_positions;
-    std::vector<int> type_indices;
-    int total_Nelectron = 0;
-
-    for (size_t it = 0; it < config_.atom_types.size(); ++it) {
-        const auto& at_in = config_.atom_types[it];
-        int n_atoms = static_cast<int>(at_in.coords.size());
-
-        lynx::Pseudopotential psd_tmp;
-        psd_tmp.load_psp8(at_in.pseudo_file);
-        double Zval = psd_tmp.Zval();
-        double mass = 1.0;
-
-        lynx::AtomType atype(at_in.element, mass, Zval, n_atoms);
-        atype.psd().load_psp8(at_in.pseudo_file);
-
-        for (int ia = 0; ia < n_atoms; ++ia) {
-            lynx::Vec3 pos = at_in.coords[ia];
-            if (at_in.fractional) {
-                if (lattice_.is_orthogonal()) {
-                    pos = lattice_.frac_to_cart(pos);
-                } else {
-                    lynx::Vec3 L = lattice_.lengths();
-                    pos = {pos.x * L.x, pos.y * L.y, pos.z * L.z};
-                }
-            } else {
-                if (!lattice_.is_orthogonal()) {
-                    pos = lattice_.cart_to_nonCart(pos);
-                }
-            }
-            all_positions.push_back(pos);
-            type_indices.push_back(static_cast<int>(it));
-        }
-
-        total_Nelectron += static_cast<int>(Zval) * n_atoms;
-        atom_types.push_back(std::move(atype));
-    }
-
-    Nelectron_ = (config_.Nelectron > 0) ? config_.Nelectron : total_Nelectron;
-    Natom_ = static_cast<int>(all_positions.size());
-    if (Nstates_ <= 0) Nstates_ = Nelectron_ / 2 + 10;
-
-    crystal_ = lynx::Crystal(std::move(atom_types), all_positions, type_indices, lattice_);
-
-    // Atom influence
-    double rc_max = 0.0;
-    for (int it = 0; it < crystal_.n_types(); ++it) {
-        const auto& psd = crystal_.types()[it].psd();
-        for (auto rc : psd.rc()) rc_max = std::max(rc_max, rc);
-        if (!psd.radial_grid().empty())
-            rc_max = std::max(rc_max, psd.radial_grid().back());
-    }
-    double h_max = std::max({grid_.dx(), grid_.dy(), grid_.dz()});
-    rc_max += 8.0 * h_max;
-
-    crystal_.compute_atom_influence(domain, rc_max, influence_);
-    crystal_.compute_nloc_influence(domain, nloc_influence_);
-
-    // Electrostatics
-    elec_.compute_pseudocharge(crystal_, influence_, domain, grid_, stencil_);
-
-    int Nd_d_val = domain.Nd_d();
-    Vloc_.assign(Nd_d_val, 0.0);
-    elec_.compute_Vloc(crystal_, influence_, domain, grid_, Vloc_.data());
-    elec_.compute_Ec(Vloc_.data(), Nd_d_val, grid_.dV());
-
-    // Operators
-    halo_ = lynx::HaloExchange(domain, stencil_.FDn());
-    laplacian_ = lynx::Laplacian(stencil_, domain);
-    gradient_ = lynx::Gradient(stencil_, domain);
-
-    vnl_.setup(crystal_, nloc_influence_, domain, grid_);
-    hamiltonian_.setup(stencil_, domain, grid_, halo_, &vnl_);
-
-    // SCF setup
-    lynx::SCFParams scf_params;
-    scf_params.max_iter = config_.max_scf_iter;
-    scf_params.min_iter = config_.min_scf_iter;
-    scf_params.tol = config_.scf_tol;
-    scf_params.mixing_var = config_.mixing_var;
-    scf_params.mixing_precond = config_.mixing_precond;
-    scf_params.mixing_history = config_.mixing_history;
-    scf_params.mixing_param = config_.mixing_param;
-    scf_params.smearing = config_.smearing;
-    scf_params.elec_temp = config_.elec_temp;
-    scf_params.cheb_degree = config_.cheb_degree;
-    scf_params.rho_trigger = config_.rho_trigger;
-
-    const auto& scf_bandcomm = (config_.parallel.npband > 1) ? kptcomm : bandcomm;
-    scf_.setup(grid_, domain, stencil_, laplacian_, gradient_, hamiltonian_,
-               halo_, &vnl_, scf_bandcomm, kpt_bridge, spin_bridge, scf_params,
-               Nspin_, Nspin_local, spin_start, &kpoints_, kpt_start,
-               Nstates_, band_start);
-
-    // GPU acceleration
+    // 8. GPU acceleration
 #ifdef USE_CUDA
     if (use_gpu_) {
-        scf_.set_gpu_data(crystal_, nloc_influence_, influence_, elec_);
+        scf_.set_gpu_data(atoms_.crystal, atoms_.nloc_influence,
+                          atoms_.influence, atoms_.elec);
     }
 #else
     if (use_gpu_) {
@@ -170,17 +59,29 @@ void Calculator::setup(MPI_Comm comm) {
     }
 #endif
 
-    // Wavefunctions
-    wfn_.allocate(Nd_d_val, Nband_local, Nstates_, Nspin_local, Nkpts_local, is_kpt);
+    // 9. Allocate wavefunctions
+    int Nd_d_val = ctx.domain().Nd_d();
+    int Nband_local = ctx.Nband_local();
+    int Nstates = ctx.Nstates();
+    int Nspin_local = ctx.Nspin_local();
+    int Nkpts_local = ctx.Nkpts_local();
+    bool is_kpt = ctx.is_kpt();
+    int Nspinor = ctx.Nspinor();
 
-    // Initial density (atomic superposition)
+    wfn_.allocate(Nd_d_val, Nband_local, Nstates, Nspin_local, Nkpts_local,
+                  is_kpt, Nspinor);
+
+    // 10. Compute atomic density for initial guess
     std::vector<double> rho_at(Nd_d_val, 0.0);
-    elec_.compute_atomic_density(crystal_, influence_, domain, grid_,
-                                  rho_at.data(), Nelectron_);
+    atoms_.elec.compute_atomic_density(atoms_.crystal, atoms_.influence,
+                                       ctx.domain(), ctx.grid(),
+                                       rho_at.data(), atoms_.Nelectron);
     rho_atomic_ = rho_at;
 
+    // 11. Build initial magnetization for spin-polarized calculations
+    int Nspin = ctx.Nspin();
     std::vector<double> mag_init;
-    if (Nspin_ == 2) {
+    if (Nspin == 2) {
         mag_init.resize(Nd_d_val, 0.0);
         double total_spin = 0.0;
         for (size_t it = 0; it < config_.atom_types.size(); ++it) {
@@ -190,19 +91,15 @@ void Calculator::setup(MPI_Comm comm) {
             }
         }
         if (std::abs(total_spin) > 1e-12) {
-            double scale = total_spin / static_cast<double>(Nelectron_);
+            double scale = total_spin / static_cast<double>(atoms_.Nelectron);
             for (int i = 0; i < Nd_d_val; ++i)
                 mag_init[i] = scale * rho_at[i];
         }
     }
 
+    // 12. Set initial density on SCF
     scf_.set_initial_density(rho_at.data(), Nd_d_val,
-                              Nspin_ == 2 ? mag_init.data() : nullptr);
-
-    // NLCC
-    rho_core_.assign(Nd_d_val, 0.0);
-    has_nlcc_ = elec_.compute_core_density(crystal_, influence_, domain, grid_,
-                                            rho_core_.data());
+                             Nspin == 2 ? mag_init.data() : nullptr);
 
     setup_done_ = true;
 }
@@ -211,10 +108,12 @@ double Calculator::run() {
     if (!setup_done_)
         throw std::runtime_error("Calculator::run() called before setup()");
 
-    double Etot = scf_.run(wfn_, Nelectron_, Natom_,
-                            elec_.pseudocharge().data(), Vloc_.data(),
-                            elec_.Eself(), elec_.Ec(), config_.xc,
-                            has_nlcc_ ? rho_core_.data() : nullptr);
+    auto& ctx = lynx::LynxContext::instance();
+
+    double Etot = scf_.run(wfn_, ctx.Nelectron(), ctx.Natom(),
+                           atoms_.elec.pseudocharge().data(), atoms_.Vloc.data(),
+                           atoms_.elec.Eself(), atoms_.elec.Ec(), config_.xc,
+                           atoms_.has_nlcc ? atoms_.rho_core.data() : nullptr);
     scf_converged_ = scf_.converged();
     return Etot;
 }
@@ -223,77 +122,80 @@ std::vector<double> Calculator::compute_forces() {
     if (!setup_done_)
         throw std::runtime_error("compute_forces() called before run()");
 
-    const auto& domain = parallel_->domain();
-    const auto& bandcomm = parallel_->bandcomm();
-    const auto& kptcomm = parallel_->kptcomm();
-    const auto& kpt_bridge = parallel_->kpt_bridge();
-    const auto& spin_bridge = parallel_->spin_bridge();
-    int kpt_start = parallel_->kpt_start();
-    int band_start = parallel_->band_start();
-    const auto& scf_bandcomm = (config_.parallel.npband > 1) ? kptcomm : bandcomm;
-
-    std::vector<double> kpt_weights = kpoints_.normalized_weights();
+    auto& ctx = lynx::LynxContext::instance();
     lynx::Forces forces;
-    return forces.compute(wfn_, crystal_, influence_, nloc_influence_, vnl_,
-                          stencil_, gradient_, halo_, domain, grid_,
-                          scf_.phi(), scf_.density().rho_total().data(),
-                          Vloc_.data(),
-                          elec_.pseudocharge().data(),
-                          elec_.pseudocharge_ref().data(),
-                          scf_.Vxc(),
-                          has_nlcc_ ? rho_core_.data() : nullptr,
-                          kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge,
-                          &kpoints_, kpt_start, band_start);
+    forces.compute(ctx, config_, wfn_, scf_, atoms_, vnl_);
+    return forces.total_forces();
 }
 
 std::array<double, 6> Calculator::compute_stress() {
     if (!setup_done_)
         throw std::runtime_error("compute_stress() called before run()");
 
-    const auto& domain = parallel_->domain();
-    const auto& bandcomm = parallel_->bandcomm();
-    const auto& kptcomm = parallel_->kptcomm();
-    const auto& kpt_bridge = parallel_->kpt_bridge();
-    const auto& spin_bridge = parallel_->spin_bridge();
-    int kpt_start = parallel_->kpt_start();
-    int band_start = parallel_->band_start();
-    const auto& scf_bandcomm = (config_.parallel.npband > 1) ? kptcomm : bandcomm;
-
-    std::vector<double> kpt_weights = kpoints_.normalized_weights();
+    auto& ctx = lynx::LynxContext::instance();
     lynx::Stress stress;
-    int Nspin_calc = (config_.spin_type == lynx::SpinType::Collinear) ? 2 : 1;
-    const double* rho_up = (Nspin_calc == 2) ? scf_.density().rho(0).data() : nullptr;
-    const double* rho_dn = (Nspin_calc == 2) ? scf_.density().rho(1).data() : nullptr;
+    stress.compute(ctx, config_, wfn_, scf_, atoms_, vnl_);
+    return stress.total_stress();
+}
 
-    return stress.compute(wfn_, crystal_, influence_, nloc_influence_, vnl_,
-                          stencil_, gradient_, halo_, domain, grid_,
-                          scf_.phi(), scf_.density().rho_total().data(),
-                          rho_up, rho_dn,
-                          Vloc_.data(),
-                          elec_.pseudocharge().data(),
-                          elec_.pseudocharge_ref().data(),
-                          scf_.exc(), scf_.Vxc(),
-                          scf_.Dxcdgrho(),
-                          scf_.energy().Exc,
-                          elec_.Eself() + elec_.Ec(),
-                          config_.xc,
-                          Nspin_calc,
-                          has_nlcc_ ? rho_core_.data() : nullptr,
-                          kpt_weights, scf_bandcomm, kpt_bridge, spin_bridge,
-                          &kpoints_, kpt_start, band_start,
-                          scf_.vtau(), scf_.tau());
+double Calculator::compute_pressure() {
+    if (!setup_done_)
+        throw std::runtime_error("compute_pressure() called before run()");
+
+    auto& ctx = lynx::LynxContext::instance();
+    lynx::Stress stress;
+    stress.compute(ctx, config_, wfn_, scf_, atoms_, vnl_);
+    return stress.pressure();
+}
+
+// --- Accessors delegating to LynxContext ---
+
+const lynx::Lattice& Calculator::lattice() const {
+    return lynx::LynxContext::instance().lattice();
+}
+
+const lynx::FDGrid& Calculator::grid() const {
+    return lynx::LynxContext::instance().grid();
+}
+
+const lynx::FDStencil& Calculator::stencil() const {
+    return lynx::LynxContext::instance().stencil();
 }
 
 const lynx::Domain& Calculator::domain() const {
-    if (!parallel_)
-        throw std::runtime_error("Calculator not set up");
-    return parallel_->domain();
+    return lynx::LynxContext::instance().domain();
+}
+
+const lynx::KPoints& Calculator::kpoints() const {
+    return lynx::LynxContext::instance().kpoints();
+}
+
+const lynx::HaloExchange& Calculator::halo() const {
+    return lynx::LynxContext::instance().halo();
+}
+
+const lynx::Laplacian& Calculator::laplacian() const {
+    return lynx::LynxContext::instance().laplacian();
+}
+
+const lynx::Gradient& Calculator::gradient() const {
+    return lynx::LynxContext::instance().gradient();
 }
 
 int Calculator::Nd_d() const {
-    if (!parallel_)
-        throw std::runtime_error("Calculator not set up");
-    return parallel_->domain().Nd_d();
+    return lynx::LynxContext::instance().domain().Nd_d();
+}
+
+int Calculator::Nelectron() const {
+    return lynx::LynxContext::instance().Nelectron();
+}
+
+int Calculator::Natom() const {
+    return lynx::LynxContext::instance().Natom();
+}
+
+int Calculator::Nspin() const {
+    return lynx::LynxContext::instance().Nspin();
 }
 
 } // namespace pylynx

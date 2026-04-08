@@ -5,7 +5,6 @@
 #include "core/FDGrid.hpp"
 #include "core/Domain.hpp"
 #include "core/KPoints.hpp"
-#include "core/NDArray.hpp"
 #include "operators/FDStencil.hpp"
 #include "parallel/MPIComm.hpp"
 #include "parallel/HaloExchange.hpp"

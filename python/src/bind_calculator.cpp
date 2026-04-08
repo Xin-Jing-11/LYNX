@@ -46,6 +46,7 @@ void bind_calculator(py::module_& m) {
         .def_readwrite("elec_temp", &SystemConfig::elec_temp)
         .def_readwrite("smearing", &SystemConfig::smearing)
         .def_readwrite("xc", &SystemConfig::xc)
+        .def_readwrite("exx_params", &SystemConfig::exx_params)
         .def_readwrite("Nelectron", &SystemConfig::Nelectron)
         // K-points
         .def_readwrite("Kx", &SystemConfig::Kx)
@@ -115,6 +116,9 @@ void bind_calculator(py::module_& m) {
             py::gil_scoped_acquire acquire;
             return py::array_t<double>(6, s.data());
         }, "Compute stress tensor. Returns 6-component Voigt array in Ha/Bohr^3.")
+        .def("compute_pressure", &Calculator::compute_pressure,
+             py::call_guard<py::gil_scoped_release>(),
+             "Compute hydrostatic pressure in GPa.")
 
         // Property accessors
         .def_property_readonly("is_setup", &Calculator::is_setup)
@@ -137,6 +141,7 @@ void bind_calculator(py::module_& m) {
             d["Eself"] = e.Eself;
             d["Ec"] = e.Ec;
             d["Entropy"] = e.Entropy;
+            d["Eexx"] = e.Eexx;
             d["Etotal"] = e.Etotal;
             d["Eatom"] = e.Eatom;
             return d;
@@ -171,21 +176,21 @@ void bind_calculator(py::module_& m) {
 
         // Internal objects for mid-level usage
         .def_property_readonly("lattice", &Calculator::lattice,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("grid", &Calculator::grid,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("stencil", &Calculator::stencil,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("domain", &Calculator::domain,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("kpoints", &Calculator::kpoints,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("halo_exchange", &Calculator::halo,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("laplacian_op", &Calculator::laplacian,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("gradient_op", &Calculator::gradient,
-             py::return_value_policy::reference_internal)
+             py::return_value_policy::reference)
         .def_property_readonly("hamiltonian_op", &Calculator::hamiltonian,
              py::return_value_policy::reference_internal)
         .def_property_readonly("nonlocal_projector", &Calculator::nonlocal_projector,

@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include "core/types.hpp"
+#include "core/DeviceTag.hpp"
 
 namespace py = pybind11;
 
@@ -50,6 +51,26 @@ void bind_types(py::module_& m) {
         .value("MGGA_R2SCAN", XCType::MGGA_R2SCAN)
         .value("HYB_PBE0", XCType::HYB_PBE0)
         .value("HYB_HSE", XCType::HYB_HSE);
+
+    py::enum_<lynx::Device>(m, "Device")
+        .value("CPU", lynx::Device::CPU)
+        .value("GPU", lynx::Device::GPU)
+        .value("CPU_PINNED", lynx::Device::CPU_PINNED);
+
+    // EXXParams
+    py::class_<EXXParams>(m, "EXXParams")
+        .def(py::init<>())
+        .def_readwrite("exx_frac", &EXXParams::exx_frac)
+        .def_readwrite("hyb_range_fock", &EXXParams::hyb_range_fock)
+        .def_readwrite("exx_div_flag", &EXXParams::exx_div_flag)
+        .def_readwrite("maxit_fock", &EXXParams::maxit_fock)
+        .def_readwrite("minit_fock", &EXXParams::minit_fock)
+        .def_readwrite("tol_fock", &EXXParams::tol_fock)
+        .def("__repr__", [](const EXXParams& p) {
+            return "EXXParams(exx_frac=" + std::to_string(p.exx_frac) +
+                   ", hyb_range_fock=" + std::to_string(p.hyb_range_fock) +
+                   ", maxit_fock=" + std::to_string(p.maxit_fock) + ")";
+        });
 
     // Vec3
     py::class_<Vec3>(m, "Vec3")
