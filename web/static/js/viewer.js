@@ -264,10 +264,11 @@ class LYNXViewer {
     this.densityGroup = new THREE.Group(); // isosurface
     this.volumeGroup  = new THREE.Group(); // ray-marched volume
     this.sliceGroup   = new THREE.Group();
+    this.gridGroup    = new THREE.Group(); // 3D grid point cloud
     this.labelGroup   = new THREE.Group();
 
     [this.atomGroup, this.bondGroup, this.cellGroup,
-     this.densityGroup, this.volumeGroup, this.sliceGroup, this.labelGroup
+     this.densityGroup, this.volumeGroup, this.sliceGroup, this.gridGroup, this.labelGroup
     ].forEach(g => this.scene.add(g));
 
     // ── State ──
@@ -278,6 +279,9 @@ class LYNXViewer {
     this.volumeBox     = null;
     this.sliceMeshes   = {x:null, y:null, z:null};
     this.slicePositions= {x:0.5, y:0.5, z:0.5};
+    this.gridPoints    = null;
+    this.gridThreshold = 0.05;
+    this.gridPointSize = 3.0;
 
     this.isovalue      = 0.05;
     this.densityOpacity= 0.6;
@@ -289,6 +293,7 @@ class LYNXViewer {
     this.volumeSteps    = 160;
     this.volumePointSize= 3.0;
     this.currentColormap= 'orbital';
+    this.smoothNormals  = true;
 
     // Shared geometries
     this._sphereGeo   = new THREE.SphereBufferGeometry(1, 48, 32);
@@ -499,6 +504,7 @@ class LYNXViewer {
     this.camera.position.set(
       this._cellCenter.x+r*1.2, this._cellCenter.y+r*0.8, this._cellCenter.z+r*1.2);
     this.controls.update();
+    this._buildGridFloor();
   }
 
   // ═════════════════════════════════════════════════════════════════════
@@ -544,6 +550,7 @@ class LYNXViewer {
     this.updateIsosurface();
     this._buildVolumeRenderer();
     this._buildSlicePlanes();
+    this._buildGridCloud();
   }
 
   // ═════════════════════════════════════════════════════════════════════
@@ -558,7 +565,7 @@ class LYNXViewer {
       this.densityMesh = null;
     }
     const {values,shape,cell} = this.densityData;
-    const res = MarchingCubes.extract(values, shape, this.isovalue, cell);
+    const res = MarchingCubes.extract(values, shape, this.isovalue, cell, this.smoothNormals);
     if (!res.positions.length) return;
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(res.positions, 3));
@@ -580,6 +587,10 @@ class LYNXViewer {
   setDensityOpacity(o) {
     this.densityOpacity = o;
     if (this.densityMesh) this.densityMesh.material.opacity = o;
+  }
+  setSmoothNormals(v) {
+    this.smoothNormals = v;
+    this.updateIsosurface();
   }
   setDensityColor(hex) {
     this.densityColor = new THREE.Color(hex);
@@ -800,6 +811,134 @@ class LYNXViewer {
   setSlicePosition(axis, f) { this._updateSlice(axis, Math.max(0, Math.min(1, f))); }
 
   // ═════════════════════════════════════════════════════════════════════
+  //  DENSITY — 3D Grid point cloud (colored by density value)
+  // ═════════════════════════════════════════════════════════════════════
+  _buildGridCloud() {
+    // Clean up old
+    if (this.gridPoints) {
+      this.gridGroup.remove(this.gridPoints);
+      this.gridPoints.geometry.dispose();
+      this.gridPoints.material.dispose();
+      this.gridPoints = null;
+    }
+    if (!this.densityData) return;
+
+    const {values, shape, cell, min, max} = this.densityData;
+    const [Nx, Ny, Nz] = shape;
+    const range = max - min || 1;
+    const cm = this._getColormapData();
+    const threshold = this.gridThreshold;
+
+    // Lattice vectors per grid step
+    const ax = cell[0][0]/Nx, ay = cell[0][1]/Nx, az = cell[0][2]/Nx;
+    const bx = cell[1][0]/Ny, by = cell[1][1]/Ny, bz = cell[1][2]/Ny;
+    const cx = cell[2][0]/Nz, cy = cell[2][1]/Nz, cz = cell[2][2]/Nz;
+
+    // First pass: count points above threshold
+    let count = 0;
+    for (let i = 0; i < values.length; i++) {
+      const t = (values[i] - min) / range;
+      if (t >= threshold) count++;
+    }
+
+    if (count === 0) return;
+
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const sizes = new Float32Array(count);
+
+    let idx = 0;
+    for (let iz = 0; iz < Nz; iz++) {
+      for (let iy = 0; iy < Ny; iy++) {
+        for (let ix = 0; ix < Nx; ix++) {
+          const v = values[ix + Nx * (iy + Ny * iz)];
+          const t = (v - min) / range;
+          if (t < threshold) continue;
+
+          // Grid position to world
+          const wx = ix * ax + iy * bx + iz * cx;
+          const wy = ix * ay + iy * by + iz * cy;
+          const wz = ix * az + iy * bz + iz * cz;
+
+          positions[idx * 3]     = wx;
+          positions[idx * 3 + 1] = wy;
+          positions[idx * 3 + 2] = wz;
+
+          // Color from colormap
+          const rgb = Colormaps.sample(cm, t);
+          colors[idx * 3]     = rgb[0];
+          colors[idx * 3 + 1] = rgb[1];
+          colors[idx * 3 + 2] = rgb[2];
+
+          // Size proportional to density
+          sizes[idx] = this.gridPointSize * (0.3 + 0.7 * t);
+
+          idx++;
+        }
+      }
+    }
+
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geom.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uBaseSize: { value: this.gridPointSize },
+      },
+      vertexShader: `
+        attribute float size;
+        varying vec3 vColor;
+        void main() {
+          vColor = color;
+          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = size * (300.0 / -mvPos.z);
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        void main() {
+          // Circular points with soft edge
+          vec2 c = gl_PointCoord - vec2(0.5);
+          float r = length(c);
+          if (r > 0.5) discard;
+          float alpha = 1.0 - smoothstep(0.35, 0.5, r);
+          gl_FragColor = vec4(vColor, alpha * 0.85);
+        }
+      `,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+
+    this.gridPoints = new THREE.Points(geom, mat);
+    this.gridGroup.add(this.gridPoints);
+  }
+
+  updateGridCloud() {
+    this._buildGridCloud();
+  }
+
+  setGridThreshold(v) {
+    this.gridThreshold = v;
+    this._buildGridCloud();
+  }
+
+  setGridPointSize(v) {
+    this.gridPointSize = v;
+    if (this.gridPoints) {
+      this.gridPoints.material.uniforms.uBaseSize.value = v;
+      // Rebuild to update per-vertex sizes
+      this._buildGridCloud();
+    }
+  }
+
+  setGridVisible(v) { this.gridGroup.visible = v; }
+
+  // ═════════════════════════════════════════════════════════════════════
   //  VISIBILITY
   // ═════════════════════════════════════════════════════════════════════
   setAtomsVisible(v)   { this.atomGroup.visible = v; }
@@ -845,6 +984,56 @@ class LYNXViewer {
       ctx.fillRect(x,0,1,h);
     }
     return cv;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════
+  //  CAMERA CONTROLS (for viewpoint panel)
+  // ═════════════════════════════════════════════════════════════════════
+  setFOV(val) {
+    this.camera.fov = val;
+    this.camera.updateProjectionMatrix();
+  }
+
+  getCameraDistance() {
+    return this.camera.position.distanceTo(this.controls.target);
+  }
+
+  setCameraDistance(d) {
+    const dir = this.camera.position.clone().sub(this.controls.target);
+    const len = dir.length();
+    if (len < 0.001) return;
+    dir.normalize();
+    this.camera.position.copy(this.controls.target).addScaledVector(dir, d);
+    this.controls.update();
+  }
+
+  setAutoRotate(enabled, speed) {
+    this.controls.autoRotate = enabled;
+    this.controls.autoRotateSpeed = speed || 2.0;
+  }
+
+  resetView() {
+    this._centerCamera();
+  }
+
+  // ═════════════════════════════════════════════════════════════════════
+  //  GRID FLOOR (spatial reference plane)
+  // ═════════════════════════════════════════════════════════════════════
+  _buildGridFloor() {
+    if (this._gridFloor) {
+      this.scene.remove(this._gridFloor);
+    }
+    if (!this.cell) return;
+
+    const size = this._cellRadius * 3;
+    const divisions = 20;
+    const grid = new THREE.GridHelper(size, divisions, 0x1a2030, 0x0e1219);
+    grid.position.copy(this._cellCenter);
+    grid.position.y = -0.5;
+    grid.material.transparent = true;
+    grid.material.opacity = 0.3;
+    this._gridFloor = grid;
+    this.scene.add(grid);
   }
 
   dispose() {

@@ -1,6 +1,6 @@
 /**
  * LYNX DFT Web UI — Main application logic.
- * Handles config form, API calls, results display, SCF chart.
+ * Handles config form, API calls, results display, SCF chart, source linking.
  */
 
 (function() {
@@ -15,6 +15,7 @@
   let currentJobId = null;
   let scfHistory = [];
   let elementData = {};
+  let sourceMap = {};
 
   // =========================================================================
   // Init
@@ -33,14 +34,20 @@
       log('Warning: Could not load element data');
     }
 
+    // Fetch source map
+    try {
+      const resp = await fetch('/api/source-map');
+      sourceMap = await resp.json();
+    } catch(e) { /* optional */ }
+
     // Setup WebSocket
     setupSocket();
 
     // Setup UI event listeners
     setupUI();
 
-    // Load default example
-    loadExample('H2O');
+    // Load default example (bulk Si — periodic, representative)
+    loadExample('Si8');
 
     log('LYNX DFT Web UI initialized.');
   });
@@ -89,7 +96,6 @@
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
         document.getElementById(tab.dataset.tab).classList.add('active');
-        // Redraw SCF chart when switching to SCF tab (canvas may have been hidden)
         if (tab.dataset.tab === 'tab-scf') {
           requestAnimationFrame(() => drawSCFChart());
         }
@@ -106,11 +112,32 @@
       setTimeout(() => viewer._onResize(), 250);
     });
 
+    // Floating panel collapse
+    document.querySelectorAll('.floating-panel-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const panel = header.closest('.floating-panel');
+        panel.classList.toggle('collapsed');
+      });
+    });
+
     // Examples
     document.getElementById('btn-load-example').addEventListener('click', showExampleModal);
-    document.querySelector('.modal-close').addEventListener('click', hideExampleModal);
+    document.querySelector('#modal-examples .modal-close').addEventListener('click', hideExampleModal);
     document.getElementById('modal-examples').addEventListener('click', (e) => {
       if (e.target.id === 'modal-examples') hideExampleModal();
+    });
+
+    // Source modal close
+    document.getElementById('source-modal-close').addEventListener('click', hideSourceModal);
+    document.getElementById('modal-source').addEventListener('click', (e) => {
+      if (e.target.id === 'modal-source') hideSourceModal();
+    });
+
+    // Source link buttons
+    document.querySelectorAll('.source-link-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        showSourceModal(btn.dataset.source);
+      });
     });
 
     // Import / Export
@@ -130,7 +157,7 @@
       addAtomGroup('X', [[0, 0, 0]]);
     });
 
-    // Viewer controls
+    // ── Display toggles (in floating viz panel) ──
     document.getElementById('show-atoms').addEventListener('change', (e) => viewer.setAtomsVisible(e.target.checked));
     document.getElementById('show-bonds').addEventListener('change', (e) => viewer.setBondsVisible(e.target.checked));
     document.getElementById('show-cell').addEventListener('change', (e) => viewer.setCellVisible(e.target.checked));
@@ -140,7 +167,46 @@
     document.querySelectorAll('.cam-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         viewer.setCameraView(btn.dataset.view);
+        setTimeout(() => syncCameraDistance(), 500);
       });
+    });
+
+    // ── Viewpoint controls ──
+    document.getElementById('cam-distance').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('cam-distance-display').textContent = v.toFixed(0);
+      viewer.setCameraDistance(v);
+    });
+
+    document.getElementById('cam-fov').addEventListener('input', (e) => {
+      const v = parseInt(e.target.value);
+      document.getElementById('cam-fov-display').textContent = v;
+      viewer.setFOV(v);
+    });
+
+    document.getElementById('auto-rotate').addEventListener('change', (e) => {
+      const speed = parseFloat(document.getElementById('rotate-speed').value);
+      viewer.setAutoRotate(e.target.checked, speed);
+    });
+
+    document.getElementById('rotate-speed').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('rotate-speed-display').textContent = v.toFixed(1);
+      if (document.getElementById('auto-rotate').checked) {
+        viewer.setAutoRotate(true, v);
+      }
+    });
+
+    document.getElementById('btn-reset-view').addEventListener('click', () => {
+      viewer.resetView();
+      setTimeout(() => syncCameraDistance(), 500);
+    });
+
+    // Sync distance slider when user drags the 3D view
+    let syncTimer = null;
+    viewer.controls.addEventListener('change', () => {
+      if (syncTimer) clearTimeout(syncTimer);
+      syncTimer = setTimeout(syncCameraDistance, 50);
     });
 
     // ── Density mode tabs ──
@@ -150,6 +216,14 @@
         document.querySelectorAll('.density-tab-content').forEach(c => c.classList.add('hidden'));
         tab.classList.add('active');
         document.getElementById(tab.dataset.dtab).classList.remove('hidden');
+
+        // Auto-toggle visibility: show slices only on Slices tab, grid only on Grid tab
+        const isSlices = tab.dataset.dtab === 'dtab-slices';
+        const isGrid = tab.dataset.dtab === 'dtab-grid';
+        document.getElementById('show-slices').checked = isSlices;
+        viewer.setSlicesVisible(isSlices);
+        document.getElementById('show-grid').checked = isGrid;
+        viewer.setGridVisible(isGrid);
       });
     });
 
@@ -172,6 +246,10 @@
 
     document.getElementById('density-color').addEventListener('input', (e) => {
       viewer.setDensityColor(e.target.value);
+    });
+
+    document.getElementById('smooth-normals').addEventListener('change', (e) => {
+      viewer.setSmoothNormals(e.target.checked);
     });
 
     // ── Volume 3D controls ──
@@ -208,6 +286,29 @@
       viewer.setVolumeOpacity(v);
     });
 
+    // ── Grid 3D controls ──
+    document.getElementById('show-grid').addEventListener('change', (e) => {
+      viewer.setGridVisible(e.target.checked);
+    });
+
+    document.getElementById('grid-threshold').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('grid-thresh-display').textContent = v.toFixed(2);
+      viewer.setGridThreshold(v);
+    });
+
+    document.getElementById('grid-point-size').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('grid-size-display').textContent = v.toFixed(1);
+      viewer.setGridPointSize(v);
+    });
+
+    document.getElementById('grid-colormap').addEventListener('change', (e) => {
+      viewer.setColormap(e.target.value);
+      viewer.updateGridCloud();
+      updateColorbars();
+    });
+
     // ── Slice controls ──
     document.getElementById('show-slices').addEventListener('change', (e) => {
       viewer.setSlicesVisible(e.target.checked);
@@ -220,6 +321,76 @@
         viewer.setSlicePosition(axis, v);
       });
     });
+  }
+
+  function syncCameraDistance() {
+    if (!viewer) return;
+    const d = viewer.getCameraDistance();
+    const slider = document.getElementById('cam-distance');
+    slider.value = d;
+    document.getElementById('cam-distance-display').textContent = d.toFixed(0);
+  }
+
+  // =========================================================================
+  // Source Code Modal
+  // =========================================================================
+
+  async function showSourceModal(key) {
+    const info = sourceMap[key];
+    if (!info) {
+      log('No source mapping for: ' + key);
+      return;
+    }
+
+    const modal = document.getElementById('modal-source');
+    const title = document.getElementById('source-modal-title');
+    const tabs = document.getElementById('source-tabs');
+    const codeEl = document.getElementById('source-code-content');
+
+    title.textContent = key.charAt(0).toUpperCase() + key.slice(1) + ' — Source';
+
+    const files = [...info.source];
+    if (info.doc) files.push(info.doc);
+
+    tabs.innerHTML = files.map((f, i) => {
+      const name = f.split('/').pop();
+      return `<button class="btn btn-small ${i === 0 ? 'active' : ''}" data-file="${f}">${name}</button>`;
+    }).join('');
+
+    await loadSourceFile(files[0], codeEl);
+
+    tabs.querySelectorAll('.btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        tabs.querySelectorAll('.btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        await loadSourceFile(btn.dataset.file, codeEl);
+      });
+    });
+
+    modal.classList.remove('hidden');
+  }
+
+  async function loadSourceFile(filepath, codeEl) {
+    try {
+      const resp = await fetch('/api/source/' + filepath);
+      const data = await resp.json();
+      if (data.error) {
+        codeEl.textContent = '// Error: ' + data.error;
+        return;
+      }
+      codeEl.textContent = data.content;
+      if (window.Prism) {
+        const lang = filepath.endsWith('.md') ? 'markdown' : 'cpp';
+        codeEl.className = 'language-' + lang;
+        Prism.highlightElement(codeEl);
+      }
+    } catch(e) {
+      codeEl.textContent = '// Failed to load: ' + filepath;
+    }
+  }
+
+  function hideSourceModal() {
+    document.getElementById('modal-source').classList.add('hidden');
   }
 
   // =========================================================================
@@ -323,7 +494,6 @@
       }
     }
 
-    // Atoms
     document.getElementById('atom-groups').innerHTML = '';
     if (config.atoms) {
       for (const ag of config.atoms) {
@@ -357,8 +527,8 @@
       setVal('mixing-param', config.scf.mixing_parameter);
     }
 
-    // Update 3D viewer
     viewer.loadStructure(config);
+    setTimeout(() => syncCameraDistance(), 500);
   }
 
   // =========================================================================
@@ -388,13 +558,11 @@
       </div>
     `;
 
-    // Event: remove group
     group.querySelector('.btn-remove-group').addEventListener('click', () => {
       group.remove();
       updateViewerFromForm();
     });
 
-    // Event: add coordinate
     group.querySelector('.btn-add-coord').addEventListener('click', () => {
       const list = group.querySelector('.coord-list');
       list.insertAdjacentHTML('beforeend', coordRowHTML(0, 0, 0));
@@ -402,10 +570,7 @@
       updateViewerFromForm();
     });
 
-    // Attach events to existing coord rows
     group.querySelectorAll('.coord-row').forEach(row => attachCoordEvents(row));
-
-    // Update viewer when element changes
     group.querySelector('.atom-element').addEventListener('change', () => updateViewerFromForm());
 
     container.appendChild(group);
@@ -516,7 +681,7 @@
 
   function exportJSON() {
     const config = buildConfig();
-    delete config.parallel; // Don't export parallel settings
+    delete config.parallel;
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -553,10 +718,7 @@
       currentJobId = data.job_id;
       updateJobStatus('queued');
       log(`Job ${currentJobId} submitted.`);
-
-      // Subscribe for updates
       socket.emit('subscribe_job', { job_id: currentJobId });
-
     } catch(e) {
       log(`Error: ${e.message}`);
       updateJobStatus('error');
@@ -570,8 +732,7 @@
   async function stopSimulation() {
     if (!currentJobId) return;
     try {
-      const resp = await fetch(`/api/jobs/${currentJobId}/stop`, { method: 'POST' });
-      const data = await resp.json();
+      await fetch(`/api/jobs/${currentJobId}/stop`, { method: 'POST' });
       log(`Job ${currentJobId} stopped.`);
       updateJobStatus('stopped');
     } catch(e) {
@@ -606,7 +767,7 @@
 
       viewer.loadDensity(data);
       onDensityLoaded();
-      log('Preview density loaded. Switch between Isosurface / Volume 3D / Slices tabs.');
+      log('Preview density loaded.');
     } catch(e) {
       log(`Preview error: ${e.message}`);
     }
@@ -638,7 +799,6 @@
         }
       }
 
-      // Load stdout log
       if (data.log && data.log.length > 0) {
         clearStdout();
         for (const line of data.log) {
@@ -646,7 +806,6 @@
         }
       }
 
-      // Load density
       const densResp = await fetch(`/api/jobs/${jobId}/density`);
       const densData = await densResp.json();
       if (!densData.error) {
@@ -661,7 +820,6 @@
   }
 
   function displayResults(results) {
-    // Energy
     if (results.energy) {
       const tbody = document.querySelector('#energy-table tbody');
       tbody.innerHTML = '';
@@ -685,7 +843,6 @@
       document.getElementById('energy-placeholder').classList.add('hidden');
     }
 
-    // Forces
     if (results.forces && results.forces.length > 0) {
       const tbody = document.querySelector('#forces-table tbody');
       tbody.innerHTML = '';
@@ -697,15 +854,11 @@
       }
       document.getElementById('forces-table').classList.remove('hidden');
       document.getElementById('forces-placeholder').classList.add('hidden');
-
-      // Show force arrows
       viewer.showForces(results.forces);
     }
 
-    // Stress
     if (results.stress) {
       const s = results.stress.voigt || [0,0,0,0,0,0];
-      // Voigt order from parser: [σ_xx, σ_xy, σ_xz, σ_yy, σ_yz, σ_zz]
       const fmt = v => typeof v === 'number' ? v.toFixed(4) : '--';
       document.getElementById('s-xx').textContent = fmt(s[0]);
       document.getElementById('s-yy').textContent = fmt(s[3]);
@@ -719,7 +872,6 @@
       document.getElementById('stress-placeholder').classList.add('hidden');
     }
 
-    // SCF info
     if (results.scf) {
       const scf = results.scf;
       document.getElementById('scf-niter').textContent = scf.n_iterations || '--';
@@ -767,7 +919,6 @@
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
-    // Skip drawing if canvas is hidden (zero size) — will redraw on tab switch
     if (rect.width < 10 || rect.height < 10) return;
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
@@ -775,7 +926,6 @@
     const W = rect.width;
     const H = rect.height;
 
-    // Clear
     ctx.fillStyle = '#080b10';
     ctx.fillRect(0, 0, W, H);
 
@@ -783,7 +933,6 @@
     const plotW = W - pad.left - pad.right;
     const plotH = H - pad.top - pad.bottom;
 
-    // Data: plot log10(residual) vs iteration
     const residuals = scfHistory.map(d => Math.log10(Math.max(d.residual, 1e-15)));
     const iters = scfHistory.map(d => d.iter);
 
@@ -795,7 +944,6 @@
     function toX(i) { return pad.left + ((i - xMin) / (xMax - xMin || 1)) * plotW; }
     function toY(v) { return pad.top + ((yMax - v) / (yMax - yMin || 1)) * plotH; }
 
-    // Grid lines
     ctx.strokeStyle = '#151a23';
     ctx.lineWidth = 1;
     const nGridY = 5;
@@ -813,7 +961,6 @@
       ctx.fillText('1e' + yVal.toFixed(0), pad.left - 5, y + 3);
     }
 
-    // Axes
     ctx.strokeStyle = '#1e2738';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -822,7 +969,6 @@
     ctx.lineTo(pad.left + plotW, pad.top + plotH);
     ctx.stroke();
 
-    // X-axis labels
     ctx.fillStyle = '#4a5568';
     ctx.textAlign = 'center';
     ctx.font = '10px IBM Plex Mono, monospace';
@@ -831,7 +977,6 @@
       ctx.fillText(iters[i], toX(iters[i]), pad.top + plotH + 15);
     }
 
-    // Labels
     ctx.fillStyle = '#4a5568';
     ctx.font = '11px DM Sans, sans-serif';
     ctx.textAlign = 'center';
@@ -843,7 +988,6 @@
     ctx.fillText('Residual', 0, 0);
     ctx.restore();
 
-    // Data line with glow
     ctx.shadowColor = 'rgba(59, 130, 246, 0.4)';
     ctx.shadowBlur = 6;
     ctx.strokeStyle = '#3b82f6';
@@ -858,7 +1002,6 @@
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Data points
     ctx.fillStyle = '#3b82f6';
     for (let i = 0; i < iters.length; i++) {
       const x = toX(iters[i]);
@@ -914,7 +1057,6 @@
       log('Error: ' + error);
     }
 
-    // Update run / stop buttons
     const btn = document.getElementById('btn-run');
     const btnStop = document.getElementById('btn-stop');
     const isRunning = (status === 'running' || status === 'queued' || status === 'submitting');
@@ -943,7 +1085,6 @@
   function appendStdoutLine(line) {
     const el = document.getElementById('stdout-output');
     if (!el) return;
-    // Show the stdout section
     el.closest('.stdout-section').classList.remove('hidden');
     el.textContent += line + '\n';
     el.scrollTop = el.scrollHeight;
@@ -955,10 +1096,6 @@
   }
 
   // =========================================================================
-  // Helpers
-  // =========================================================================
-
-  // =========================================================================
   // Colorbar rendering
   // =========================================================================
 
@@ -967,7 +1104,6 @@
     const min = viewer.densityData.min;
     const max = viewer.densityData.max;
 
-    // Volume colorbar
     const canvas1 = document.getElementById('colorbar-canvas');
     if (canvas1) {
       const bar = viewer.renderColorbar(canvas1.width, canvas1.height);
@@ -977,7 +1113,6 @@
     document.getElementById('colorbar-min').textContent = min.toFixed(3);
     document.getElementById('colorbar-max').textContent = max.toFixed(3);
 
-    // Slice colorbar
     const canvas2 = document.getElementById('colorbar-canvas-s');
     if (canvas2) {
       const bar = viewer.renderColorbar(canvas2.width, canvas2.height);
@@ -986,32 +1121,41 @@
     }
     document.getElementById('colorbar-min-s').textContent = min.toFixed(3);
     document.getElementById('colorbar-max-s').textContent = max.toFixed(3);
+
+    // Grid colorbar
+    const canvas3 = document.getElementById('colorbar-canvas-g');
+    if (canvas3) {
+      const bar = viewer.renderColorbar(canvas3.width, canvas3.height);
+      const ctx = canvas3.getContext('2d');
+      ctx.drawImage(bar, 0, 0, canvas3.width, canvas3.height);
+    }
+    document.getElementById('colorbar-min-g').textContent = min.toFixed(3);
+    document.getElementById('colorbar-max-g').textContent = max.toFixed(3);
   }
 
-  /**
-   * Called after density data is loaded (from preview or job results).
-   * Enables all density visualization modes and updates UI.
-   */
   function onDensityLoaded() {
-    // Enable isosurface
     document.getElementById('show-density').checked = true;
     viewer.setDensityVisible(true);
     const iso = viewer.densityData.min + 0.3 * (viewer.densityData.max - viewer.densityData.min);
     document.getElementById('iso-value-display').textContent = iso.toFixed(4);
 
-    // Enable volume
     document.getElementById('show-volume').checked = true;
     viewer.setVolumeVisible(true);
 
-    // Enable slices
-    document.getElementById('show-slices').checked = true;
-    viewer.setSlicesVisible(true);
+    document.getElementById('show-slices').checked = false;
+    viewer.setSlicesVisible(false);
 
-    // Activate Volume tab by default (the new feature)
+    document.getElementById('show-grid').checked = false;
+    viewer.setGridVisible(false);
+
     document.querySelectorAll('.density-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.density-tab-content').forEach(c => c.classList.add('hidden'));
-    document.querySelector('[data-dtab="dtab-volume"]').classList.add('active');
-    document.getElementById('dtab-volume').classList.remove('hidden');
+    document.querySelector('[data-dtab="dtab-grid"]').classList.add('active');
+    document.getElementById('dtab-grid').classList.remove('hidden');
+
+    // Auto-enable grid view on load
+    document.getElementById('show-grid').checked = true;
+    viewer.setGridVisible(true);
 
     updateColorbars();
   }
