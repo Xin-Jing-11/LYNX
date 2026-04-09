@@ -3,6 +3,8 @@
  *
  * Input:  3D Float32Array (C-order: z varies slowest), shape [Nx, Ny, Nz]
  * Output: {positions: Float32Array, normals: Float32Array} — triangle soup
+ *
+ * Supports gradient-based vertex normals for smooth shading.
  */
 
 const MarchingCubes = (() => {
@@ -28,7 +30,6 @@ const MarchingCubes = (() => {
   ]);
 
   // Triangle table: for each of 256 configs, up to 15 edge indices (5 triangles max), -1 terminated
-  // This is the standard MC lookup table, compressed.
   const TRI_TABLE = [
     [-1],
     [0,8,3,-1],
@@ -288,15 +289,66 @@ const MarchingCubes = (() => {
     [-1],
   ];
 
+  // ── Trilinear interpolation for smooth gradient normals ──
+
+  function sampleTrilinear(data, Nx, Ny, Nz, fx, fy, fz) {
+    // Clamp to valid range
+    fx = Math.max(0, Math.min(Nx - 1.001, fx));
+    fy = Math.max(0, Math.min(Ny - 1.001, fy));
+    fz = Math.max(0, Math.min(Nz - 1.001, fz));
+
+    const ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+    const dx = fx - ix, dy = fy - iy, dz = fz - iz;
+
+    const ix1 = Math.min(ix + 1, Nx - 1);
+    const iy1 = Math.min(iy + 1, Ny - 1);
+    const iz1 = Math.min(iz + 1, Nz - 1);
+
+    // data is C-order: index = ix + Nx * (iy + Ny * iz)
+    const c000 = data[ix  + Nx * (iy  + Ny * iz )];
+    const c100 = data[ix1 + Nx * (iy  + Ny * iz )];
+    const c010 = data[ix  + Nx * (iy1 + Ny * iz )];
+    const c110 = data[ix1 + Nx * (iy1 + Ny * iz )];
+    const c001 = data[ix  + Nx * (iy  + Ny * iz1)];
+    const c101 = data[ix1 + Nx * (iy  + Ny * iz1)];
+    const c011 = data[ix  + Nx * (iy1 + Ny * iz1)];
+    const c111 = data[ix1 + Nx * (iy1 + Ny * iz1)];
+
+    const c00 = c000 * (1 - dx) + c100 * dx;
+    const c01 = c001 * (1 - dx) + c101 * dx;
+    const c10 = c010 * (1 - dx) + c110 * dx;
+    const c11 = c011 * (1 - dx) + c111 * dx;
+
+    const c0 = c00 * (1 - dy) + c10 * dy;
+    const c1 = c01 * (1 - dy) + c11 * dy;
+
+    return c0 * (1 - dz) + c1 * dz;
+  }
+
+  function gradientNormal(data, Nx, Ny, Nz, fx, fy, fz) {
+    const h = 0.5;
+    const gx = sampleTrilinear(data, Nx, Ny, Nz, fx + h, fy, fz) -
+               sampleTrilinear(data, Nx, Ny, Nz, fx - h, fy, fz);
+    const gy = sampleTrilinear(data, Nx, Ny, Nz, fx, fy + h, fz) -
+               sampleTrilinear(data, Nx, Ny, Nz, fx, fy - h, fz);
+    const gz = sampleTrilinear(data, Nx, Ny, Nz, fx, fy, fz + h) -
+               sampleTrilinear(data, Nx, Ny, Nz, fx, fy, fz - h);
+    // Normal points from high density to low (negate the gradient)
+    let len = Math.sqrt(gx * gx + gy * gy + gz * gz) || 1;
+    return [-gx / len, -gy / len, -gz / len];
+  }
+
   /**
    * Extract isosurface from volumetric data.
    * @param {Float32Array} data - Volumetric data in C-order (x varies fastest)
    * @param {number[]} shape - [Nx, Ny, Nz]
    * @param {number} isovalue - Isosurface threshold
    * @param {number[][]} cell - 3x3 lattice vectors
+   * @param {boolean} [smoothNormals=true] - Use gradient-based normals for smooth shading
    * @returns {{positions: Float32Array, normals: Float32Array}}
    */
-  function extract(data, shape, isovalue, cell) {
+  function extract(data, shape, isovalue, cell, smoothNormals) {
+    if (smoothNormals === undefined) smoothNormals = true;
     const [Nx, Ny, Nz] = shape;
     const positions = [];
     const normals = [];
@@ -316,6 +368,15 @@ const MarchingCubes = (() => {
         fx * ay + fy * by + fz * cy,
         fx * az + fy * bz + fz * cz,
       ];
+    }
+
+    // Transform a grid-space normal to world-space
+    function normalToWorld(ngx, ngy, ngz) {
+      const wx = ngx * ax + ngy * bx + ngz * cx;
+      const wy = ngx * ay + ngy * by + ngz * cy;
+      const wz = ngx * az + ngy * bz + ngz * cz;
+      const len = Math.sqrt(wx * wx + wy * wy + wz * wz) || 1;
+      return [wx / len, wy / len, wz / len];
     }
 
     function interp(x1, y1, z1, v1, x2, y2, z2, v2) {
@@ -381,15 +442,27 @@ const MarchingCubes = (() => {
 
             positions.push(...wa, ...wb, ...wc);
 
-            // Compute face normal
-            const ux = wb[0]-wa[0], uy = wb[1]-wa[1], uz = wb[2]-wa[2];
-            const vx = wc[0]-wa[0], vy = wc[1]-wa[1], vz = wc[2]-wa[2];
-            let nx = uy*vz - uz*vy;
-            let ny = uz*vx - ux*vz;
-            let nz = ux*vy - uy*vx;
-            const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
-            nx /= len; ny /= len; nz /= len;
-            normals.push(nx,ny,nz, nx,ny,nz, nx,ny,nz);
+            if (smoothNormals) {
+              // Gradient-based vertex normals (smooth shading)
+              const gna = gradientNormal(data, Nx, Ny, Nz, a[0], a[1], a[2]);
+              const gnb = gradientNormal(data, Nx, Ny, Nz, b[0], b[1], b[2]);
+              const gnc = gradientNormal(data, Nx, Ny, Nz, c[0], c[1], c[2]);
+              // Transform normals from grid space to world space
+              const wna = normalToWorld(gna[0], gna[1], gna[2]);
+              const wnb = normalToWorld(gnb[0], gnb[1], gnb[2]);
+              const wnc = normalToWorld(gnc[0], gnc[1], gnc[2]);
+              normals.push(...wna, ...wnb, ...wnc);
+            } else {
+              // Flat face normal (original behavior)
+              const ux = wb[0]-wa[0], uy = wb[1]-wa[1], uz = wb[2]-wa[2];
+              const vx = wc[0]-wa[0], vy = wc[1]-wa[1], vz = wc[2]-wa[2];
+              let nx = uy*vz - uz*vy;
+              let ny = uz*vx - ux*vz;
+              let nz = ux*vy - uy*vx;
+              const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+              nx /= len; ny /= len; nz /= len;
+              normals.push(nx,ny,nz, nx,ny,nz, nx,ny,nz);
+            }
           }
         }
       }

@@ -151,7 +151,7 @@ LYNXRHO_HEADER_FMT = "<8s 5I I 9d d"
 LYNXRHO_HEADER_STRUCT_SIZE = struct.calcsize(LYNXRHO_HEADER_FMT)
 
 
-def read_density_lynxrho(filepath: Path, max_dim: int = 60) -> dict | None:
+def read_density_lynxrho(filepath: Path, max_dim: int = 120, interp_order: int = 3) -> dict | None:
     """Read a LYNXRHO binary density file by parsing its header.
 
     Returns dict with shape, min, max, cell, data_base64 (Float32, C-order)
@@ -205,11 +205,11 @@ def read_density_lynxrho(filepath: Path, max_dim: int = 60) -> dict | None:
     # Reshape column-major (Fortran order, as written by C++ with x-fastest)
     rho = rho_raw.reshape((nx, ny, nz), order="F")
 
-    # Downsample for browser
+    # Resample for browser (cubic interpolation for smooth visualization)
     factor = max_dim / max(nx, ny, nz)
-    if factor < 1.0:
+    if abs(factor - 1.0) > 0.01:
         from scipy.ndimage import zoom as nd_zoom
-        rho = nd_zoom(rho, factor, order=1)
+        rho = nd_zoom(rho, factor, order=interp_order)
 
     rho_f32 = rho.astype(np.float32)
     return {
@@ -221,12 +221,12 @@ def read_density_lynxrho(filepath: Path, max_dim: int = 60) -> dict | None:
     }
 
 
-def read_density(job_dir: Path, max_dim: int = 60) -> dict | None:
+def read_density(job_dir: Path, max_dim: int = 120, interp_order: int = 3) -> dict | None:
     """Read density from job directory. Tries LYNXRHO binary first, then legacy JSON."""
     density_file = job_dir / "electron_density.bin"
 
     # Try LYNXRHO binary header first
-    data = read_density_lynxrho(density_file, max_dim)
+    data = read_density_lynxrho(density_file, max_dim, interp_order)
     if data is not None:
         return data
 
@@ -252,9 +252,9 @@ def read_density(job_dir: Path, max_dim: int = 60) -> dict | None:
     rho = rho[:expected].reshape((Nx, Ny, Nz), order="F")
 
     factor = max_dim / max(Nx, Ny, Nz)
-    if factor < 1.0:
+    if abs(factor - 1.0) > 0.01:
         from scipy.ndimage import zoom as nd_zoom
-        rho = nd_zoom(rho, factor, order=1)
+        rho = nd_zoom(rho, factor, order=interp_order)
 
     rho_f32 = rho.astype(np.float32)
     return {
@@ -322,9 +322,9 @@ def generate_demo_density(config: dict) -> dict:
 
     max_dim = 60
     factor = max_dim / max(Nx, Ny, Nz)
-    if factor < 1.0:
+    if abs(factor - 1.0) > 0.01:
         from scipy.ndimage import zoom as nd_zoom
-        rho = nd_zoom(rho, factor, order=1)
+        rho = nd_zoom(rho, factor, order=interp_order)
 
     rho_f32 = rho.astype(np.float32)
     return {
@@ -960,7 +960,11 @@ def get_density(job_id: str):
         return jsonify({"error": "not found"}), 404
     job_dir = Path(jobs[job_id]["dir"])
 
-    data = read_density(job_dir)
+    from flask import request as flask_request
+    max_dim = flask_request.args.get("max_dim", 120, type=int)
+    interp_order = flask_request.args.get("interp_order", 3, type=int)
+
+    data = read_density(job_dir, max_dim=max_dim, interp_order=interp_order)
     if data is None:
         # Try generating from config
         config_file = job_dir / "input.json"
@@ -972,6 +976,48 @@ def get_density(job_id: str):
             return jsonify({"error": "no density data"}), 404
 
     return jsonify(data)
+
+
+# ---------------------------------------------------------------------------
+# Source code linking API
+# ---------------------------------------------------------------------------
+
+SOURCE_MAP = {
+    "scf": {"source": ["src/physics/SCF.cpp"], "doc": "doc/11_mixing.md"},
+    "energy": {"source": ["src/physics/Energy.cpp"], "doc": "doc/08_total_energy.md"},
+    "xc": {"source": ["src/xc/XCFunctional.cpp"], "doc": "doc/07_exchange_correlation.md"},
+    "forces": {"source": ["src/physics/Forces.cpp"], "doc": "doc/09_forces.md"},
+    "stress": {"source": ["src/physics/Stress.cpp"], "doc": "doc/10_stress.md"},
+    "density": {"source": ["src/electronic/ElectronDensity.cpp"], "doc": "doc/05_density_and_occupation.md"},
+    "electrostatics": {"source": ["src/physics/Electrostatics.cpp"], "doc": "doc/06_electrostatics.md"},
+    "eigensolver": {"source": ["src/solvers/EigenSolver.cpp"], "doc": "doc/04_eigensolver.md"},
+    "hamiltonian": {"source": ["src/operators/Hamiltonian.cpp"], "doc": "doc/03_hamiltonian.md"},
+    "pseudopotential": {"source": ["src/atoms/Pseudopotential.cpp"], "doc": "doc/02_pseudopotentials.md"},
+    "kpoints": {"source": ["src/core/KPoints.hpp"], "doc": "doc/12_kpoints.md"},
+    "overview": {"source": ["src/main.cpp"], "doc": "doc/00_overview.md"},
+}
+
+
+@app.route("/api/source-map")
+def get_source_map():
+    return jsonify(SOURCE_MAP)
+
+
+@app.route("/api/source/<path:filepath>")
+def get_source(filepath: str):
+    safe = Path(filepath)
+    if ".." in safe.parts:
+        return jsonify({"error": "invalid path"}), 400
+    full = PROJECT_DIR / safe
+    if not full.exists():
+        return jsonify({"error": "not found"}), 404
+    if not full.is_file():
+        return jsonify({"error": "not a file"}), 400
+    try:
+        content = full.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"path": filepath, "content": content})
 
 
 @app.route("/api/jobs/<job_id>/log")

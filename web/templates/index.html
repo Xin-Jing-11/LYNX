@@ -5,14 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LYNX DFT Simulator</title>
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
 </head>
 <body>
   <!-- Top Bar -->
   <header id="topbar">
     <div class="topbar-left">
+      <div class="logo-mark">L</div>
       <h1>LYNX <span class="accent">DFT</span></h1>
       <span class="subtitle">Real-Space Density Functional Theory</span>
     </div>
@@ -46,6 +50,20 @@
         <button class="modal-close">&times;</button>
       </div>
       <div class="modal-body" id="example-list"></div>
+    </div>
+  </div>
+
+  <!-- Source Code Modal -->
+  <div id="modal-source" class="modal hidden">
+    <div class="modal-content modal-wide">
+      <div class="modal-header">
+        <h2 id="source-modal-title">Source Code</h2>
+        <button class="modal-close" id="source-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="source-tab-bar" id="source-tabs"></div>
+        <pre id="source-code-block" class="source-code"><code class="language-cpp" id="source-code-content"></code></pre>
+      </div>
     </div>
   </div>
 
@@ -276,143 +294,190 @@
     <!-- Center: 3D Viewer -->
     <main id="viewer-container">
       <div id="viewer-3d">
-        <!-- Camera preset buttons (overlay) -->
-        <div id="camera-presets">
-          <div class="cam-group">
-            <span class="cam-group-label">Axis</span>
-            <button class="cam-btn" data-view="+x" title="View along +X">+X</button>
-            <button class="cam-btn" data-view="-x" title="View along -X">&minus;X</button>
-            <button class="cam-btn" data-view="+y" title="View along +Y">+Y</button>
-            <button class="cam-btn" data-view="-y" title="View along -Y">&minus;Y</button>
-            <button class="cam-btn" data-view="+z" title="View along +Z">+Z</button>
-            <button class="cam-btn" data-view="-z" title="View along -Z">&minus;Z</button>
-          </div>
-          <div class="cam-group">
-            <span class="cam-group-label">Iso</span>
-            <button class="cam-btn" data-view="iso1" title="Isometric view 1">&#x2B1A; 1</button>
-            <button class="cam-btn" data-view="iso2" title="Isometric view 2">&#x2B1A; 2</button>
-            <button class="cam-btn" data-view="iso3" title="Isometric view 3">&#x2B1A; 3</button>
-            <button class="cam-btn" data-view="iso4" title="Isometric view 4">&#x2B1A; 4</button>
-          </div>
-        </div>
-      </div>
 
-      <!-- Viewer bottom controls -->
-      <div id="viewer-controls">
-        <!-- Row 1: toggles -->
-        <div class="viewer-toolbar">
-          <label class="toggle-label">
-            <input type="checkbox" id="show-atoms" checked> Atoms
-          </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="show-bonds" checked> Bonds
-          </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="show-cell" checked> Unit Cell
-          </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="show-labels"> Labels
-          </label>
-        </div>
-
-        <!-- Row 2: Density visualization mode tabs -->
-        <div id="density-section">
-          <div class="density-tab-bar">
-            <button class="density-tab" data-dtab="dtab-iso">Isosurface</button>
-            <button class="density-tab" data-dtab="dtab-volume">Volume 3D</button>
-            <button class="density-tab" data-dtab="dtab-slices">Slices</button>
+        <!-- Floating Panel: Visualization Options (top-left) -->
+        <div class="floating-panel" id="viz-panel">
+          <div class="floating-panel-header" data-panel="viz-panel">
+            <span class="fp-title">Visualization</span>
+            <button class="fp-collapse-btn">&#9660;</button>
           </div>
-
-          <!-- Isosurface controls -->
-          <div id="dtab-iso" class="density-tab-content">
-            <div class="density-row">
-              <label class="toggle-label">
-                <input type="checkbox" id="show-density"> Enable
-              </label>
-              <div class="slider-group flex1">
-                <label>Isovalue: <span id="iso-value-display">0.05</span></label>
-                <input type="range" id="iso-slider" min="0" max="1" step="0.001" value="0.3">
-              </div>
-              <div class="slider-group" style="min-width:90px">
-                <label>Opacity: <span id="opacity-display">0.6</span></label>
-                <input type="range" id="opacity-slider" min="0" max="1" step="0.01" value="0.6">
-              </div>
-              <div class="form-group inline">
-                <label>Color</label>
-                <input type="color" id="density-color" value="#4488ff">
+          <div class="floating-panel-body">
+            <!-- Display toggles -->
+            <div class="fp-section">
+              <div class="fp-section-title">Display</div>
+              <div class="fp-toggle-row">
+                <label class="toggle-label"><input type="checkbox" id="show-atoms" checked> Atoms</label>
+                <label class="toggle-label"><input type="checkbox" id="show-bonds" checked> Bonds</label>
+                <label class="toggle-label"><input type="checkbox" id="show-cell" checked> Cell</label>
+                <label class="toggle-label"><input type="checkbox" id="show-labels"> Labels</label>
               </div>
             </div>
-          </div>
 
-          <!-- Volume 3D controls -->
-          <div id="dtab-volume" class="density-tab-content hidden">
-            <div class="density-row">
-              <label class="toggle-label">
-                <input type="checkbox" id="show-volume"> Enable
-              </label>
-              <div class="form-group inline">
-                <label>Colormap</label>
-                <select id="vol-colormap">
-                  <option value="orbital" selected>Orbital</option>
-                  <option value="viridis">Viridis</option>
-                  <option value="plasma">Plasma</option>
-                  <option value="inferno">Inferno</option>
-                  <option value="coolwarm">Coolwarm</option>
-                  <option value="blueRed">Blue-Red</option>
-                </select>
+            <!-- Density mode tabs -->
+            <div class="fp-section">
+              <div class="fp-section-title">Density</div>
+              <div class="density-tab-bar">
+                <button class="density-tab active" data-dtab="dtab-iso">Isosurface</button>
+                <button class="density-tab" data-dtab="dtab-volume">Volume</button>
+                <button class="density-tab" data-dtab="dtab-slices">Slices</button>
               </div>
-              <div class="slider-group flex1">
-                <label>Threshold: <span id="vol-thresh-low-display">0.08</span></label>
-                <input type="range" id="vol-thresh-low" min="0" max="0.5" step="0.005" value="0.08">
-              </div>
-              <div class="slider-group" style="min-width:90px">
-                <label>Brightness: <span id="vol-brightness-display">1.8</span></label>
-                <input type="range" id="vol-brightness" min="0.2" max="5.0" step="0.1" value="1.8">
-              </div>
-              <div class="slider-group" style="min-width:80px">
-                <label>Quality: <span id="vol-steps-display">160</span></label>
-                <input type="range" id="vol-steps" min="32" max="256" step="8" value="160">
-              </div>
-              <div class="slider-group" style="min-width:80px">
-                <label>Opacity: <span id="vol-opacity-display">0.70</span></label>
-                <input type="range" id="vol-opacity" min="0" max="1" step="0.01" value="0.70">
-              </div>
-            </div>
-            <div class="colorbar-container">
-              <span class="colorbar-label" id="colorbar-min">0.00</span>
-              <canvas id="colorbar-canvas" width="200" height="14"></canvas>
-              <span class="colorbar-label" id="colorbar-max">1.00</span>
-              <span class="colorbar-unit">e/Bohr&sup3;</span>
-            </div>
-          </div>
 
-          <!-- Slice controls -->
-          <div id="dtab-slices" class="density-tab-content hidden">
-            <div class="density-row">
-              <label class="toggle-label">
-                <input type="checkbox" id="show-slices"> Enable
-              </label>
-              <div class="slider-group flex1">
-                <label>X slice: <span id="slice-x-display">0.50</span></label>
-                <input type="range" id="slice-x" min="0" max="1" step="0.01" value="0.50">
+              <!-- Isosurface controls -->
+              <div id="dtab-iso" class="density-tab-content">
+                <div class="fp-control-row">
+                  <label class="toggle-label"><input type="checkbox" id="show-density"> Enable</label>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Isovalue: <span id="iso-value-display">0.05</span></label>
+                    <input type="range" id="iso-slider" min="0" max="1" step="0.001" value="0.3">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Opacity: <span id="opacity-display">0.6</span></label>
+                    <input type="range" id="opacity-slider" min="0" max="1" step="0.01" value="0.6">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="form-group inline">
+                    <label>Color</label>
+                    <input type="color" id="density-color" value="#4488ff">
+                  </div>
+                  <label class="toggle-label"><input type="checkbox" id="smooth-normals" checked> Smooth</label>
+                </div>
               </div>
-              <div class="slider-group flex1">
-                <label>Y slice: <span id="slice-y-display">0.50</span></label>
-                <input type="range" id="slice-y" min="0" max="1" step="0.01" value="0.50">
+
+              <!-- Volume 3D controls -->
+              <div id="dtab-volume" class="density-tab-content hidden">
+                <div class="fp-control-row">
+                  <label class="toggle-label"><input type="checkbox" id="show-volume"> Enable</label>
+                  <div class="form-group inline">
+                    <label>Colormap</label>
+                    <select id="vol-colormap">
+                      <option value="orbital" selected>Orbital</option>
+                      <option value="viridis">Viridis</option>
+                      <option value="plasma">Plasma</option>
+                      <option value="inferno">Inferno</option>
+                      <option value="coolwarm">Coolwarm</option>
+                      <option value="blueRed">Blue-Red</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Threshold: <span id="vol-thresh-low-display">0.08</span></label>
+                    <input type="range" id="vol-thresh-low" min="0" max="0.5" step="0.005" value="0.08">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Brightness: <span id="vol-brightness-display">1.8</span></label>
+                    <input type="range" id="vol-brightness" min="0.2" max="5.0" step="0.1" value="1.8">
+                  </div>
+                </div>
+                <div class="fp-control-row two-col">
+                  <div class="slider-group">
+                    <label>Quality: <span id="vol-steps-display">160</span></label>
+                    <input type="range" id="vol-steps" min="32" max="256" step="8" value="160">
+                  </div>
+                  <div class="slider-group">
+                    <label>Opacity: <span id="vol-opacity-display">0.70</span></label>
+                    <input type="range" id="vol-opacity" min="0" max="1" step="0.01" value="0.70">
+                  </div>
+                </div>
+                <div class="colorbar-container">
+                  <span class="colorbar-label" id="colorbar-min">0.00</span>
+                  <canvas id="colorbar-canvas" width="200" height="14"></canvas>
+                  <span class="colorbar-label" id="colorbar-max">1.00</span>
+                  <span class="colorbar-unit">e/Bohr&sup3;</span>
+                </div>
               </div>
-              <div class="slider-group flex1">
-                <label>Z slice: <span id="slice-z-display">0.50</span></label>
-                <input type="range" id="slice-z" min="0" max="1" step="0.01" value="0.50">
+
+              <!-- Slice controls -->
+              <div id="dtab-slices" class="density-tab-content hidden">
+                <div class="fp-control-row">
+                  <label class="toggle-label"><input type="checkbox" id="show-slices"> Enable</label>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>X slice: <span id="slice-x-display">0.50</span></label>
+                    <input type="range" id="slice-x" min="0" max="1" step="0.01" value="0.50">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Y slice: <span id="slice-y-display">0.50</span></label>
+                    <input type="range" id="slice-y" min="0" max="1" step="0.01" value="0.50">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Z slice: <span id="slice-z-display">0.50</span></label>
+                    <input type="range" id="slice-z" min="0" max="1" step="0.01" value="0.50">
+                  </div>
+                </div>
+                <div class="colorbar-container">
+                  <span class="colorbar-label" id="colorbar-min-s">0.00</span>
+                  <canvas id="colorbar-canvas-s" width="200" height="14"></canvas>
+                  <span class="colorbar-label" id="colorbar-max-s">1.00</span>
+                  <span class="colorbar-unit">e/Bohr&sup3;</span>
+                </div>
               </div>
-            </div>
-            <div class="colorbar-container">
-              <span class="colorbar-label" id="colorbar-min-s">0.00</span>
-              <canvas id="colorbar-canvas-s" width="200" height="14"></canvas>
-              <span class="colorbar-label" id="colorbar-max-s">1.00</span>
-              <span class="colorbar-unit">e/Bohr&sup3;</span>
             </div>
           </div>
         </div>
+
+        <!-- Floating Panel: Viewpoint (bottom-left) -->
+        <div class="floating-panel" id="viewpoint-panel">
+          <div class="floating-panel-header" data-panel="viewpoint-panel">
+            <span class="fp-title">Viewpoint</span>
+            <button class="fp-collapse-btn">&#9660;</button>
+          </div>
+          <div class="floating-panel-body">
+            <div class="fp-section">
+              <div class="fp-section-title">Presets</div>
+              <div class="cam-preset-grid">
+                <button class="cam-btn" data-view="+x">+X</button>
+                <button class="cam-btn" data-view="-x">&minus;X</button>
+                <button class="cam-btn" data-view="+y">+Y</button>
+                <button class="cam-btn" data-view="-y">&minus;Y</button>
+                <button class="cam-btn" data-view="+z">+Z</button>
+                <button class="cam-btn" data-view="-z">&minus;Z</button>
+                <button class="cam-btn" data-view="iso1">Iso 1</button>
+                <button class="cam-btn" data-view="iso2">Iso 2</button>
+                <button class="cam-btn" data-view="iso3">Iso 3</button>
+                <button class="cam-btn" data-view="iso4">Iso 4</button>
+              </div>
+            </div>
+            <div class="fp-section">
+              <div class="fp-section-title">Camera</div>
+              <div class="fp-control-row">
+                <div class="slider-group">
+                  <label>Distance: <span id="cam-distance-display">25</span></label>
+                  <input type="range" id="cam-distance" min="2" max="200" step="0.5" value="25">
+                </div>
+              </div>
+              <div class="fp-control-row">
+                <div class="slider-group">
+                  <label>FOV: <span id="cam-fov-display">45</span>&deg;</label>
+                  <input type="range" id="cam-fov" min="15" max="90" step="1" value="45">
+                </div>
+              </div>
+              <div class="fp-control-row">
+                <label class="toggle-label"><input type="checkbox" id="auto-rotate"> Auto-Rotate</label>
+                <div class="slider-group" style="flex:1; min-width:60px;">
+                  <label>Speed: <span id="rotate-speed-display">2.0</span></label>
+                  <input type="range" id="rotate-speed" min="0.5" max="10" step="0.5" value="2">
+                </div>
+              </div>
+              <div class="fp-control-row">
+                <button class="btn btn-small btn-secondary" id="btn-reset-view">Reset View</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </main>
 
@@ -434,6 +499,10 @@
 
         <!-- SCF Convergence -->
         <div id="tab-scf" class="tab-content active">
+          <div class="tab-content-header">
+            <span></span>
+            <button class="source-link-btn" data-source="scf" title="View source code">&lt;/&gt;</button>
+          </div>
           <div class="placeholder-msg" id="scf-placeholder">Run a simulation to see SCF convergence</div>
           <canvas id="scf-chart" class="hidden" width="400" height="250"></canvas>
           <div id="scf-info" class="info-grid hidden">
@@ -446,6 +515,10 @@
 
         <!-- Energy -->
         <div id="tab-energy" class="tab-content">
+          <div class="tab-content-header">
+            <span></span>
+            <button class="source-link-btn" data-source="energy" title="View source code">&lt;/&gt;</button>
+          </div>
           <div class="placeholder-msg" id="energy-placeholder">No energy data yet</div>
           <table id="energy-table" class="data-table hidden">
             <thead><tr><th>Component</th><th>Value (Ha)</th></tr></thead>
@@ -455,6 +528,10 @@
 
         <!-- Forces -->
         <div id="tab-forces" class="tab-content">
+          <div class="tab-content-header">
+            <span></span>
+            <button class="source-link-btn" data-source="forces" title="View source code">&lt;/&gt;</button>
+          </div>
           <div class="placeholder-msg" id="forces-placeholder">No force data yet</div>
           <table id="forces-table" class="data-table hidden">
             <thead><tr><th>Atom</th><th>Element</th><th>Fx</th><th>Fy</th><th>Fz</th></tr></thead>
@@ -464,6 +541,10 @@
 
         <!-- Stress -->
         <div id="tab-stress" class="tab-content">
+          <div class="tab-content-header">
+            <span></span>
+            <button class="source-link-btn" data-source="stress" title="View source code">&lt;/&gt;</button>
+          </div>
           <div class="placeholder-msg" id="stress-placeholder">No stress data yet</div>
           <div id="stress-display" class="hidden">
             <table id="stress-table" class="data-table">

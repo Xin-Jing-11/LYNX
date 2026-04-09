@@ -289,6 +289,7 @@ class LYNXViewer {
     this.volumeSteps    = 160;
     this.volumePointSize= 3.0;
     this.currentColormap= 'orbital';
+    this.smoothNormals  = true;
 
     // Shared geometries
     this._sphereGeo   = new THREE.SphereBufferGeometry(1, 48, 32);
@@ -499,6 +500,7 @@ class LYNXViewer {
     this.camera.position.set(
       this._cellCenter.x+r*1.2, this._cellCenter.y+r*0.8, this._cellCenter.z+r*1.2);
     this.controls.update();
+    this._buildGridFloor();
   }
 
   // ═════════════════════════════════════════════════════════════════════
@@ -558,7 +560,7 @@ class LYNXViewer {
       this.densityMesh = null;
     }
     const {values,shape,cell} = this.densityData;
-    const res = MarchingCubes.extract(values, shape, this.isovalue, cell);
+    const res = MarchingCubes.extract(values, shape, this.isovalue, cell, this.smoothNormals);
     if (!res.positions.length) return;
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(res.positions, 3));
@@ -580,6 +582,10 @@ class LYNXViewer {
   setDensityOpacity(o) {
     this.densityOpacity = o;
     if (this.densityMesh) this.densityMesh.material.opacity = o;
+  }
+  setSmoothNormals(v) {
+    this.smoothNormals = v;
+    this.updateIsosurface();
   }
   setDensityColor(hex) {
     this.densityColor = new THREE.Color(hex);
@@ -845,6 +851,56 @@ class LYNXViewer {
       ctx.fillRect(x,0,1,h);
     }
     return cv;
+  }
+
+  // ═════════════════════════════════════════════════════════════════════
+  //  CAMERA CONTROLS (for viewpoint panel)
+  // ═════════════════════════════════════════════════════════════════════
+  setFOV(val) {
+    this.camera.fov = val;
+    this.camera.updateProjectionMatrix();
+  }
+
+  getCameraDistance() {
+    return this.camera.position.distanceTo(this.controls.target);
+  }
+
+  setCameraDistance(d) {
+    const dir = this.camera.position.clone().sub(this.controls.target);
+    const len = dir.length();
+    if (len < 0.001) return;
+    dir.normalize();
+    this.camera.position.copy(this.controls.target).addScaledVector(dir, d);
+    this.controls.update();
+  }
+
+  setAutoRotate(enabled, speed) {
+    this.controls.autoRotate = enabled;
+    this.controls.autoRotateSpeed = speed || 2.0;
+  }
+
+  resetView() {
+    this._centerCamera();
+  }
+
+  // ═════════════════════════════════════════════════════════════════════
+  //  GRID FLOOR (spatial reference plane)
+  // ═════════════════════════════════════════════════════════════════════
+  _buildGridFloor() {
+    if (this._gridFloor) {
+      this.scene.remove(this._gridFloor);
+    }
+    if (!this.cell) return;
+
+    const size = this._cellRadius * 3;
+    const divisions = 20;
+    const grid = new THREE.GridHelper(size, divisions, 0x1a2030, 0x0e1219);
+    grid.position.copy(this._cellCenter);
+    grid.position.y = -0.5;
+    grid.material.transparent = true;
+    grid.material.opacity = 0.3;
+    this._gridFloor = grid;
+    this.scene.add(grid);
   }
 
   dispose() {
