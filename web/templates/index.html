@@ -319,6 +319,7 @@
               <div class="density-tab-bar">
                 <button class="density-tab active" data-dtab="dtab-iso">Isosurface</button>
                 <button class="density-tab" data-dtab="dtab-volume">Volume</button>
+                <button class="density-tab" data-dtab="dtab-grid">Grid 3D</button>
                 <button class="density-tab" data-dtab="dtab-slices">Slices</button>
               </div>
 
@@ -390,6 +391,44 @@
                   <span class="colorbar-label" id="colorbar-min">0.00</span>
                   <canvas id="colorbar-canvas" width="200" height="14"></canvas>
                   <span class="colorbar-label" id="colorbar-max">1.00</span>
+                  <span class="colorbar-unit">e/Bohr&sup3;</span>
+                </div>
+              </div>
+
+              <!-- Grid 3D controls -->
+              <div id="dtab-grid" class="density-tab-content hidden">
+                <div class="fp-control-row">
+                  <label class="toggle-label"><input type="checkbox" id="show-grid"> Enable</label>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Threshold: <span id="grid-thresh-display">0.05</span></label>
+                    <input type="range" id="grid-threshold" min="0" max="0.5" step="0.005" value="0.05">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="slider-group">
+                    <label>Point Size: <span id="grid-size-display">3.0</span></label>
+                    <input type="range" id="grid-point-size" min="0.5" max="10" step="0.5" value="3.0">
+                  </div>
+                </div>
+                <div class="fp-control-row">
+                  <div class="form-group inline">
+                    <label>Colormap</label>
+                    <select id="grid-colormap">
+                      <option value="orbital" selected>Orbital</option>
+                      <option value="viridis">Viridis</option>
+                      <option value="plasma">Plasma</option>
+                      <option value="inferno">Inferno</option>
+                      <option value="coolwarm">Coolwarm</option>
+                      <option value="blueRed">Blue-Red</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="colorbar-container">
+                  <span class="colorbar-label" id="colorbar-min-g">0.00</span>
+                  <canvas id="colorbar-canvas-g" width="200" height="14"></canvas>
+                  <span class="colorbar-label" id="colorbar-max-g">1.00</span>
                   <span class="colorbar-unit">e/Bohr&sup3;</span>
                 </div>
               </div>

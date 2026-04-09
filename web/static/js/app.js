@@ -46,8 +46,8 @@
     // Setup UI event listeners
     setupUI();
 
-    // Load default example
-    loadExample('H2O');
+    // Load default example (bulk Si — periodic, representative)
+    loadExample('Si8');
 
     log('LYNX DFT Web UI initialized.');
   });
@@ -216,6 +216,14 @@
         document.querySelectorAll('.density-tab-content').forEach(c => c.classList.add('hidden'));
         tab.classList.add('active');
         document.getElementById(tab.dataset.dtab).classList.remove('hidden');
+
+        // Auto-toggle visibility: show slices only on Slices tab, grid only on Grid tab
+        const isSlices = tab.dataset.dtab === 'dtab-slices';
+        const isGrid = tab.dataset.dtab === 'dtab-grid';
+        document.getElementById('show-slices').checked = isSlices;
+        viewer.setSlicesVisible(isSlices);
+        document.getElementById('show-grid').checked = isGrid;
+        viewer.setGridVisible(isGrid);
       });
     });
 
@@ -276,6 +284,29 @@
       const v = parseFloat(e.target.value);
       document.getElementById('vol-opacity-display').textContent = v.toFixed(2);
       viewer.setVolumeOpacity(v);
+    });
+
+    // ── Grid 3D controls ──
+    document.getElementById('show-grid').addEventListener('change', (e) => {
+      viewer.setGridVisible(e.target.checked);
+    });
+
+    document.getElementById('grid-threshold').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('grid-thresh-display').textContent = v.toFixed(2);
+      viewer.setGridThreshold(v);
+    });
+
+    document.getElementById('grid-point-size').addEventListener('input', (e) => {
+      const v = parseFloat(e.target.value);
+      document.getElementById('grid-size-display').textContent = v.toFixed(1);
+      viewer.setGridPointSize(v);
+    });
+
+    document.getElementById('grid-colormap').addEventListener('change', (e) => {
+      viewer.setColormap(e.target.value);
+      viewer.updateGridCloud();
+      updateColorbars();
     });
 
     // ── Slice controls ──
@@ -1090,6 +1121,16 @@
     }
     document.getElementById('colorbar-min-s').textContent = min.toFixed(3);
     document.getElementById('colorbar-max-s').textContent = max.toFixed(3);
+
+    // Grid colorbar
+    const canvas3 = document.getElementById('colorbar-canvas-g');
+    if (canvas3) {
+      const bar = viewer.renderColorbar(canvas3.width, canvas3.height);
+      const ctx = canvas3.getContext('2d');
+      ctx.drawImage(bar, 0, 0, canvas3.width, canvas3.height);
+    }
+    document.getElementById('colorbar-min-g').textContent = min.toFixed(3);
+    document.getElementById('colorbar-max-g').textContent = max.toFixed(3);
   }
 
   function onDensityLoaded() {
@@ -1101,13 +1142,20 @@
     document.getElementById('show-volume').checked = true;
     viewer.setVolumeVisible(true);
 
-    document.getElementById('show-slices').checked = true;
-    viewer.setSlicesVisible(true);
+    document.getElementById('show-slices').checked = false;
+    viewer.setSlicesVisible(false);
+
+    document.getElementById('show-grid').checked = false;
+    viewer.setGridVisible(false);
 
     document.querySelectorAll('.density-tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.density-tab-content').forEach(c => c.classList.add('hidden'));
-    document.querySelector('[data-dtab="dtab-volume"]').classList.add('active');
-    document.getElementById('dtab-volume').classList.remove('hidden');
+    document.querySelector('[data-dtab="dtab-grid"]').classList.add('active');
+    document.getElementById('dtab-grid').classList.remove('hidden');
+
+    // Auto-enable grid view on load
+    document.getElementById('show-grid').checked = true;
+    viewer.setGridVisible(true);
 
     updateColorbars();
   }

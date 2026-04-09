@@ -538,7 +538,7 @@ html, body {
   margin-left: 2px;
 }
 
-#colorbar-canvas, #colorbar-canvas-s {
+#colorbar-canvas, #colorbar-canvas-s, #colorbar-canvas-g {
   border: 1px solid var(--border);
   border-radius: 3px;
   flex: 1;

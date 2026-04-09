@@ -320,11 +320,11 @@ def generate_demo_density(config: dict) -> dict:
             amplitude = Z * 0.1
             rho += amplitude * np.exp(-r2 / (2 * sigma**2))
 
-    max_dim = 60
+    max_dim = 80
     factor = max_dim / max(Nx, Ny, Nz)
     if abs(factor - 1.0) > 0.01:
         from scipy.ndimage import zoom as nd_zoom
-        rho = nd_zoom(rho, factor, order=interp_order)
+        rho = nd_zoom(rho, factor, order=3)
 
     rho_f32 = rho.astype(np.float32)
     return {
