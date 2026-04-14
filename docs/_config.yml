@@ -32,5 +32,12 @@ exclude:
   - "*.gemspec"
   - vendor/
 
+# Apply default layout to all pages that don't specify one
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: "default"
+
 # Navigation order: Architecture (2), Theory (3), Examples (4)
 # Home is nav_order: 1 in index.md

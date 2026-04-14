@@ -1,0 +1,624 @@
+/* ============================================================
+   LYNX — Monograph Theme
+   Fonts loaded via head_custom.html (Google Fonts):
+     Cormorant Garamond — headings
+     Jost               — body / UI
+     JetBrains Mono     — code
+   ============================================================ */
+
+/* ── Design tokens ─────────────────────────────────────────── */
+:root {
+  --navy:         #0d1e35;
+  --navy-soft:    #162a47;
+  --navy-mid:     #1e3a5f;
+  --amber:        #c8780f;
+  --amber-light:  #ebb84a;
+  --amber-pale:   #fef6e8;
+  --cream:        #fdf9f3;
+  --white:        #ffffff;
+  --ink:          #1a1f2e;
+  --ink-soft:     #374151;
+  --slate:        #6b7280;
+  --border:       #e5ddd0;
+  --border-mid:   #c9bfae;
+  --code-bg:      #111b27;
+  --code-text:    #e2d9c8;
+  --inline-bg:    #f0ebe3;
+  --inline-fg:    #8b1c2e;
+  --sh-sm:        0 1px 3px rgba(13,30,53,.08);
+  --sh-md:        0 4px 20px rgba(13,30,53,.14);
+  --r:            4px;
+  --rl:           8px;
+}
+
+/* ── Reset / base ──────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  background: var(--cream);
+  color: var(--ink);
+  font-family: 'Jost', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Thin accent bar pinned to top of viewport ─────────────── */
+body::before {
+  content: '';
+  display: block;
+  height: 3px;
+  background: linear-gradient(90deg, var(--navy) 0%, var(--amber) 55%, var(--navy-mid) 100%);
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 10000;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────── */
+.side-bar {
+  background: var(--navy) !important;
+  border-right: none !important;
+  box-shadow: 2px 0 24px rgba(0,0,0,.28) !important;
+}
+
+/* Site title */
+.site-title {
+  font-family: 'Cormorant Garamond', Georgia, serif !important;
+  font-weight: 700 !important;
+  font-size: 1.45rem !important;
+  letter-spacing: .1em !important;
+  text-transform: uppercase !important;
+  color: var(--white) !important;
+  text-decoration: none !important;
+  padding: 1.5rem 1.25rem 1rem !important;
+  display: block !important;
+}
+.site-title:hover { color: var(--amber-light) !important; }
+
+/* Nav links */
+.nav-list-link {
+  font-family: 'Jost', sans-serif !important;
+  font-size: .84rem !important;
+  font-weight: 400 !important;
+  color: #a8c0d8 !important;
+  border-radius: var(--r) !important;
+  padding: .28rem .9rem !important;
+  margin: 1px .5rem !important;
+  transition: color .15s, background .15s !important;
+  text-decoration: none !important;
+}
+.nav-list-link:hover {
+  color: var(--white) !important;
+  background: rgba(255,255,255,.07) !important;
+}
+.nav-list-link.active {
+  color: var(--amber-light) !important;
+  background: rgba(200,120,15,.18) !important;
+  font-weight: 600 !important;
+}
+
+/* Child nav */
+.nav-list .nav-list .nav-list-link {
+  font-size: .8rem !important;
+  color: #7a9ab6 !important;
+  padding-left: 1.7rem !important;
+}
+.nav-list .nav-list .nav-list-link:hover { color: #c0d8ee !important; }
+.nav-list .nav-list .nav-list-link.active {
+  color: var(--amber-light) !important;
+  background: rgba(200,120,15,.14) !important;
+}
+
+/* Grandchild */
+.nav-list .nav-list .nav-list .nav-list-link {
+  font-size: .76rem !important;
+  padding-left: 2.4rem !important;
+  color: #5e839f !important;
+}
+
+/* Category dividers */
+.nav-category {
+  color: #4e6e88 !important;
+  font-size: .65rem !important;
+  font-weight: 700 !important;
+  letter-spacing: .14em !important;
+  text-transform: uppercase !important;
+  padding: .5rem 1.25rem .2rem !important;
+}
+
+/* GitHub aux link */
+.aux-nav .site-button {
+  color: #7a9ab6 !important;
+  font-family: 'Jost', sans-serif !important;
+  font-size: .78rem !important;
+  letter-spacing: .04em !important;
+  border: 1px solid rgba(120,160,200,.3) !important;
+  border-radius: var(--r) !important;
+  padding: .2rem .7rem !important;
+  text-decoration: none !important;
+  transition: all .15s !important;
+}
+.aux-nav .site-button:hover {
+  color: var(--white) !important;
+  border-color: rgba(200,120,15,.6) !important;
+  background: rgba(200,120,15,.12) !important;
+}
+
+/* Search */
+.search-input-wrap {
+  background: rgba(255,255,255,.06) !important;
+  border: 1px solid rgba(255,255,255,.11) !important;
+  border-radius: var(--r) !important;
+  margin: 0 .75rem !important;
+}
+.search-input {
+  background: transparent !important;
+  color: var(--white) !important;
+  font-family: 'Jost', sans-serif !important;
+  font-size: .84rem !important;
+}
+.search-input::placeholder { color: #4e6e88 !important; }
+
+/* Scrollbar (sidebar) */
+.side-bar::-webkit-scrollbar { width: 4px; }
+.side-bar::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 2px; }
+
+/* ── Page hero (injected by page-enhance.js on inner pages) ── */
+.lynx-hero {
+  background: var(--navy);
+  border-bottom: 3px solid var(--amber);
+  padding: 2.8rem 3.5rem 2.2rem;
+  margin-top: 3px; /* clear the fixed accent bar */
+}
+
+.lynx-hero-label {
+  display: block;
+  font-family: 'Jost', sans-serif;
+  font-size: .65rem;
+  font-weight: 700;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--amber-light);
+  margin-bottom: .6rem;
+  opacity: .85;
+}
+
+.lynx-hero-title {
+  font-family: 'Cormorant Garamond', Georgia, serif !important;
+  font-size: 2.8rem !important;
+  font-weight: 700 !important;
+  color: var(--white) !important;
+  margin: 0 !important;
+  line-height: 1.15 !important;
+  letter-spacing: -.01em !important;
+  border: none !important;
+}
+
+/* Remove the default amber underline from hero title */
+.lynx-hero-title::after { display: none !important; }
+
+@media (max-width: 800px) {
+  .lynx-hero { padding: 2rem 1.5rem 1.5rem; }
+  .lynx-hero-title { font-size: 2rem !important; }
+}
+
+/* ── Main content area ─────────────────────────────────────── */
+.main-content-wrap {
+  background: var(--cream);
+}
+
+.main-content {
+  font-family: 'Jost', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.78;
+  color: var(--ink-soft);
+  max-width: 860px;
+  padding-top: 2.5rem;
+  padding-bottom: 5rem;
+}
+
+/* ── Headings ──────────────────────────────────────────────── */
+.main-content h1 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--navy);
+  line-height: 1.18;
+  margin-top: 0;
+  padding-bottom: .5rem;
+  border-bottom: 2px solid var(--border-mid);
+  margin-bottom: 1.5rem;
+  letter-spacing: -.01em;
+}
+
+/* amber underline accent on h1 */
+.main-content h1::after {
+  content: '';
+  display: block;
+  width: 2.5rem;
+  height: 3px;
+  background: var(--amber);
+  border-radius: 2px;
+  margin-top: .5rem;
+}
+
+.main-content h2 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: var(--navy);
+  line-height: 1.2;
+  margin-top: 3rem;
+  margin-bottom: .75rem;
+  padding-bottom: .35rem;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: .6rem;
+}
+
+/* section numbers from JS */
+.lynx-section-num {
+  font-family: 'Jost', sans-serif;
+  font-size: .6rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--amber);
+  opacity: .7;
+  flex-shrink: 0;
+  padding-top: .15em;
+}
+
+.main-content h3 {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--navy-mid);
+  margin-top: 2rem;
+  margin-bottom: .5rem;
+  line-height: 1.25;
+}
+
+.main-content h4 {
+  font-family: 'Jost', sans-serif;
+  font-size: .82rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--slate);
+  margin-top: 1.75rem;
+  margin-bottom: .5rem;
+}
+
+/* ── Body text ─────────────────────────────────────────────── */
+.main-content p {
+  margin-bottom: 1.2rem;
+  color: var(--ink-soft);
+}
+
+.main-content strong { color: var(--ink); font-weight: 600; }
+
+/* ── Links ─────────────────────────────────────────────────── */
+.main-content a {
+  color: var(--navy-mid);
+  text-decoration: underline;
+  text-decoration-color: var(--border-mid);
+  text-underline-offset: 3px;
+  transition: color .15s, text-decoration-color .15s;
+}
+.main-content a:hover {
+  color: var(--amber);
+  text-decoration-color: var(--amber);
+}
+
+/* ── Inline code (inside paragraphs, lists, tables) ───────── */
+/* kramdown wraps inline code in <code class="language-plaintext highlighter-rouge">
+   We must NOT give it the dark block background. */
+:not(pre) > code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
+  font-size: .82em !important;
+  background: var(--inline-bg) !important;
+  color: var(--inline-fg) !important;
+  padding: .12em .4em !important;
+  border-radius: 3px !important;
+  border: 1px solid var(--border) !important;
+  font-weight: 500 !important;
+  -webkit-text-fill-color: var(--inline-fg) !important;
+}
+
+/* ── Code blocks (div-level highlighter-rouge = fenced blocks) */
+div.highlighter-rouge,
+div.highlighter-rouge .highlight,
+figure.highlight,
+.main-content pre {
+  background: #1e2d40 !important;
+  border-radius: var(--rl) !important;
+  box-shadow: var(--sh-md) !important;
+  border: none !important;
+  margin: 1.5rem 0 !important;
+  overflow-x: auto !important;
+  position: relative !important;
+}
+
+.main-content pre {
+  padding: 1.25rem 1.5rem !important;
+}
+
+/* Base text color — applies to all unstyled tokens (identifiers, punctuation)
+   Set on pre AND code so it cascades reliably */
+div.highlighter-rouge pre,
+div.highlighter-rouge code,
+figure.highlight pre,
+figure.highlight code,
+.main-content pre,
+.main-content pre > code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
+  font-size: .83rem !important;
+  line-height: 1.7 !important;
+  color: #dce8f5 !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+/* Catch any span inside highlight that has no specific token class
+   (plain names, punctuation, operators not matched below) */
+.highlight span:not([class]),
+.highlight .n,
+.highlight .p,
+.highlight .nx,
+.highlight .nl,
+.highlight .nn,
+.highlight .nt {
+  color: #dce8f5 !important;
+  -webkit-text-fill-color: #dce8f5 !important;
+}
+
+/* Syntax highlighting — each span gets explicit color + fill override
+   so they beat both JTD and our own base color above */
+.highlight .k,  .highlight .kd, .highlight .kn,
+.highlight .kp, .highlight .kr, .highlight .kt {
+  color: #c792ea !important; -webkit-text-fill-color: #c792ea !important; }
+
+.highlight .s,  .highlight .s1, .highlight .s2,
+.highlight .sb, .highlight .sc, .highlight .sd {
+  color: #c3e88d !important; -webkit-text-fill-color: #c3e88d !important; }
+
+.highlight .c,  .highlight .c1, .highlight .cm, .highlight .cs, .highlight .cp {
+  color: #7ec8e3 !important; -webkit-text-fill-color: #7ec8e3 !important;
+  font-style: italic !important; }
+
+.highlight .nf, .highlight .fm {
+  color: #82aaff !important; -webkit-text-fill-color: #82aaff !important; }
+
+.highlight .nc {
+  color: #ffcb6b !important; -webkit-text-fill-color: #ffcb6b !important; }
+
+.highlight .mi, .highlight .mf, .highlight .il {
+  color: #f78c6c !important; -webkit-text-fill-color: #f78c6c !important; }
+
+.highlight .o {
+  color: #89ddff !important; -webkit-text-fill-color: #89ddff !important; }
+
+.highlight .nb, .highlight .bp {
+  color: #89ddff !important; -webkit-text-fill-color: #89ddff !important; }
+
+/* preprocessor (#ifdef, #include) */
+.highlight .cp, .highlight .cpf {
+  color: #c792ea !important; -webkit-text-fill-color: #c792ea !important; }
+
+.highlight .na {
+  color: #ffcb6b !important; -webkit-text-fill-color: #ffcb6b !important; }
+
+.highlight .gp {
+  color: #ebb84a !important; -webkit-text-fill-color: #ebb84a !important;
+  user-select: none !important; }
+
+.highlight .go {
+  color: #7a8fa6 !important; -webkit-text-fill-color: #7a8fa6 !important; }
+
+/* ── Tables ────────────────────────────────────────────────── */
+.main-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.75rem 0;
+  font-size: .88rem;
+  background: var(--white);
+  border-radius: var(--rl);
+  overflow: hidden;
+  box-shadow: var(--sh-sm);
+  border: 1px solid var(--border);
+}
+
+.main-content thead {
+  background: var(--navy);
+}
+
+.main-content thead th {
+  color: var(--white);
+  font-family: 'Jost', sans-serif;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: .7rem 1rem;
+  border: none;
+  text-align: left;
+}
+
+.main-content tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+.main-content tbody tr:last-child { border-bottom: none; }
+.main-content tbody tr:hover { background: var(--amber-pale); }
+
+.main-content tbody td {
+  padding: .6rem 1rem;
+  color: var(--ink-soft);
+  border: none;
+  vertical-align: top;
+}
+
+/* ── Blockquote / callout ──────────────────────────────────── */
+.main-content blockquote {
+  border-left: 3px solid var(--amber);
+  background: var(--amber-pale);
+  margin: 1.5rem 0;
+  padding: .8rem 1.25rem;
+  border-radius: 0 var(--rl) var(--rl) 0;
+  color: var(--ink-soft);
+}
+.main-content blockquote p { margin: 0; }
+
+/* ── Horizontal rule ───────────────────────────────────────── */
+.main-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 2.5rem 0;
+}
+
+/* ── Lists ─────────────────────────────────────────────────── */
+.main-content ul,
+.main-content ol {
+  padding-left: 1.5rem;
+  margin-bottom: 1.2rem;
+  color: var(--ink-soft);
+}
+.main-content li { margin-bottom: .35rem; }
+
+/* ── Breadcrumb ────────────────────────────────────────────── */
+.breadcrumb-nav {
+  font-family: 'Jost', sans-serif !important;
+  font-size: .75rem !important;
+  padding: .6rem 3.5rem !important;
+  background: var(--navy) !important;
+  border-bottom: none !important;
+  color: #5e839f !important;
+}
+
+.breadcrumb-nav a {
+  color: #7a9ab6 !important;
+  text-decoration: none !important;
+}
+.breadcrumb-nav a:hover { color: var(--amber-light) !important; }
+
+.breadcrumb-nav-list-item::before {
+  color: #3a556a !important;
+}
+
+/* ── Prev/Next page nav ────────────────────────────────────── */
+.page-nav {
+  margin-top: 4rem !important;
+  padding-top: 1.5rem !important;
+  border-top: 1px solid var(--border) !important;
+  font-family: 'Jost', sans-serif !important;
+}
+.page-nav a {
+  color: var(--navy-mid) !important;
+  text-decoration: none !important;
+  font-weight: 500 !important;
+  font-size: .875rem !important;
+}
+.page-nav a:hover { color: var(--amber) !important; }
+
+/* ── Buttons ───────────────────────────────────────────────── */
+.btn {
+  font-family: 'Jost', sans-serif !important;
+  font-weight: 600 !important;
+  font-size: .875rem !important;
+  letter-spacing: .04em !important;
+  border-radius: var(--r) !important;
+  padding: .5rem 1.25rem !important;
+  transition: all .15s !important;
+  display: inline-block !important;
+  text-decoration: none !important;
+}
+
+.btn-primary {
+  background: var(--navy) !important;
+  color: var(--white) !important;
+  border: 2px solid var(--navy) !important;
+}
+.btn-primary:hover {
+  background: var(--amber) !important;
+  border-color: var(--amber) !important;
+  color: var(--white) !important;
+}
+
+.btn-outline {
+  background: transparent !important;
+  color: var(--navy) !important;
+  border: 2px solid var(--navy) !important;
+}
+.btn-outline:hover {
+  background: var(--navy) !important;
+  color: var(--white) !important;
+}
+
+/* ── Homepage hero tweaks ──────────────────────────────────── */
+.main-content > div[style*="text-align: center"] h1 {
+  font-family: 'Cormorant Garamond', Georgia, serif !important;
+  font-size: 4.5rem !important;
+  font-weight: 700 !important;
+  letter-spacing: .12em !important;
+  color: var(--navy) !important;
+  border: none !important;
+}
+.main-content > div[style*="text-align: center"] h1::after {
+  margin: .4rem auto 0 !important;
+}
+
+/* Homepage cards */
+.main-content div[style*="background: #f8f9fb"] {
+  background: var(--white) !important;
+  border: 1px solid var(--border) !important;
+  border-top: 3px solid var(--amber) !important;
+  border-radius: var(--rl) !important;
+  box-shadow: var(--sh-sm) !important;
+  transition: box-shadow .2s, transform .18s !important;
+}
+.main-content div[style*="background: #f8f9fb"]:hover {
+  box-shadow: var(--sh-md) !important;
+  transform: translateY(-2px) !important;
+}
+.main-content div[style*="background: #f8f9fb"] h3 {
+  font-family: 'Jost', sans-serif !important;
+  font-size: 1rem !important;
+  font-weight: 600 !important;
+  color: var(--navy) !important;
+}
+
+/* ── Footer ────────────────────────────────────────────────── */
+.site-footer {
+  background: transparent !important;
+  border-top: 1px solid var(--border) !important;
+  font-family: 'Jost', sans-serif !important;
+  font-size: .78rem !important;
+  color: var(--slate) !important;
+}
+
+/* ── Search results ────────────────────────────────────────── */
+.search-results {
+  background: var(--white) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--rl) !important;
+  box-shadow: var(--sh-md) !important;
+}
+.search-result-title  { color: var(--navy) !important; font-weight: 600 !important; }
+.search-result-preview { color: var(--slate) !important; font-size: .84rem !important; }
+
+/* ── Anchor links ──────────────────────────────────────────── */
+.anchor-heading svg { fill: var(--amber) !important; opacity: .4 !important; }
+.anchor-heading:hover svg { opacity: .9 !important; }
+
+/* ── Selection highlight ───────────────────────────────────── */
+::selection {
+  background: rgba(200,120,15,.2);
+  color: var(--navy);
+}
+
+/* ── Scrollbar (content area) ──────────────────────────────── */
+.main-content-wrap::-webkit-scrollbar { width: 5px; }
+.main-content-wrap::-webkit-scrollbar-thumb { background: var(--border-mid); border-radius: 3px; }

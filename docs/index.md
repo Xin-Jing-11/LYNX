@@ -11,9 +11,10 @@ nav_order: 1
     GPU acceleration without algorithmic duplication,<br>
     Python access without overhead.
   </p>
-  <a href="https://github.com/Xin-Jing-11/LYNX" class="btn btn-primary fs-5 mb-4 mb-md-0 mr-2">View on GitHub</a>
-  &nbsp;
-  <a href="/LYNX/architecture/" class="btn btn-outline fs-5 mb-4">Get Started →</a>
+  <div style="display:flex; gap:0.75rem; justify-content:center; align-items:center; flex-wrap:wrap;">
+    <a href="https://github.com/Xin-Jing-11/LYNX" class="btn btn-primary fs-5">View on GitHub</a>
+    <a href="/LYNX/architecture/" class="btn btn-outline fs-5">Get Started →</a>
+  </div>
 </div>
 
 ---
