@@ -44,7 +44,7 @@ calc = lynx.DFT(xc="PBE", kpts=(2, 2, 2))
 
 # Run and inspect internals
 result = calc(atoms)
-print(result.energy_decomposition)    # Eband, Exc, Ehart, Etotal, ...
+print(result.energies)                # Eband, Exc, Ehart, Etotal, ...
 print(result.density)                 # numpy (Nd,) electron density
 print(result.eigenvalues)             # numpy array of KS eigenvalues
 
@@ -81,7 +81,7 @@ Level 3 is useful for testing finite-difference operators independently, buildin
 `DeviceArray<double>` (the internal C++ array type) implements the Python buffer protocol. When an array lives on CPU, numpy accesses it directly — no copy. When it lives on GPU, calling `.cpu()` returns a CPU-side numpy array.
 
 ```python
-rho = result.density    # numpy view of the internal array — no copy
+rho = result.density    # CPU-resident arrays share memory with no copy
 ```
 
 ## ASE Calculator
