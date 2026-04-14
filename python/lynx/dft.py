@@ -54,7 +54,7 @@ class DFT:
                  verbose: int = 1,
                  # Advanced options
                  bc: str = "periodic",
-                 cheb_degree: int = 0,
+                 cheb_degree: int = -1,
                  rho_trigger: int = 4,
                  restart_density: Optional[str] = None,
                  ):
@@ -172,16 +172,20 @@ class DFT:
     # Public API
     # ------------------------------------------------------------------
 
-    def __call__(self, atoms) -> DFTResult:
+    def __call__(self, atoms, initial_density=None) -> DFTResult:
         """Run full DFT calculation on atoms.
 
         Args:
             atoms: lynx.Atoms instance.
+            initial_density: Optional numpy array (Nd_d,) of electron density
+                to use as initial guess instead of atomic superposition.
+                Useful for MD where geometry changes slightly between steps.
 
         Returns:
             DFTResult with energy, forces, stress, eigenvalues, etc.
         """
-        return self._run(atoms, compute_forces=True, compute_stress=True)
+        return self._run(atoms, compute_forces=True, compute_stress=True,
+                         initial_density=initial_density)
 
     def energy(self, atoms) -> float:
         """Compute only energy (faster -- skips forces/stress)."""
@@ -282,7 +286,8 @@ class DFT:
     # Internal implementation
     # ------------------------------------------------------------------
 
-    def _run(self, atoms, compute_forces=True, compute_stress=True) -> DFTResult:
+    def _run(self, atoms, compute_forces=True, compute_stress=True,
+             initial_density=None) -> DFTResult:
         """Run the calculation via the C++ Calculator backend."""
         from lynx import _core  # C++ pybind11 module
 
@@ -294,6 +299,10 @@ class DFT:
         calc.set_config(config)
         calc.set_use_gpu(self._device == "gpu")
         calc.setup()  # MPI_COMM_SELF for single-process Python usage
+
+        # Override initial density with converged density from previous step
+        if initial_density is not None:
+            calc.set_initial_density(initial_density)
 
         self._calculator = calc
 
@@ -342,12 +351,10 @@ class DFT:
                 eigenvalues.append(eig)
                 occupations.append(occ)
 
-        # Electron density (best-effort; not all backends expose this)
+        # Electron density
         density = None
         try:
-            scf = calc.scf_solver
-            rho = scf.density()
-            density = np.array(rho.rho_total())
+            density = np.array(calc.density)
         except Exception:
             pass
 
@@ -362,7 +369,7 @@ class DFT:
             fermi_energy=calc.fermi_energy,
             density=density,
             converged=calc.converged,
-            n_iterations=0,  # TODO: expose iteration count from C++
+            n_iterations=calc.n_iterations,
             atoms=atoms,
         )
 
@@ -481,7 +488,7 @@ class DFT:
         config.rho_trigger = self._rho_trigger
 
         # Mixing variable and preconditioner
-        config.mixing_var = _core.MixingVariable.Potential
+        config.mixing_var = _core.MixingVariable.Density
         config.mixing_precond = _core.MixingPrecond.Kerker
 
         # --- Output flags ---

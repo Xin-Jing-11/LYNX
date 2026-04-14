@@ -130,6 +130,7 @@ public:
     const ElectronDensity& density() const { return density_; }
     double fermi_energy() const { return Ef_; }
     bool converged() const { return converged_; }
+    int n_iterations() const { return n_iterations_; }
 
     // Access internal potentials (needed for Forces/Stress post-SCF)
     const double* phi() const { return arrays_.phi.data(); }
@@ -176,6 +177,7 @@ private:
     ElectronDensity density_;
     double Ef_ = 0.0;
     bool converged_ = false;
+    int n_iterations_ = 0;
 
     // Work arrays (owned by VeffArrays)
     VeffArrays arrays_;

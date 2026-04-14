@@ -1,0 +1,58 @@
+<!--
+  i-PI input: NVT molecular dynamics with LYNX as force engine.
+
+  Runs Langevin thermostat at 300 K on a Si supercell.
+  LYNX connects as a socket client to provide DFT forces.
+
+  Usage:
+    Terminal 1: i-pi ipi_nvt.xml
+    Terminal 2: python 09_ipi_client.py - -species Si Si Si Si Si Si Si Si Si Si Si Si Si Si Si Si
+
+  The number of species must match the number of atoms in init.xyz.
+-->
+
+<simulation verbosity="medium">
+  <total_steps> 100 </total_steps>
+
+  <output prefix="si_nvt">
+    <properties stride="1" filename="out">
+      [ step, time{picosecond}, conserved{electronvolt},
+        temperature{kelvin}, kinetic_md{electronvolt},
+        potential{electronvolt}, pressure_md{gigapascal} ]
+    </properties>
+    <trajectory filename="pos" stride="5" format="xyz" cell_units="angstrom">
+      positions{angstrom}
+    </trajectory>
+    <checkpoint stride="50"/>
+  </output>
+
+  <ffsocket name="lynxdriver" mode="unix" pbc="true">
+    <address> lynx-ipi </address>
+    <latency> 0.01 </latency>
+  </ffsocket>
+
+  <system>
+    <initialize nbeads="1">
+      <!-- Initial structure: 2x2x2 Si diamond supercell (16 atoms)
+           Create with: ase build Si -x diamond -a 5.43 - -repeat 2 2 2 -o init.xyz -->
+      <file mode="xyz" units="angstrom"> init.xyz </file>
+      <cell units="angstrom">
+        <h> [ 10.86, 0.0, 0.0, 0.0, 10.86, 0.0, 0.0, 0.0, 10.86 ] </h>
+      </cell>
+      <velocities mode="thermal" units="kelvin"> 300 </velocities>
+    </initialize>
+
+    <forces>
+      <force forcefield="lynxdriver"/>
+    </forces>
+
+    <motion mode="dynamics">
+      <dynamics mode="nvt">
+        <timestep units="femtosecond"> 1.0 </timestep>
+        <thermostat mode="langevin">
+          <tau units="femtosecond"> 100 </tau>
+        </thermostat>
+      </dynamics>
+    </motion>
+  </system>
+</simulation>

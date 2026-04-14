@@ -55,6 +55,7 @@ class LynxCalculator:
         self._psp_dir = psp_dir
         self._results = {}
         self._atoms = None
+        self._prev_density = None  # converged density for restart
 
     def calculate(self, atoms=None, properties=None, system_changes=None):
         """Run calculation. Called by ASE."""
@@ -74,9 +75,13 @@ class LynxCalculator:
             psp_dir=self._psp_dir,
         )
 
-        # Run DFT
+        # Run DFT (with density restart if available)
         calc = DFT(**self._dft_kwargs)
-        result = calc(lynx_atoms)
+        result = calc(lynx_atoms, initial_density=self._prev_density)
+
+        # Save converged density for next step
+        if result.density is not None:
+            self._prev_density = result.density.copy()
 
         # Store results in ASE units
         self._results = {
@@ -118,18 +123,20 @@ class LynxCalculator:
 try:
     from ase.calculators.calculator import Calculator as ASECalculator
 
-    class _ASELynxCalculator(ASECalculator, LynxCalculator):
+    _BaseLynxCalculator = LynxCalculator  # capture before replacement
+
+    class _ASELynxCalculator(ASECalculator, _BaseLynxCalculator):
         """Full ASE Calculator subclass (when ASE is installed)."""
         name = 'lynx'
         implemented_properties = ['energy', 'forces', 'stress']
 
         def __init__(self, **kwargs):
             ASECalculator.__init__(self)
-            LynxCalculator.__init__(self, **kwargs)
+            _BaseLynxCalculator.__init__(self, **kwargs)
 
         def calculate(self, atoms=None, properties=None, system_changes=None):
             ASECalculator.calculate(self, atoms, properties, system_changes)
-            LynxCalculator.calculate(self, self.atoms, properties, system_changes)
+            _BaseLynxCalculator.calculate(self, self.atoms, properties, system_changes)
             self.results = self._results
 
     # Replace the base class with the ASE-aware version
