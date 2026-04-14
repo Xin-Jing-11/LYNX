@@ -19,6 +19,13 @@ nav_order: 1
 
 ---
 
+<blockquote style="max-width: 720px; margin: 2rem auto; border-left: 3px solid #c8780f; background: #fef6e8; padding: 1rem 1.5rem; border-radius: 0 8px 8px 0; text-align: left;">
+  <p style="margin: 0 0 0.75rem; color: #1a1f2e;"><strong>This repository was built through vibe coding in under a month</strong> — a full rewrite of an existing codebase. Writing code is no longer the bottleneck. What matters now is deep domain knowledge: physics intuition, quantum mechanics, niche expertise, sound architecture, system design, and coding taste — the things that no amount of autocomplete can replace.</p>
+  <p style="margin: 0; color: #1a1f2e;">My hope is that no PhD student ever again spends years on garbage engineering work just to graduate. That time belongs to hard, novel ideas — the innovations only they can do.</p>
+</blockquote>
+
+---
+
 ## Design Highlights
 
 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; margin: 1.5rem 0 2.5rem;">
