@@ -1,0 +1,31 @@
+title: LYNX
+description: >-
+  A real-space DFT engine in C++17/CUDA — GPU acceleration without
+  algorithmic duplication, Python access without overhead.
+
+theme: just-the-docs
+
+plugins:
+  - jekyll-seo-tag
+
+url: "https://xin-jing-11.github.io"
+baseurl: "/LYNX"
+
+aux_links:
+  "GitHub":
+    - "https://github.com/Xin-Jing-11/LYNX"
+aux_links_new_tab: true
+
+search_enabled: true
+heading_anchors: true
+
+# Exclude internal dirs from Jekyll processing
+exclude:
+  - superpowers/
+  - Gemfile
+  - Gemfile.lock
+  - "*.gemspec"
+  - vendor/
+
+# Navigation order: Architecture (2), Theory (3), Examples (4)
+# Home is nav_order: 1 in index.md
