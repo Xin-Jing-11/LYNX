@@ -120,9 +120,29 @@ void bind_calculator(py::module_& m) {
              py::call_guard<py::gil_scoped_release>(),
              "Compute hydrostatic pressure in GPa.")
 
+        // Set initial density from numpy array (for density restart in MD)
+        .def("set_initial_density", [](Calculator& c, py::array_t<double> rho,
+                                        py::object mag) {
+            auto rho_buf = rho.request();
+            int Nd_d = static_cast<int>(rho_buf.size);
+            const double* mag_ptr = nullptr;
+            py::array_t<double> mag_arr;
+            if (!mag.is_none()) {
+                mag_arr = mag.cast<py::array_t<double>>();
+                mag_ptr = mag_arr.data();
+            }
+            c.set_initial_density(static_cast<const double*>(rho_buf.ptr),
+                                  Nd_d, mag_ptr);
+        }, py::arg("rho"), py::arg("mag") = py::none(),
+           "Set initial electron density for SCF restart. "
+           "rho: numpy array (Nd_d,) of total density. "
+           "mag: optional numpy array (Nd_d,) of magnetization density.")
+
         // Property accessors
         .def_property_readonly("is_setup", &Calculator::is_setup)
         .def_property_readonly("converged", &Calculator::is_converged)
+        .def_property_readonly("n_iterations", &Calculator::n_iterations,
+             "Number of SCF iterations performed in the last run()")
         .def_property_readonly("use_gpu", &Calculator::use_gpu)
         .def_static("cuda_available", &Calculator::cuda_available,
              "Check if LYNX was built with CUDA support")

@@ -241,6 +241,7 @@ double SCF::run(Wavefunction& wfn,
     // ===== 2. SCF Iteration Loop =====
     ElectronDensity rho_new;
     for (int scf_iter = 0; scf_iter < params_.max_iter; ++scf_iter) {
+        n_iterations_ = scf_iter + 1;
         solve_eigenproblem(wfn, state, scf_iter);
         compute_new_density(wfn, state, rho_new);
         compute_scf_energy(wfn, rho_new, rho_b, Eself, Ec, state);

@@ -65,6 +65,7 @@ void bind_physics(py::module_& m) {
         .def("density", &SCF::density, py::return_value_policy::reference_internal)
         .def("fermi_energy", &SCF::fermi_energy)
         .def("converged", &SCF::converged)
+        .def("n_iterations", &SCF::n_iterations)
         // Access converged fields as numpy
         .def("phi", [](const SCF& scf, int Nd_d) {
             return py::array_t<double>({Nd_d}, {sizeof(double)}, scf.phi(), py::none());

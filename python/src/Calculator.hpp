@@ -77,6 +77,7 @@ public:
     int Nspin() const;
     bool use_gpu() const { return use_gpu_; }
     void set_use_gpu(bool v) { use_gpu_ = v; }
+    int n_iterations() const { return scf_.n_iterations(); }
 
     static bool cuda_available() {
 #ifdef USE_CUDA
@@ -91,6 +92,14 @@ public:
     const double* rho_core_data() const { return atoms_.has_nlcc ? atoms_.rho_core.data() : nullptr; }
     const double* atomic_density_data() const { return rho_atomic_.data(); }
     int atomic_density_size() const { return static_cast<int>(rho_atomic_.size()); }
+
+    /// Set initial electron density for SCF (e.g., from a previous converged calculation).
+    /// rho_init: total density array of size Nd_d.
+    /// mag_init: magnetization density (Nd_d) for spin-polarized, or nullptr.
+    void set_initial_density(const double* rho_init, int Nd_d,
+                             const double* mag_init = nullptr) {
+        scf_.set_initial_density(rho_init, Nd_d, mag_init);
+    }
 
 private:
     lynx::SystemConfig config_;
