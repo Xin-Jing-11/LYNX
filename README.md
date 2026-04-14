@@ -1,5 +1,9 @@
 # LYNX
 
+> **This repository was built through vibe coding in under a month** — a full rewrite of an existing codebase. Writing code is no longer the bottleneck. What matters now is deep domain knowledge: physics intuition, quantum mechanics, niche expertise, sound architecture, system design, and coding taste — the things that no amount of autocomplete can replace.
+>
+> My hope is that no PhD student ever again spends years on garbage engineering work just to graduate. That time belongs to hard, novel ideas — the innovations only they can do.
+
 A real-space density functional theory (DFT) simulator with C++/CUDA kernels and a Python interface.
 
 LYNX solves the Kohn-Sham equations on a finite-difference grid using Chebyshev-filtered subspace iteration (CheFSI), supporting both CPU and GPU execution. The Python interface (`pylynx`) exposes the full C++ engine via pybind11, enabling scripted workflows, ASE integration, and direct numpy interop.
