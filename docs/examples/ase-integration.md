@@ -83,6 +83,10 @@ A complete runnable version of this example is at `examples/ase_ipi/06_equation_
 | `n_bands` | auto | Number of bands |
 | `device` | `'cpu'` | `'cpu'` or `'gpu'` |
 | `verbose` | `0` | Verbosity level (0 = silent) |
+| `spin` | `None` | `'collinear'` for spin-polarized calculations |
+| `mixing_history` | `7` | Pulay mixing history depth |
+
+All other `lynx.DFT` keyword arguments are accepted via `**kwargs`.
 
 ## GPU acceleration
 

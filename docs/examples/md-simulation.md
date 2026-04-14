@@ -58,7 +58,7 @@ MD steps (which ASE does by default when you set `atoms.calc` once):
 
 ```python
 # One calculator object for the entire trajectory: density restart is automatic.
-atoms.calc = LynxCalculator(xc='PBE', kpts=(2, 2, 2), scf_tol=1e-4)
+atoms.calc = LynxCalculator(xc='LDA_PZ', kpts=(2, 2, 2), scf_tol=1e-4)
 
 dyn = VelocityVerlet(atoms, timestep=1.0 * units.fs)
 dyn.run(100)
