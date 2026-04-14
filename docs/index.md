@@ -1,6 +1,6 @@
 ---
 title: Home
-layout: home
+layout: default
 nav_order: 1
 ---
 
@@ -28,7 +28,7 @@ nav_order: 1
   </div>
   <div style="background: #f8f9fb; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.5rem;">
     <h3 style="margin-top: 0;">🚀 GPU-resident SCF pipeline</h3>
-    <p>Wavefunctions never leave the GPU. Full SCF → forces → stress on device. 35–89× speedup per operator over CPU.</p>
+    <p>Wavefunctions never leave the GPU. Full SCF → forces → stress on device. 35–89× per-operator microbenchmark speedup over CPU.</p>
     <a href="/LYNX/architecture/">Learn more →</a>
   </div>
   <div style="background: #f8f9fb; border: 1px solid #e1e4e8; border-radius: 8px; padding: 1.5rem;">
@@ -45,27 +45,26 @@ nav_order: 1
 **Python — one call:**
 
 ```python
-from lynx.config import DFTConfig
+import lynx
 
-config = DFTConfig(
+atoms = lynx.Atoms(
     cell=[[10.26, 0, 0], [0, 10.26, 0], [0, 0, 10.26]],
-    fractional=[[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]],
-    symbols=['Si', 'Si'],
-    pseudo_files={'Si': 'psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8'},
-    Nstates=10, xc='GGA_PBE',
+    positions=[[0, 0, 0], [2.565, 2.565, 2.565]],
+    symbols=["Si", "Si"],
+    units="bohr",
 )
-calc = config.create_calculator(auto_run=True)
-print(calc.total_energy)   # Hartree
+result = lynx.calculate(atoms, xc="PBE")
+print(result.energy)   # Hartree
 ```
 
 **ASE — drop-in calculator:**
 
 ```python
 from ase.build import bulk
-from lynx.ase_interface import LynxCalculator
+from lynx.ase import LynxCalculator
 
 atoms = bulk('Si', 'diamond', a=5.43)
-atoms.calc = LynxCalculator(xc='GGA_PBE', kpts=(4, 4, 4))
+atoms.calc = LynxCalculator(xc='PBE', kpts=(4, 4, 4))
 print(atoms.get_potential_energy())   # eV
 print(atoms.get_forces())             # eV/Å
 ```
@@ -76,17 +75,7 @@ print(atoms.get_forces())             # eV/Å
 mpirun -np 4 ./build/src/lynx examples/Si8.json
 ```
 
-```json
-{
-  "lattice": { "vectors": [[10.26,0,0],[0,10.26,0],[0,0,10.26]] },
-  "grid": { "Nx": 40, "Ny": 40, "Nz": 40, "fd_order": 12 },
-  "atoms": [{ "element": "Si", "pseudo_file": "psps/ONCVPSP-PBE-PDv0.4/Si/Si.psp8",
-              "fractional": true,
-              "coordinates": [[0,0,0],[0.25,0.25,0.25]] }],
-  "electronic": { "xc": "GGA_PBE", "Nstates": 10 },
-  "scf": { "max_iter": 100, "tolerance": 1e-6 }
-}
-```
+See [C++ Quickstart](/LYNX/examples/cpp-quickstart/) for the full input format.
 
 ---
 
