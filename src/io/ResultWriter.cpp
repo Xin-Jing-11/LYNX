@@ -1,6 +1,11 @@
 #include "io/ResultWriter.hpp"
 
 #include <nlohmann/json.hpp>
+#include <mpi.h>
+
+#include "core/LynxContext.hpp"
+#include "core/KPoints.hpp"
+#include "electronic/Wavefunction.hpp"
 
 #include <chrono>
 #include <ctime>
@@ -199,10 +204,104 @@ void ResultWriter::write(const std::string& path) const {
     out << j.dump(2);
 }
 
-// Stub until Task 5 adds the real implementation.
-void ResultWriter::populate_eigenvalues_from(const LynxContext& /*ctx*/,
-                                             const Wavefunction& /*wfn*/) {
-    // Implementation added in Task 5.
+void ResultWriter::populate_eigenvalues_from(const LynxContext& ctx,
+                                             const Wavefunction& wfn) {
+    int world_rank = 0, world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    const int Nspin_global = ctx.Nspin();
+    const int Nkpts_global = ctx.kpoints().Nkpts();
+    const int Nstates      = wfn.Nband_global();
+    const int Nspin_local  = ctx.Nspin_local();
+    const int Nkpts_local  = ctx.Nkpts_local();
+    const int spin_start   = ctx.spin_start();
+    const int kpt_start    = ctx.kpt_start();
+
+    struct LocalBlock {
+        int spin_global;
+        int kpt_global;
+        std::vector<double> eig;
+        std::vector<double> occ;
+    };
+    std::vector<LocalBlock> local_blocks;
+    for (int si = 0; si < Nspin_local; ++si) {
+        for (int ki = 0; ki < Nkpts_local; ++ki) {
+            LocalBlock b;
+            b.spin_global = spin_start + si;
+            b.kpt_global  = kpt_start  + ki;
+            b.eig.assign(wfn.eigenvalues(si, ki).data(),
+                         wfn.eigenvalues(si, ki).data() + Nstates);
+            b.occ.assign(wfn.occupations(si, ki).data(),
+                         wfn.occupations(si, ki).data() + Nstates);
+            local_blocks.push_back(std::move(b));
+        }
+    }
+
+    eigenvalues_.n_states = Nstates;
+
+    if (world_rank == 0) {
+        // (spin, kpt) -> (eig, occ) on rank 0 only.
+        std::vector<std::vector<double>> eig_global(Nspin_global * Nkpts_global);
+        std::vector<std::vector<double>> occ_global(Nspin_global * Nkpts_global);
+
+        auto store = [&](int sg, int kg,
+                         const std::vector<double>& eig,
+                         const std::vector<double>& occ) {
+            int idx = sg * Nkpts_global + kg;
+            eig_global[idx] = eig;
+            occ_global[idx] = occ;
+        };
+
+        for (const auto& b : local_blocks) store(b.spin_global, b.kpt_global, b.eig, b.occ);
+
+        for (int r = 1; r < world_size; ++r) {
+            int nblocks = 0;
+            MPI_Recv(&nblocks, 1, MPI_INT, r, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            for (int b = 0; b < nblocks; ++b) {
+                int meta[2];
+                MPI_Recv(meta, 2, MPI_INT, r, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                std::vector<double> eig(Nstates), occ(Nstates);
+                MPI_Recv(eig.data(), Nstates, MPI_DOUBLE, r, 2,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                MPI_Recv(occ.data(), Nstates, MPI_DOUBLE, r, 3,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                store(meta[0], meta[1], eig, occ);
+            }
+        }
+
+        const auto& kpt_reduced = ctx.kpoints().kpts_red();
+        const auto& kpt_weights = ctx.kpoints().weights();
+
+        eigenvalues_.per_kpoint.clear();
+        eigenvalues_.per_kpoint.reserve(Nkpts_global);
+        for (int kg = 0; kg < Nkpts_global; ++kg) {
+            KpointEigenEntry entry;
+            entry.kpoint_index = kg + 1;
+            if (kg < static_cast<int>(kpt_reduced.size())) {
+                entry.reduced = { kpt_reduced[kg].x, kpt_reduced[kg].y, kpt_reduced[kg].z };
+            }
+            if (kg < static_cast<int>(kpt_weights.size())) {
+                entry.weight = kpt_weights[kg];
+            }
+            entry.spin_up.eigenvalues = eig_global[0 * Nkpts_global + kg];
+            entry.spin_up.occupations = occ_global[0 * Nkpts_global + kg];
+            if (Nspin_global == 2) {
+                entry.spin_down.eigenvalues = eig_global[1 * Nkpts_global + kg];
+                entry.spin_down.occupations = occ_global[1 * Nkpts_global + kg];
+            }
+            eigenvalues_.per_kpoint.push_back(std::move(entry));
+        }
+    } else {
+        int nblocks = static_cast<int>(local_blocks.size());
+        MPI_Send(&nblocks, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
+        for (const auto& b : local_blocks) {
+            int meta[2] = { b.spin_global, b.kpt_global };
+            MPI_Send(meta, 2, MPI_INT, 0, 1, MPI_COMM_WORLD);
+            MPI_Send(b.eig.data(), Nstates, MPI_DOUBLE, 0, 2, MPI_COMM_WORLD);
+            MPI_Send(b.occ.data(), Nstates, MPI_DOUBLE, 0, 3, MPI_COMM_WORLD);
+        }
+    }
 }
 
 } // namespace lynx
