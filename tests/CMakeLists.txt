@@ -77,6 +77,11 @@ add_test(NAME E2E_PtAu_SOC
 set_tests_properties(E2E_PtAu_SOC PROPERTIES TIMEOUT 1800 LABELS "e2e"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+add_test(NAME E2E_JSONOutput_Smoke
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 1 $<TARGET_FILE:lynx_e2e_tests> --gtest_filter=EndToEnd.JSONOutput_SmokeTest)
+set_tests_properties(E2E_JSONOutput_Smoke PROPERTIES TIMEOUT 600 LABELS "e2e"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # =============================================================================
 # GPU tests
 # =============================================================================

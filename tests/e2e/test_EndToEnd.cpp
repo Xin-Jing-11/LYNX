@@ -677,6 +677,37 @@ TEST(EndToEnd, BaTiO3_SCF) {
 }
 
 // ============================================================
+// Test: JSON output smoke test — verify file is created and parses
+// ============================================================
+TEST(EndToEnd, JSONOutput_SmokeTest) {
+    std::string json_file = "tests/e2e/data/Si8.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank != 0) return;
+
+    std::string path = "test_results/EndToEnd.JSONOutput_SmokeTest.json";
+    std::ifstream f(path);
+    ASSERT_TRUE(f.good()) << "Expected " << path;
+    nlohmann::json j;
+    f >> j;
+
+    for (const char* key : {"lynx_version", "test_name", "input_file",
+                            "timestamp_utc", "device", "mpi_ranks",
+                            "system", "cell", "grid", "electronic",
+                            "kpoints", "scf", "energies_Ha",
+                            "forces_Ha_per_bohr", "stress",
+                            "eigenvalues", "timing_s"}) {
+        EXPECT_TRUE(j.contains(key)) << "Missing key: " << key;
+    }
+    EXPECT_EQ(j["test_name"].get<std::string>(), "EndToEnd.JSONOutput_SmokeTest");
+    EXPECT_EQ(j["scf"]["converged"].get<bool>(), result.converged);
+    EXPECT_GT(j["scf"]["history"].size(), 0u);
+    EXPECT_GT(j["eigenvalues"]["per_kpoint"].size(), 0u);
+}
+
+// ============================================================
 // Test: Full Si8 SCF — non-orthogonal cell with stress
 // Reference: LYNX Si8 test
 //   Etotal = -33.26990391 Ha
