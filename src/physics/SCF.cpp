@@ -14,6 +14,7 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <mpi.h>
 
 namespace lynx {
@@ -240,12 +241,25 @@ double SCF::run(Wavefunction& wfn,
 
     // ===== 2. SCF Iteration Loop =====
     ElectronDensity rho_new;
+    scf_history_.clear();
+    scf_history_.reserve(params_.max_iter);
+    const int Natom_for_pa = (Natom > 0) ? Natom : 1;
     for (int scf_iter = 0; scf_iter < params_.max_iter; ++scf_iter) {
+        auto iter_t0 = std::chrono::steady_clock::now();
         n_iterations_ = scf_iter + 1;
         solve_eigenproblem(wfn, state, scf_iter);
         compute_new_density(wfn, state, rho_new);
         compute_scf_energy(wfn, rho_new, rho_b, Eself, Ec, state);
-        if (check_convergence(wfn, rho_new, state, scf_iter)) break;
+        bool done = check_convergence(wfn, rho_new, state, scf_iter);
+        auto iter_t1 = std::chrono::steady_clock::now();
+        double iter_time_s = std::chrono::duration<double>(iter_t1 - iter_t0).count();
+        scf_history_.push_back({
+            scf_iter + 1,
+            energy_.Etotal / static_cast<double>(Natom_for_pa),
+            state.last_scf_error,
+            iter_time_s,
+        });
+        if (done) break;
         mix_and_update(rho_new, mixer, rho_b, rho_core, Nelectron, state);
     }
 
@@ -549,7 +563,7 @@ void SCF::compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho
 }
 
 bool SCF::check_convergence(const Wavefunction& wfn, const ElectronDensity& rho_new,
-                             const SCFState& state, int scf_iter) {
+                             SCFState& state, int scf_iter) {
     int Nd_d = domain_->Nd_d();
     int Nspin = Nspin_global_;
     int rank_world = 0;
@@ -575,6 +589,7 @@ bool SCF::check_convergence(const Wavefunction& wfn, const ElectronDensity& rho_
         }
         scf_error = (sum_sq_out > 0.0) ? std::sqrt(sum_sq_diff / sum_sq_out) : 0.0;
     }
+    state.last_scf_error = scf_error;
 
     if (rank_world == 0) {
         if (Nspin == 2) {

@@ -64,6 +64,9 @@ struct SCFState {
     DeviceArray<double> Veff_mixed;   // zero-mean Veff for mixer (persistent)
     std::vector<double> Veff_mean; // per-spin Veff mean
     DeviceArray<double> Veff_out;     // Veff from rho_out (potential mixing), shared between energy & convergence
+
+    // Latest SCF error computed by check_convergence (persisted for history).
+    double last_scf_error = 0.0;
 };
 
 /// All fields must be fully resolved before passing to SCF.
@@ -132,6 +135,14 @@ public:
     bool converged() const { return converged_; }
     int n_iterations() const { return n_iterations_; }
 
+    struct IterRecord {
+        int    iter = 0;
+        double free_energy_per_atom_Ha = 0.0;
+        double scf_error = 0.0;
+        double time_s = 0.0;
+    };
+    const std::vector<IterRecord>& scf_history() const { return scf_history_; }
+
     // Access internal potentials (needed for Forces/Stress post-SCF)
     const double* phi() const { return arrays_.phi.data(); }
     const double* Vxc() const { return arrays_.Vxc.data(); }
@@ -178,6 +189,7 @@ private:
     double Ef_ = 0.0;
     bool converged_ = false;
     int n_iterations_ = 0;
+    std::vector<IterRecord> scf_history_;
 
     // Work arrays (owned by VeffArrays)
     VeffArrays arrays_;
@@ -216,7 +228,7 @@ private:
     void compute_scf_energy(const Wavefunction& wfn, const ElectronDensity& rho_new,
                             const double* rho_b, double Eself, double Ec, SCFState& state);
     bool check_convergence(const Wavefunction& wfn, const ElectronDensity& rho_new,
-                           const SCFState& state, int scf_iter);
+                           SCFState& state, int scf_iter);
     void mix_and_update(const ElectronDensity& rho_new, Mixer& mixer,
                         const double* rho_b, const double* rho_core, int Nelectron, SCFState& state);
 
