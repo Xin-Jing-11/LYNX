@@ -20,6 +20,7 @@ add_library(lynx_core
     operators/NonlocalProjector.cpp
     io/InputParser.cpp
     io/OutputWriter.cpp
+    io/ResultWriter.cpp
     io/DensityIO.cpp
     electronic/Wavefunction.cpp
     electronic/ElectronDensity.cpp

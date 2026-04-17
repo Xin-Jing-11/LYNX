@@ -20,6 +20,9 @@ CLAUDE.md
 .worktrees/
 Testing/
 
+# JSON result dumps from e2e tests
+/test_results/
+
 # Jekyll build output
 docs/_site/
 docs/.jekyll-cache/

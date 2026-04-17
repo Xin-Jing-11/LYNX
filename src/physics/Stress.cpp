@@ -18,6 +18,7 @@
 #include <complex>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <mpi.h>
 #include <cassert>
 
@@ -63,6 +64,8 @@ void Stress::compute(
     SCF& scf,
     const AtomSetup& atoms,
     const NonlocalProjector& vnl) {
+
+    auto t0 = std::chrono::steady_clock::now();
 
     // Set device for internal dispatch.
     // SOC stress stays on CPU: the GPU kernel doesn't handle spinor layout.
@@ -114,6 +117,9 @@ void Stress::compute(
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     print(rank);
+
+    auto t1 = std::chrono::steady_clock::now();
+    time_s_ = std::chrono::duration<double>(t1 - t0).count();
 }
 
 // ---------------------------------------------------------------------------

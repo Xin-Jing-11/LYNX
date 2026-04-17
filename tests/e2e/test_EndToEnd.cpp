@@ -8,6 +8,7 @@
 #include <fstream>
 
 #include "io/InputParser.hpp"
+#include "io/ResultWriter.hpp"
 #include "core/LynxContext.hpp"
 #include "core/ParameterDefaults.hpp"
 #include "operators/Hamiltonian.hpp"
@@ -25,7 +26,57 @@
 #include "physics/Electrostatics.hpp"
 #include "atoms/AtomSetup.hpp"
 
+#include <nlohmann/json.hpp>
+
 using namespace lynx;
+
+// ---------------------------------------------------------------
+// Enum → string helpers for JSON dump.
+// ---------------------------------------------------------------
+static const char* xc_to_string(XCType x) {
+    switch (x) {
+        case XCType::LDA_PZ:     return "LDA_PZ";
+        case XCType::LDA_PW:     return "LDA_PW";
+        case XCType::GGA_PBE:    return "PBE";
+        case XCType::GGA_PBEsol: return "PBEsol";
+        case XCType::GGA_RPBE:   return "RPBE";
+        case XCType::MGGA_SCAN:  return "SCAN";
+        case XCType::MGGA_RSCAN: return "RSCAN";
+        case XCType::MGGA_R2SCAN:return "R2SCAN";
+        case XCType::HYB_PBE0:   return "PBE0";
+        case XCType::HYB_HSE:    return "HSE";
+    }
+    return "unknown";
+}
+
+static const char* smearing_to_string(SmearingType s) {
+    switch (s) {
+        case SmearingType::GaussianSmearing: return "gaussian";
+        case SmearingType::FermiDirac:       return "fermi-dirac";
+    }
+    return "unknown";
+}
+
+static const char* spin_to_string(SpinType s) {
+    switch (s) {
+        case SpinType::None:         return "none";
+        case SpinType::Collinear:    return "collinear";
+        case SpinType::NonCollinear: return "noncollinear";
+    }
+    return "unknown";
+}
+
+static const char* bc_to_string(BCType b) {
+    return (b == BCType::Periodic) ? "P" : "D";
+}
+
+static const char* mixing_var_to_string(MixingVariable m) {
+    return (m == MixingVariable::Density) ? "density" : "potential";
+}
+
+static const char* precond_to_string(MixingPrecond p) {
+    return (p == MixingPrecond::Kerker) ? "kerker" : "none";
+}
 
 // ============================================================
 // Helper: run the full single-point DFT pipeline from a JSON config
@@ -251,6 +302,196 @@ static DFTResult run_single_point(const std::string& json_file) {
     result.stress = stress_calc.total_stress();
     result.pressure = stress_calc.pressure();
 
+    // ------------------------------------------------------------------
+    // Dump one self-contained JSON result file per test.
+    // ------------------------------------------------------------------
+    int world_rank = 0, world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    ResultWriter rw;
+    // Collective: must run on every rank.
+    rw.populate_eigenvalues_from(ctx, wfn);
+
+    if (world_rank == 0) {
+        const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+        std::string suite = info ? info->test_suite_name() : "Unknown";
+        std::string name  = info ? info->name()            : "Unknown";
+
+        rw.set_test_name(suite + "." + name);
+        rw.set_input_file(json_file);
+#ifdef USE_CUDA
+        rw.set_device("GPU");
+#else
+        rw.set_device("CPU");
+#endif
+        rw.set_mpi_ranks(world_size);
+        rw.set_lynx_version("dev");
+
+        // --- system ---
+        ResultWriter::SystemInfo sys_info;
+        sys_info.n_atoms     = Natom;
+        sys_info.n_electrons = Nelectron;
+        for (size_t it = 0; it < config.atom_types.size(); ++it) {
+            const auto& at_in = config.atom_types[it];
+            ResultWriter::AtomTypeInfo at_info;
+            at_info.element     = at_in.element;
+            at_info.n_atoms     = static_cast<int>(at_in.coords.size());
+            at_info.pseudo_file = at_in.pseudo_file;
+            if (it < atoms.crystal.types().size()) {
+                at_info.Zval     = atoms.crystal.types()[it].Zval();
+                at_info.mass_amu = atoms.crystal.types()[it].mass();
+            }
+            sys_info.atom_types.push_back(std::move(at_info));
+        }
+        for (const auto& p : all_positions) {
+            sys_info.atoms_cartesian_bohr.push_back({p.x, p.y, p.z});
+            Vec3 f = lattice.cart_to_frac(p);
+            sys_info.atoms_fractional.push_back({f.x, f.y, f.z});
+        }
+        rw.set_system(sys_info);
+
+        // --- cell ---
+        ResultWriter::CellInfo cell_info;
+        const Mat3& L = lattice.latvec();
+        for (int i = 0; i < 3; ++i)
+            cell_info.lattice_vectors_bohr[i] = {L(i, 0), L(i, 1), L(i, 2)};
+        cell_info.volume_bohr3 = std::abs(lattice.jacobian());
+        cell_info.orthogonal   = lattice.is_orthogonal();
+        rw.set_cell(cell_info);
+
+        // --- grid ---
+        ResultWriter::GridInfo gr_info;
+        gr_info.Nx = grid.Nx(); gr_info.Ny = grid.Ny(); gr_info.Nz = grid.Nz();
+        gr_info.dx_bohr = grid.dx(); gr_info.dy_bohr = grid.dy(); gr_info.dz_bohr = grid.dz();
+        gr_info.fd_order = config.fd_order;
+        gr_info.boundary_conditions = {{ bc_to_string(config.bcx),
+                                         bc_to_string(config.bcy),
+                                         bc_to_string(config.bcz) }};
+        rw.set_grid(gr_info);
+
+        // --- electronic ---
+        ResultWriter::ElectronicInfo el_info;
+        el_info.xc        = xc_to_string(config.xc);
+        el_info.spin      = spin_to_string(config.spin_type);
+        el_info.soc       = is_soc;
+        el_info.smearing  = smearing_to_string(config.smearing);
+        el_info.electronic_temperature_K = config.elec_temp;
+        el_info.kBT_Ha    = scf_params.elec_temp;
+        el_info.n_states  = ctx.Nstates();
+        el_info.cheb_degree = scf_params.cheb_degree;
+        rw.set_electronic(el_info);
+
+        // --- kpoints ---
+        ResultWriter::KpointsInfo kp_info;
+        kp_info.grid  = {{ config.Kx, config.Ky, config.Kz }};
+        kp_info.shift = {{ config.kpt_shift.x, config.kpt_shift.y, config.kpt_shift.z }};
+        const auto& kpts_red = ctx.kpoints().kpts_red();
+        const auto& kwts     = ctx.kpoints().weights();
+        int Nk = ctx.kpoints().Nkpts();
+        for (int k = 0; k < Nk; ++k) {
+            ResultWriter::KpointInfo ki;
+            ki.index   = k + 1;
+            if (k < static_cast<int>(kpts_red.size())) {
+                ki.reduced = {{ kpts_red[k].x, kpts_red[k].y, kpts_red[k].z }};
+            }
+            if (k < static_cast<int>(kwts.size())) {
+                ki.weight  = kwts[k];
+            }
+            kp_info.list.push_back(ki);
+        }
+        rw.set_kpoints(kp_info);
+
+        // --- scf ---
+        ResultWriter::ScfInfo sc_info;
+        sc_info.max_iter         = scf_params.max_iter;
+        sc_info.tolerance        = scf_params.tol;
+        sc_info.mixing_variable  = mixing_var_to_string(scf_params.mixing_var);
+        sc_info.preconditioner   = precond_to_string(scf_params.mixing_precond);
+        sc_info.mixing_history   = scf_params.mixing_history;
+        sc_info.mixing_parameter = scf_params.mixing_param;
+        sc_info.converged        = result.converged;
+        sc_info.n_iterations     = scf.n_iterations();
+        for (const auto& r : scf.scf_history()) {
+            sc_info.history.push_back({ r.iter, r.free_energy_per_atom_Ha,
+                                        r.scf_error, r.time_s });
+        }
+        rw.set_scf(sc_info);
+
+        // --- energies_Ha ---
+        ResultWriter::EnergiesInfo en_info;
+        en_info.total_free_energy    = scf.energy().Etotal;
+        en_info.free_energy_per_atom = (Natom > 0) ? scf.energy().Etotal / Natom : 0.0;
+        en_info.band_structure       = scf.energy().Eband;
+        en_info.exchange_correlation = scf.energy().Exc;
+        en_info.hartree              = scf.energy().Ehart;
+        en_info.self_energy          = scf.energy().Eself;
+        en_info.correction_energy    = scf.energy().Ec;
+        en_info.self_plus_correction = scf.energy().Eself + scf.energy().Ec;
+        en_info.entropy_term         = scf.energy().Entropy;
+        en_info.fermi_level          = result.Ef;
+        rw.set_energies(en_info);
+
+        // --- forces_Ha_per_bohr ---
+        ResultWriter::ForcesInfo fr_info;
+        double fmax = 0.0, fsq = 0.0;
+        for (int i = 0; i < Natom; ++i) {
+            std::array<double, 3> v = {
+                result.forces[3*i+0],
+                result.forces[3*i+1],
+                result.forces[3*i+2]
+            };
+            fr_info.per_atom.push_back(v);
+            for (int d = 0; d < 3; ++d) {
+                fmax = std::max(fmax, std::abs(v[d]));
+                fsq += v[d] * v[d];
+            }
+        }
+        fr_info.max_Ha_per_bohr = fmax;
+        fr_info.rms_Ha_per_bohr = (Natom > 0) ? std::sqrt(fsq / (3.0 * Natom)) : 0.0;
+        rw.set_forces(fr_info);
+
+        // --- stress ---
+        constexpr double AU_TO_GPA = 29421.01569650548;
+        ResultWriter::StressInfo st_info;
+        st_info.computed = true;
+        for (int i = 0; i < 6; ++i) {
+            st_info.voigt_Ha_per_bohr3[i] = result.stress[i];
+            st_info.voigt_GPa[i]          = result.stress[i] * AU_TO_GPA;
+        }
+        auto fill_tensor = [](const std::array<double, 6>& v,
+                              std::array<std::array<double, 3>, 3>& t) {
+            t[0] = {{ v[0], v[1], v[2] }};
+            t[1] = {{ v[1], v[3], v[4] }};
+            t[2] = {{ v[2], v[4], v[5] }};
+        };
+        fill_tensor(st_info.voigt_Ha_per_bohr3, st_info.tensor_Ha_per_bohr3);
+        fill_tensor(st_info.voigt_GPa,          st_info.tensor_GPa);
+        st_info.pressure_GPa = result.pressure * AU_TO_GPA;
+        double max_abs = 0.0;
+        for (double v : st_info.voigt_GPa) max_abs = std::max(max_abs, std::abs(v));
+        st_info.max_abs_stress_GPa = max_abs;
+        rw.set_stress(st_info);
+
+        // --- timing_s ---
+        ResultWriter::TimingInfo tm_info;
+        double scf_total = 0.0;
+        for (const auto& r : scf.scf_history()) scf_total += r.time_s;
+        tm_info.scf_total_s      = scf_total;
+        tm_info.force_s          = forces.time_s();
+        tm_info.stress_s         = stress_calc.time_s();
+        tm_info.walltime_total_s = scf_total + forces.time_s() + stress_calc.time_s();
+        rw.set_timing(tm_info);
+
+        auto sanitize = [](std::string s) {
+            for (auto& c : s) if (c == '/' || c == '\\') c = '_';
+            return s;
+        };
+        std::string out_path = "test_results/" + sanitize(suite) + "." + sanitize(name) + ".json";
+        rw.write(out_path);
+        std::printf("Result JSON: %s\n", out_path.c_str());
+    }
+
     return result;
 }
 
@@ -433,6 +674,37 @@ TEST(EndToEnd, BaTiO3_SCF) {
         }
         std::printf("  Max force error: %.6e Ha/Bohr\n", max_force_err);
     }
+}
+
+// ============================================================
+// Test: JSON output smoke test — verify file is created and parses
+// ============================================================
+TEST(EndToEnd, JSONOutput_SmokeTest) {
+    std::string json_file = "tests/e2e/data/Si8.json";
+    auto result = run_single_point(json_file);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank != 0) return;
+
+    std::string path = "test_results/EndToEnd.JSONOutput_SmokeTest.json";
+    std::ifstream f(path);
+    ASSERT_TRUE(f.good()) << "Expected " << path;
+    nlohmann::json j;
+    f >> j;
+
+    for (const char* key : {"lynx_version", "test_name", "input_file",
+                            "timestamp_utc", "device", "mpi_ranks",
+                            "system", "cell", "grid", "electronic",
+                            "kpoints", "scf", "energies_Ha",
+                            "forces_Ha_per_bohr", "stress",
+                            "eigenvalues", "timing_s"}) {
+        EXPECT_TRUE(j.contains(key)) << "Missing key: " << key;
+    }
+    EXPECT_EQ(j["test_name"].get<std::string>(), "EndToEnd.JSONOutput_SmokeTest");
+    EXPECT_EQ(j["scf"]["converged"].get<bool>(), result.converged);
+    EXPECT_GT(j["scf"]["history"].size(), 0u);
+    EXPECT_GT(j["eigenvalues"]["per_kpoint"].size(), 0u);
 }
 
 // ============================================================

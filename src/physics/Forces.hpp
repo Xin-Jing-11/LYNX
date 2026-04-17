@@ -48,6 +48,9 @@ public:
     const std::vector<double>& xc_forces() const { return f_xc_; }
     const std::vector<double>& total_forces() const { return f_total_; }
 
+    // Wall-clock time spent in the most recent compute() call (seconds).
+    double time_s() const { return time_s_; }
+
     // SOC nonlocal force from spin-orbit coupling projectors (public: used by GPUSCF)
     void compute_nonlocal_soc(
         const LynxContext& ctx,
@@ -86,6 +89,7 @@ private:
     std::vector<double> f_soc_;
     std::vector<double> f_xc_;
     std::vector<double> f_total_;
+    double time_s_ = 0.0;
 
     /// Detailed compute (implementation — called by the high-level overload).
     std::vector<double> compute_impl(
