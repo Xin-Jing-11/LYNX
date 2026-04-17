@@ -21,6 +21,7 @@ add_executable(lynx_unit_tests
     unit/test_Stress.cpp
     unit/test_KPoints.cpp
     unit/test_DensityIO.cpp
+    unit/test_ResultWriter.cpp
 )
 target_link_libraries(lynx_unit_tests PRIVATE lynx_core GTest::gtest_main)
 include(GoogleTest)
