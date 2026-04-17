@@ -56,6 +56,9 @@ public:
     const std::array<double, 6>& soc_stress() const { return stress_soc_; }
 
     double soc_energy() const { return energy_soc_; }
+
+    // Wall-clock time spent in the most recent compute() call (seconds).
+    double time_s() const { return time_s_; }
     void set_cell_measure(double cm) { cell_measure_ = cm; }
 
     // Nonlocal+kinetic stress: dispatches to _cpu() or _gpu() based on dev_.
@@ -110,6 +113,7 @@ private:
     std::array<double, 6> stress_total_ = {};
     double cell_measure_ = 0.0;
     double energy_soc_ = 0.0;
+    double time_s_ = 0.0;
 
     /// Detailed compute (implementation -- called by the high-level overload).
     std::array<double, 6> compute_impl(
