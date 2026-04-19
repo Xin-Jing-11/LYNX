@@ -89,6 +89,7 @@ public:
     // ── MPI rank info ──────────────────────────────────────────────
     int rank()  const { return rank_; }
     int nproc() const { return nproc_; }
+    bool is_active() const { return parallel_ && parallel_->is_active(); }
 
 #ifdef USE_CUDA
     // ── GPU context ───────────────────────────────────────────

@@ -39,22 +39,25 @@ int main(int argc, char** argv) {
         auto atoms = lynx::Crystal::setup(config, ctx);
         ctx.set_atom_info(atoms.Natom, atoms.Nelectron);
 
-        // 4. Setup operators (NonlocalProjector, Hamiltonian)
-        auto vnl = lynx::NonlocalProjector::create(ctx, atoms.crystal, atoms.nloc_influence);
-        lynx::Hamiltonian hamiltonian;
-        hamiltonian.setup(ctx.stencil(), ctx.domain(), ctx.grid(), ctx.halo(), &vnl);
+        // Idle ranks (no spin/kpt/band work) skip computation
+        if (ctx.is_active()) {
+            // 4. Setup operators (NonlocalProjector, Hamiltonian)
+            auto vnl = lynx::NonlocalProjector::create(ctx, atoms.crystal, atoms.nloc_influence);
+            lynx::Hamiltonian hamiltonian;
+            hamiltonian.setup(ctx.stencil(), ctx.domain(), ctx.grid(), ctx.halo(), &vnl);
 
-        // 5. Run SCF
-        auto [wfn, scf] = lynx::SCF::run_calculation(config, ctx, atoms.crystal, atoms,
-                                                       hamiltonian, vnl);
+            // 5. Run SCF
+            auto [wfn, scf] = lynx::SCF::run_calculation(config, ctx, atoms.crystal, atoms,
+                                                            hamiltonian, vnl);
 
-        // 6. Forces
-        lynx::Forces forces;
-        forces.compute(ctx, config, wfn, scf, atoms, vnl);
+            // 6. Forces
+            lynx::Forces forces;
+            forces.compute(ctx, config, wfn, scf, atoms, vnl);
 
-        // 7. Stress
-        lynx::Stress stress;
-        stress.compute(ctx, config, wfn, scf, atoms, vnl);
+            // 7. Stress
+            lynx::Stress stress;
+            stress.compute(ctx, config, wfn, scf, atoms, vnl);
+        }
 
         if (rank == 0) std::printf("\nLYNX calculation complete.\n");
 

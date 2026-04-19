@@ -26,6 +26,9 @@ public:
     const MPIComm& spin_bridge() const { return spin_bridge_; }
     const MPIComm& kpt_bridge() const { return kpt_bridge_; }
 
+    // True if this rank participates in computation (has spin, kpt, and band work)
+    bool is_active() const { return spin_index_ >= 0 && kpt_index_ >= 0 && band_index_ >= 0; }
+
     int spin_index() const { return spin_index_; }
     int kpt_index() const { return kpt_index_; }
     int band_index() const { return band_index_; }
