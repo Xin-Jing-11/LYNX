@@ -35,6 +35,7 @@ void compute_kinetic_nonlocal_stress_gpu(
     int nx, int ny, int nz, int FDn, int Nd, int Nband,
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs, double occfac,
+    bool is_orth, const double* h_uvec_inv, const double* h_uvec,
     double* h_stress_k, double* h_stress_nl,
     cudaStream_t stream = 0);
 
@@ -72,6 +73,7 @@ void compute_kinetic_nonlocal_stress_kpt_gpu(
     int xs, int ys, int zs,
     double kxLx, double kyLy, double kzLz,
     double spn_fac_wk,
+    bool is_orth, const double* h_uvec_inv, const double* h_uvec,
     double* h_stress_k, double* h_stress_nl,
     cudaStream_t stream = 0);
 

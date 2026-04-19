@@ -1246,6 +1246,7 @@ void Hamiltonian::compute_nonlocal_force_gpu(
 void Hamiltonian::compute_kinetic_nonlocal_stress_gpu(
     const double* d_psi, const double* h_occ, int Nband,
     double occfac,
+    bool is_orth, const double* h_uvec_inv, const double* h_uvec,
     double* h_stress_k, double* h_stress_nl) const
 {
     auto* gs = gpu_state_.as<GPUHamiltonianState>();
@@ -1271,6 +1272,7 @@ void Hamiltonian::compute_kinetic_nonlocal_stress_gpu(
         gs->dV, gs->dx, gs->dy, gs->dz,
         gs->xs, gs->ys, gs->zs,
         occfac,
+        is_orth, h_uvec_inv, h_uvec,
         h_stress_k, h_stress_nl,
         stream);
 
@@ -1358,6 +1360,7 @@ void Hamiltonian::compute_soc_force_kpt_gpu(
 void Hamiltonian::compute_kinetic_nonlocal_stress_kpt_gpu(
     const void* d_psi_z, const double* h_occ, int Nband,
     double spn_fac_wk,
+    bool is_orth, const double* h_uvec_inv, const double* h_uvec,
     double* h_stress_k, double* h_stress_nl) const
 {
     auto* gs = gpu_state_.as<GPUHamiltonianState>();
@@ -1385,6 +1388,7 @@ void Hamiltonian::compute_kinetic_nonlocal_stress_kpt_gpu(
         gs->xs, gs->ys, gs->zs,
         gs->kxLx, gs->kyLy, gs->kzLz,
         spn_fac_wk,
+        is_orth, h_uvec_inv, h_uvec,
         h_stress_k, h_stress_nl,
         stream);
 

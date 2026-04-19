@@ -28,6 +28,52 @@ namespace gpu {
 // ============================================================
 
 // ------------------------------------------------------------
+// Transform gradient arrays from grid (non-Cartesian) to Cartesian coordinates.
+// In-place: overwrites Dpsi_x, Dpsi_y, Dpsi_z with Cartesian gradients.
+// uvec_inv is row-major [9]: Dpsi_cart[i] = Σ_j uvec_inv[i*3+j] * Dpsi_grid[j]
+// ------------------------------------------------------------
+__global__ void transform_grad_to_cart_kernel(
+    double* __restrict__ Dpsi_x,
+    double* __restrict__ Dpsi_y,
+    double* __restrict__ Dpsi_z,
+    double u00, double u01, double u02,
+    double u10, double u11, double u12,
+    double u20, double u21, double u22,
+    int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    double d0 = Dpsi_x[i], d1 = Dpsi_y[i], d2 = Dpsi_z[i];
+    Dpsi_x[i] = u00*d0 + u01*d1 + u02*d2;
+    Dpsi_y[i] = u10*d0 + u11*d1 + u12*d2;
+    Dpsi_z[i] = u20*d0 + u21*d1 + u22*d2;
+}
+
+// Complex version of the same transformation
+__global__ void transform_grad_to_cart_z_kernel(
+    cuDoubleComplex* __restrict__ Dpsi_x,
+    cuDoubleComplex* __restrict__ Dpsi_y,
+    cuDoubleComplex* __restrict__ Dpsi_z,
+    double u00, double u01, double u02,
+    double u10, double u11, double u12,
+    double u20, double u21, double u22,
+    int N)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= N) return;
+    cuDoubleComplex d0 = Dpsi_x[i], d1 = Dpsi_y[i], d2 = Dpsi_z[i];
+    Dpsi_x[i] = make_cuDoubleComplex(
+        u00*d0.x + u01*d1.x + u02*d2.x,
+        u00*d0.y + u01*d1.y + u02*d2.y);
+    Dpsi_y[i] = make_cuDoubleComplex(
+        u10*d0.x + u11*d1.x + u12*d2.x,
+        u10*d0.y + u11*d1.y + u12*d2.y);
+    Dpsi_z[i] = make_cuDoubleComplex(
+        u20*d0.x + u21*d1.x + u22*d2.x,
+        u20*d0.y + u21*d1.y + u22*d2.y);
+}
+
+// ------------------------------------------------------------
 // Nonlocal force reduction kernel
 // One thread per (atom, dim). Loops over projectors and bands.
 // f_nloc[atom*3+dim] = -spn_fac_wk * sum_n(g_n * sum_jp(Gamma[off+jp] * alpha[..] * beta[..]))
@@ -175,7 +221,8 @@ __global__ void weighted_gather_chitpsi_kernel(
     int nx, int ny, int nz,
     double dx, double dy, double dz,
     int xs, int ys, int zs,
-    int dim2)
+    int dim2,
+    bool is_orth, const double* __restrict__ uvec)
 {
     int iat = blockIdx.x;
     if (iat >= n_atoms) return;
@@ -212,10 +259,20 @@ __global__ void weighted_gather_chitpsi_kernel(
             // Accumulate chi * xR * Dpsi for each projector
             for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
                 int flat = gpos_flat[goff + tile + i];
+                double r1 = (flat % nx + xs) * dx - ap_x;
+                double r2 = ((flat / nx) % ny + ys) * dy - ap_y;
+                double r3 = (flat / (nx * ny) + zs) * dz - ap_z;
+
                 double r;
-                if (dim2 == 0) r = (flat % nx + xs) * dx - ap_x;
-                else if (dim2 == 1) r = ((flat / nx) % ny + ys) * dy - ap_y;
-                else r = (flat / (nx * ny) + zs) * dz - ap_z;
+                if (is_orth) {
+                    r = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
+                } else {
+                    // Transform grid coords to Cartesian: cart_j = Σ_i nc_i * uvec(i,j)
+                    double cx = uvec[0]*r1 + uvec[3]*r2 + uvec[6]*r3;
+                    double cy = uvec[1]*r1 + uvec[4]*r2 + uvec[7]*r3;
+                    double cz = uvec[2]*r1 + uvec[5]*r2 + uvec[8]*r3;
+                    r = (dim2 == 0) ? cx : (dim2 == 1) ? cy : cz;
+                }
 
                 double pv = psi_tile[i] * r;
                 const double* chi_base = Chi_flat + coff + tile + i;
@@ -433,6 +490,7 @@ void compute_kinetic_nonlocal_stress_gpu(
     double dV, double dx, double dy, double dz,
     int xs, int ys, int zs,
     double occfac,
+    bool is_orth, const double* h_uvec_inv, const double* h_uvec,
     double* h_stress_k,
     double* h_stress_nl,
     cudaStream_t stream)
@@ -500,6 +558,25 @@ void compute_kinetic_nonlocal_stress_gpu(
     gradient_v3_gpu(d_x_ex, d_Dpsi_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
     gradient_v3_gpu(d_x_ex, d_Dpsi_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
 
+    // Step 2b: Transform gradients to Cartesian for non-orthogonal cells
+    double* d_uvec = nullptr;
+    if (!is_orth) {
+        size_t N = (size_t)Nd * Nband;
+        int tbs = 256;
+        int tgrid = (int)((N + tbs - 1) / tbs);
+        transform_grad_to_cart_kernel<<<tgrid, tbs, 0, stream>>>(
+            d_Dpsi_x, d_Dpsi_y, d_Dpsi_z,
+            h_uvec_inv[0], h_uvec_inv[1], h_uvec_inv[2],
+            h_uvec_inv[3], h_uvec_inv[4], h_uvec_inv[5],
+            h_uvec_inv[6], h_uvec_inv[7], h_uvec_inv[8],
+            (int)N);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Upload uvec for position transformation in weighted_gather kernel
+        CUDA_CHECK(cudaMallocAsync(&d_uvec, 9 * sizeof(double), stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_uvec, h_uvec, 9 * sizeof(double), cudaMemcpyHostToDevice, stream));
+    }
+
     // Step 3: Kinetic stress (6 Voigt pairs)
     {
         const double* d_Dpsi[3] = { d_Dpsi_x, d_Dpsi_y, d_Dpsi_z };
@@ -556,7 +633,8 @@ void compute_kinetic_nonlocal_stress_gpu(
                     d_atom_pos, d_beta,
                     Nd, Nband, Nband, 0,
                     dV, n_influence,
-                    nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2);
+                    nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2,
+                    is_orth, d_uvec);
                 CUDA_CHECK(cudaGetLastError());
 
                 nonlocal_stress_reduce_kernel<<<1, 1, 0, stream>>>(
@@ -601,6 +679,7 @@ void compute_kinetic_nonlocal_stress_gpu(
     cudaFreeAsync(d_Dpsi_x, stream);
     cudaFreeAsync(d_Dpsi_y, stream);
     cudaFreeAsync(d_Dpsi_z, stream);
+    if (d_uvec) cudaFreeAsync(d_uvec, stream);
 
     ctx.scratch_pool.restore(scratch_cp);
 }
@@ -1199,7 +1278,8 @@ __global__ void weighted_gather_chitpsi_z_kernel(
     int nx, int ny, int nz,
     double dx, double dy, double dz,
     int xs, int ys, int zs,
-    int dim2)
+    int dim2,
+    bool is_orth, const double* __restrict__ uvec)
 {
     int iat = blockIdx.x;
     if (iat >= n_atoms) return;
@@ -1239,10 +1319,19 @@ __global__ void weighted_gather_chitpsi_z_kernel(
 
             for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
                 int flat = gpos_flat[goff + tile + i];
+                double r1 = (flat % nx + xs) * dx - ap_x;
+                double r2 = ((flat / nx) % ny + ys) * dy - ap_y;
+                double r3 = (flat / (nx * ny) + zs) * dz - ap_z;
+
                 double r;
-                if (dim2 == 0) r = (flat % nx + xs) * dx - ap_x;
-                else if (dim2 == 1) r = ((flat / nx) % ny + ys) * dy - ap_y;
-                else r = (flat / (nx * ny) + zs) * dz - ap_z;
+                if (is_orth) {
+                    r = (dim2 == 0) ? r1 : (dim2 == 1) ? r2 : r3;
+                } else {
+                    double cx = uvec[0]*r1 + uvec[3]*r2 + uvec[6]*r3;
+                    double cy = uvec[1]*r1 + uvec[4]*r2 + uvec[7]*r3;
+                    double cz = uvec[2]*r1 + uvec[5]*r2 + uvec[8]*r3;
+                    r = (dim2 == 0) ? cx : (dim2 == 1) ? cy : cz;
+                }
 
                 // pv = r * psi_z (real * complex)
                 cuDoubleComplex pv;
@@ -1489,6 +1578,7 @@ void compute_kinetic_nonlocal_stress_kpt_gpu(
     int xs, int ys, int zs,
     double kxLx, double kyLy, double kzLz,
     double spn_fac_wk,
+    bool is_orth, const double* h_uvec_inv, const double* h_uvec,
     double* h_stress_k,
     double* h_stress_nl,
     cudaStream_t stream)
@@ -1567,6 +1657,24 @@ void compute_kinetic_nonlocal_stress_kpt_gpu(
     gradient_z_gpu(d_x_ex_z, d_Dpsi_z_y, nx, ny, nz, FDn, nx_ex, ny_ex, 1, Nband, stream);
     gradient_z_gpu(d_x_ex_z, d_Dpsi_z_z, nx, ny, nz, FDn, nx_ex, ny_ex, 2, Nband, stream);
 
+    // Step 2b: Transform gradients to Cartesian for non-orthogonal cells
+    double* d_uvec = nullptr;
+    if (!is_orth) {
+        size_t N = (size_t)Nd * Nband;
+        int tbs = 256;
+        int tgrid = (int)((N + tbs - 1) / tbs);
+        transform_grad_to_cart_z_kernel<<<tgrid, tbs, 0, stream>>>(
+            d_Dpsi_z_x, d_Dpsi_z_y, d_Dpsi_z_z,
+            h_uvec_inv[0], h_uvec_inv[1], h_uvec_inv[2],
+            h_uvec_inv[3], h_uvec_inv[4], h_uvec_inv[5],
+            h_uvec_inv[6], h_uvec_inv[7], h_uvec_inv[8],
+            (int)N);
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cudaMallocAsync(&d_uvec, 9 * sizeof(double), stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_uvec, h_uvec, 9 * sizeof(double), cudaMemcpyHostToDevice, stream));
+    }
+
     // Step 3: Kinetic stress (6 Voigt pairs)
     {
         const cuDoubleComplex* d_Dpsi_z_arr[3] = { d_Dpsi_z_x, d_Dpsi_z_y, d_Dpsi_z_z };
@@ -1626,7 +1734,8 @@ void compute_kinetic_nonlocal_stress_kpt_gpu(
                     d_atom_pos, d_bloch_fac, d_beta_z,
                     Nd, Nband, Nband, 0,
                     dV, n_influence,
-                    nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2);
+                    nx, ny, nz, dx, dy, dz, xs, ys, zs, dim2,
+                    is_orth, d_uvec);
                 CUDA_CHECK(cudaGetLastError());
 
                 nonlocal_stress_reduce_z_kernel<<<1, 1, 0, stream>>>(
@@ -1676,6 +1785,7 @@ void compute_kinetic_nonlocal_stress_kpt_gpu(
     cudaFreeAsync(d_x_ex_z, stream);
     if (d_alpha_z) cudaFreeAsync(d_alpha_z, stream);
     if (d_beta_z) cudaFreeAsync(d_beta_z, stream);
+    if (d_uvec) cudaFreeAsync(d_uvec, stream);
 
     ctx.scratch_pool.restore(scratch_cp);
 }

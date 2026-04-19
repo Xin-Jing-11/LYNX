@@ -491,10 +491,6 @@ void Forces::compute_nonlocal(
         if (!spincomm.is_null() && spincomm.size() > 1)
             MPI_Allreduce(MPI_IN_PLACE, f_nloc_.data(), 3 * n_atom, MPI_DOUBLE, MPI_SUM, spincomm.comm());
 
-        int rank_world = 0;
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank_world);
-        if (rank_world == 0)
-            std::printf("GPU nonlocal forces computed: psi stayed on device\n");
         return;
     }
 #endif

@@ -156,6 +156,7 @@ public:
     void compute_kinetic_nonlocal_stress_gpu(
         const double* d_psi, const double* h_occ, int Nband,
         double occfac,
+        bool is_orth, const double* h_uvec_inv, const double* h_uvec,
         double* h_stress_k, double* h_stress_nl) const;
 
     // Complex k-point: nonlocal force + energy
@@ -174,6 +175,7 @@ public:
     void compute_kinetic_nonlocal_stress_kpt_gpu(
         const void* d_psi_z, const double* h_occ, int Nband,
         double spn_fac_wk,
+        bool is_orth, const double* h_uvec_inv, const double* h_uvec,
         double* h_stress_k, double* h_stress_nl) const;
 #endif
 
