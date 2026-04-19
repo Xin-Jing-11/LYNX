@@ -24,11 +24,12 @@ static bool is_mgga_type(XCType t) {
 }
 
 SCF::~SCF() {
-#ifdef USE_CUDA
-    if (dev_ == Device::GPU) {
-        cleanup_gpu();
-    }
-#endif
+    // GPU cleanup is NOT called here.  Each owned component (eigsolver_,
+    // density_, veff_builder_, tau_) cleans up in its own destructor, and
+    // hamiltonian_ is a non-owning pointer whose Hamiltonian cleans up its
+    // own GPU state.  Calling cleanup_gpu() here would double-free when the
+    // SCF is moved (default move copies raw pointers, so the moved-from
+    // destructor would destroy GPU state still needed by the moved-to SCF).
 }
 
 SCFParams SCFParams::from_config(const SystemConfig& config) {

@@ -944,6 +944,19 @@ void Stress::compute_nonlocal_kinetic(
         const KPoints* kpoints = &ctx_->kpoints();
         Vec3 cell_lengths = ctx_->grid().lattice().lengths();
 
+        // Non-orthogonal transformation matrices for GPU kernels
+        bool is_orth = ctx_->grid().lattice().is_orthogonal();
+        double h_uvec_inv[9] = {}, h_uvec[9] = {};
+        if (!is_orth) {
+            const auto& ui = ctx_->grid().lattice().lat_uvec_inv();
+            const auto& uv = ctx_->grid().lattice().lat_uvec();
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) {
+                    h_uvec_inv[i * 3 + j] = ui(i, j);
+                    h_uvec[i * 3 + j] = uv(i, j);
+                }
+        }
+
         for (int s = 0; s < Nspin_local; ++s) {
             for (int k = 0; k < Nkpts; ++k) {
                 double wk = kpt_weights[kpt_start + k];
@@ -960,11 +973,13 @@ void Stress::compute_nonlocal_kinetic(
                     hamiltonian_->compute_kinetic_nonlocal_stress_kpt_gpu(
                         eigsolver_->device_psi_z(s, k), h_occ, Nband,
                         spn_fac_wk,
+                        is_orth, h_uvec_inv, h_uvec,
                         h_sk_tmp.data(), h_snl_tmp.data());
                 } else {
                     hamiltonian_->compute_kinetic_nonlocal_stress_gpu(
                         eigsolver_->device_psi_real(s, k), h_occ, Nband,
                         occfac,
+                        is_orth, h_uvec_inv, h_uvec,
                         h_sk_tmp.data(), h_snl_tmp.data());
                 }
 
@@ -989,6 +1004,12 @@ void Stress::compute_nonlocal_kinetic(
         if (!spincomm.is_null() && spincomm.size() > 1) {
             MPI_Allreduce(MPI_IN_PLACE, stress_k_.data(), 6, MPI_DOUBLE, MPI_SUM, spincomm.comm());
             MPI_Allreduce(MPI_IN_PLACE, stress_nl_.data(), 6, MPI_DOUBLE, MPI_SUM, spincomm.comm());
+        }
+
+        // Normalize by cell_measure (same as CPU path at end of compute_nonlocal_kinetic_cpu)
+        for (int i = 0; i < 6; ++i) {
+            stress_k_[i] /= cell_measure_;
+            stress_nl_[i] /= cell_measure_;
         }
 
         int rank_world = 0;
